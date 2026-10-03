@@ -1,0 +1,6 @@
+{
+  "name": "Scholario Ops Control Center",
+  "description": "Production-Grade IT Operations Control Center for Scholario applications, VPS infrastructure, PRD/DR resilience, Cloudflare, monitors, and incident management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
