@@ -17,6 +17,7 @@ import { MaintenanceView } from './components/operations/MaintenanceView';
 import { CommunicationsView } from './components/communications/CommunicationsView';
 import { ReportsView } from './components/analytics/ReportsView';
 import { AuditLogsView } from './components/admin/AuditLogsView';
+import { ProjectOverviewView } from './components/overview/ProjectOverviewView';
 
 const MainContent: React.FC = () => {
   const { activeTab } = useOps();
@@ -24,6 +25,9 @@ const MainContent: React.FC = () => {
   switch (activeTab) {
     case 'overview':
       return <OverviewView />;
+    case 'project-overview':
+    case 'docs':
+      return <ProjectOverviewView />;
     case 'applications':
       return <ApplicationsView />;
     case 'infrastructure':

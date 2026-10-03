@@ -28,7 +28,8 @@ import {
   Shield,
   Cpu,
   Compass,
-  CornerDownLeft
+  CornerDownLeft,
+  BookOpen
 } from 'lucide-react';
 
 export type PaletteCategory = 
@@ -331,6 +332,15 @@ export const CommandPalette: React.FC = () => {
         badge: 'SECURITY',
         icon: Shield,
         keywords: 'audit logs operator security who did what history compliance forensics'
+      },
+      {
+        id: 'route-project-overview',
+        tab: 'project-overview',
+        title: 'Project Overview & Architecture Manual',
+        subtitle: 'Production specification, Inter font hierarchy, dual enterprise themes, and 14 view documentation',
+        badge: 'MANUAL',
+        icon: BookOpen,
+        keywords: 'project overview manual documentation architecture tech stack inter typography'
       }
     ];
 

@@ -28,7 +28,8 @@ import {
   ArrowRight,
   Shield,
   Sun,
-  Moon
+  Moon,
+  BookOpen
 } from 'lucide-react';
 import { CommandPalette } from './CommandPalette';
 
@@ -134,7 +135,8 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       items: [
         { id: 'uptime', label: 'Uptime SLA', icon: Activity },
         { id: 'reports', label: 'Daily Ops Report', icon: FileText },
-        { id: 'audit', label: 'Audit Logs', icon: Shield }
+        { id: 'audit', label: 'Audit Logs', icon: Shield },
+        { id: 'project-overview', label: 'Project Overview', icon: BookOpen }
       ]
     }
   ];

@@ -424,7 +424,7 @@ export const OverviewView: React.FC = () => {
             color="rose"
           />
           <TelemetryAreaGraph
-            title="System Memory"
+            title="ECC Memory RAM Mesh"
             subtitle="16 Nodes Aggregated"
             data={ramData}
             unit="%"
@@ -432,15 +432,15 @@ export const OverviewView: React.FC = () => {
             color="amber"
           />
           <TelemetryAreaGraph
-            title="Network Throughput"
-            subtitle="Outbound Anycast"
+            title="Anycast Outbound Throughput"
+            subtitle="Global Edge Outbound"
             data={networkData}
             unit=" Mbps"
             color="blue"
           />
           <TelemetryAreaGraph
-            title="P95 Monitor Latency"
-            subtitle="Global Probes"
+            title="P95 Probe Latency"
+            subtitle="Global Probe Mesh"
             data={latencyData}
             unit=" ms"
             warningThreshold={150}

@@ -32,8 +32,11 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
     auditLogs, 
     triggerFailover, 
     setSelectedIncidentId,
-    setActiveTab
+    setActiveTab,
+    theme
   } = useOps();
+
+  const isDark = theme === 'dark';
 
   const [activeTab, setActiveTabLocal] = useState<'overview' | 'health' | 'monitors' | 'infra' | 'deps' | 'dr' | 'backups' | 'incidents' | 'deployments' | 'history'>('overview');
   const [confirmFailover, setConfirmFailover] = useState(false);
@@ -54,33 +57,37 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 overflow-y-auto animate-in fade-in">
       <div 
-        className="w-full max-w-4xl bg-[#101624] text-slate-100 rounded border border-[#223048] overflow-hidden flex flex-col max-h-[90vh] shadow-2xl"
+        className={`w-full max-w-4xl rounded border overflow-hidden flex flex-col max-h-[90vh] shadow-2xl ${
+          isDark ? 'bg-[#101624] text-slate-100 border-[#223048]' : 'bg-white text-slate-900 border-slate-300'
+        }`}
         onClick={e => e.stopPropagation()}
       >
         {/* Modal Header */}
-        <div className="p-4 px-6 border-b border-[#1E293B] bg-[#0A0F1A] flex items-center justify-between">
+        <div className={`p-4 px-6 border-b flex items-center justify-between ${
+          isDark ? 'border-[#1E293B] bg-[#0A0F1A]' : 'border-slate-200 bg-slate-50'
+        }`}>
           <div className="flex items-center gap-3">
             <span className={`w-2 h-2 rounded-full ${application.status === 'HEALTHY' ? 'bg-emerald-500' : 'bg-rose-500 animate-pulse'}`} />
             <div>
               <div className="flex items-center gap-2 font-mono">
-                <h2 className="text-base font-bold text-slate-100 font-sans">{application.name}</h2>
-                <span className="text-xs text-slate-400">· {application.tier.replace('_', ' ')}</span>
-                <span className="text-slate-600">·</span>
-                <span className={`text-xs font-semibold ${application.status === 'HEALTHY' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                <h2 className={`text-base font-bold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.name}</h2>
+                <span className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>· {application.tier.replace('_', ' ')}</span>
+                <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
+                <span className={`text-xs font-semibold ${application.status === 'HEALTHY' ? 'text-emerald-500' : 'text-rose-500'}`}>
                   {application.status}
                 </span>
               </div>
-              <p className="text-xs text-slate-400 font-sans mt-0.5">{application.description}</p>
+              <p className={`text-xs font-sans mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{application.description}</p>
             </div>
           </div>
 
           <div className="flex items-center gap-3">
-            <span className="text-[11px] font-mono text-slate-400">
+            <span className={`text-[11px] font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
               Checked {new Date(application.lastChecked).toLocaleTimeString()}
             </span>
             <button
               onClick={onClose}
-              className="p-1 text-slate-400 hover:text-slate-200 transition-colors"
+              className={`p-1 transition-colors cursor-pointer ${isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800'}`}
             >
               <X className="w-5 h-5" />
             </button>
@@ -88,7 +95,9 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex items-center gap-1 px-6 border-b border-[#1E293B] bg-[#0C121E] overflow-x-auto text-xs font-mono">
+        <div className={`flex items-center gap-1 px-6 border-b overflow-x-auto text-xs font-mono ${
+          isDark ? 'border-[#1E293B] bg-[#0C121E]' : 'border-slate-200 bg-slate-100'
+        }`}>
           {[
             { id: 'overview', label: 'Overview' },
             { id: 'health', label: 'Health & Metrics' },
@@ -104,10 +113,10 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
             <button
               key={tab.id}
               onClick={() => setActiveTabLocal(tab.id as any)}
-              className={`py-2 px-2.5 font-medium whitespace-nowrap border-b-2 transition-colors ${
+              className={`py-2 px-2.5 font-medium whitespace-nowrap border-b-2 transition-colors cursor-pointer ${
                 activeTab === tab.id
-                  ? 'border-blue-500 text-blue-400'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
+                  ? 'border-blue-500 text-blue-500 font-semibold'
+                  : isDark ? 'border-transparent text-slate-400 hover:text-slate-200' : 'border-transparent text-slate-600 hover:text-slate-900'
               }`}
             >
               {tab.label}

@@ -25,8 +25,11 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
     resolveIncident,
     runbooks,
     setSelectedRunbookId,
-    setActiveTab
+    setActiveTab,
+    theme
   } = useOps();
+
+  const isDark = theme === 'dark';
 
   const [activeTab, setActiveTabLocal] = useState<'summary' | 'timeline' | 'signals' | 'correlation' | 'communications' | 'runbook' | 'notes'>('summary');
   const [noteText, setNoteText] = useState('');
@@ -50,35 +53,39 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 overflow-y-auto animate-in fade-in">
       <div 
-        className="w-full max-w-4xl bg-[#101624] text-slate-100 rounded border border-[#223048] overflow-hidden flex flex-col max-h-[92vh] shadow-2xl"
+        className={`w-full max-w-4xl rounded border overflow-hidden flex flex-col max-h-[92vh] shadow-2xl ${
+          isDark ? 'bg-[#101624] text-slate-100 border-[#223048]' : 'bg-white text-slate-900 border-slate-300'
+        }`}
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="p-4 px-6 border-b border-[#1E293B] bg-[#0A0F1A] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className={`p-4 px-6 border-b flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+          isDark ? 'border-[#1E293B] bg-[#0A0F1A]' : 'border-slate-200 bg-slate-50'
+        }`}>
           <div className="space-y-1">
             <div className="flex items-center gap-2 font-mono">
-              <span className="text-sm font-bold text-slate-100">
+              <span className={`text-sm font-bold ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
                 {incident.id}
               </span>
-              <span className="text-slate-600">·</span>
+              <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
               <span className={`text-xs font-bold uppercase ${
-                incident.severity === 'CRITICAL' ? 'text-rose-400' : 'text-amber-400'
+                incident.severity === 'CRITICAL' ? 'text-rose-500' : 'text-amber-500'
               }`}>
                 {incident.severity}
               </span>
-              <span className="text-slate-600">·</span>
-              <span className="text-xs text-slate-400 font-semibold">
+              <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
+              <span className={`text-xs font-semibold ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                 {incident.status}
               </span>
             </div>
-            <h2 className="text-base font-bold text-slate-100 font-sans">{incident.title}</h2>
+            <h2 className={`text-base font-bold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{incident.title}</h2>
           </div>
 
           <div className="flex items-center gap-2 font-mono">
             {!incident.acknowledged && (
               <button
                 onClick={() => acknowledgeIncident(incident.id)}
-                className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-semibold transition-colors"
+                className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-semibold transition-colors cursor-pointer"
               >
                 ACKNOWLEDGE
               </button>
@@ -86,30 +93,34 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
             {incident.status !== 'RESOLVED' && (
               <button
                 onClick={() => setShowResolveBox(true)}
-                className="px-3 py-1 bg-emerald-700 hover:bg-emerald-600 text-white rounded text-xs font-semibold transition-colors"
+                className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-semibold transition-colors cursor-pointer"
               >
                 RESOLVE
               </button>
             )}
-            <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-200">
+            <button onClick={onClose} className={`p-1 cursor-pointer ${isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800'}`}>
               <X className="w-5 h-5" />
             </button>
           </div>
         </div>
 
         {/* Quick Meta Strip */}
-        <div className="px-6 py-2 bg-[#0C121E] border-b border-[#1E293B] flex flex-wrap items-center justify-between text-xs text-slate-400 font-mono gap-2">
+        <div className={`px-6 py-2 border-b flex flex-wrap items-center justify-between text-xs font-mono gap-2 ${
+          isDark ? 'bg-[#0C121E] border-[#1E293B] text-slate-400' : 'bg-slate-100 border-slate-200 text-slate-600'
+        }`}>
           <div className="flex items-center gap-4">
-            <span>Started: <strong className="text-slate-200">{new Date(incident.startedAt).toLocaleTimeString()}</strong></span>
-            <span>Duration: <strong className="text-rose-400 tabular-nums">{incident.durationMinutes} min</strong></span>
-            <span>Owner: <strong className="text-slate-200">{incident.owner}</strong></span>
+            <span>Started: <strong className={isDark ? 'text-slate-200' : 'text-slate-800'}>{new Date(incident.startedAt).toLocaleTimeString()}</strong></span>
+            <span>Duration: <strong className="text-rose-500 tabular-nums">{incident.durationMinutes} min</strong></span>
+            <span>Owner: <strong className={isDark ? 'text-slate-200' : 'text-slate-800'}>{incident.owner}</strong></span>
           </div>
           <div className="flex items-center gap-2">
             <span>Status:</span>
             <select
               value={incident.status}
               onChange={e => changeIncidentStatus(incident.id, e.target.value as IncidentStatus)}
-              className="bg-[#0A0F1A] border border-[#1E293B] rounded px-1.5 py-0.5 text-xs text-slate-200 font-mono focus:outline-none"
+              className={`border rounded px-1.5 py-0.5 text-xs font-mono focus:outline-none cursor-pointer ${
+                isDark ? 'bg-[#0A0F1A] border-[#1E293B] text-slate-200' : 'bg-white border-slate-300 text-slate-800'
+              }`}
             >
               <option value="OPEN">OPEN</option>
               <option value="ACKNOWLEDGED">ACKNOWLEDGED</option>
@@ -123,12 +134,14 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
 
         {/* Resolve Box */}
         {showResolveBox && (
-          <div className="p-4 bg-[#0E1A14] border-b border-emerald-900/80 space-y-2 text-xs font-mono">
-            <div className="font-bold text-emerald-300 flex items-center gap-1.5">
-              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+          <div className={`p-4 border-b space-y-2 text-xs font-mono ${
+            isDark ? 'bg-[#0E1A14] border-emerald-900/80' : 'bg-emerald-50 border-emerald-200'
+          }`}>
+            <div className="font-bold text-emerald-600 dark:text-emerald-300 flex items-center gap-1.5">
+              <CheckCircle2 className="w-4 h-4 text-emerald-500" />
               <span>Sign Off &amp; Confirm Incident Resolution</span>
             </div>
-            <p className="text-[11px] text-slate-300 font-sans">
+            <p className={`text-[11px] font-sans ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
               Verify root cause mitigation and ensure 3 consecutive monitor passes have passed.
             </p>
             <input
@@ -136,18 +149,22 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
               placeholder="Resolution summary (e.g. Killed rogue report query PID 2841, 3/3 health checks verified)..."
               value={resolutionText}
               onChange={e => setResolutionText(e.target.value)}
-              className="w-full p-2 bg-[#08100C] border border-emerald-800 rounded text-xs text-slate-100 focus:outline-none"
+              className={`w-full p-2 border rounded text-xs focus:outline-none ${
+                isDark ? 'bg-[#08100C] border-emerald-800 text-slate-100' : 'bg-white border-emerald-300 text-slate-900'
+              }`}
             />
             <div className="flex items-center gap-2 pt-1 font-sans">
               <button
                 onClick={handleResolve}
-                className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-semibold transition-colors"
+                className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-semibold transition-colors cursor-pointer"
               >
                 Sign Off &amp; Close Incident
               </button>
               <button
                 onClick={() => setShowResolveBox(false)}
-                className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold transition-colors"
+                className={`px-3 py-1 rounded font-semibold transition-colors cursor-pointer ${
+                  isDark ? 'bg-slate-800 hover:bg-slate-700 text-slate-300' : 'bg-slate-200 hover:bg-slate-300 text-slate-700'
+                }`}
               >
                 Cancel
               </button>
@@ -156,7 +173,9 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
         )}
 
         {/* Tabs */}
-        <div className="flex items-center gap-1 px-6 border-b border-[#1E293B] bg-[#0C121E] text-xs font-mono overflow-x-auto">
+        <div className={`flex items-center gap-1 px-6 border-b text-xs font-mono overflow-x-auto ${
+          isDark ? 'border-[#1E293B] bg-[#0C121E]' : 'border-slate-200 bg-slate-100'
+        }`}>
           {[
             { id: 'summary', label: 'Summary' },
             { id: 'timeline', label: `Timeline (${incident.timeline.length})` },
@@ -169,10 +188,10 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
             <button
               key={tab.id}
               onClick={() => setActiveTabLocal(tab.id as any)}
-              className={`py-2 px-2.5 font-medium whitespace-nowrap border-b-2 transition-colors ${
+              className={`py-2 px-2.5 font-medium whitespace-nowrap border-b-2 transition-colors cursor-pointer ${
                 activeTab === tab.id
-                  ? 'border-blue-500 text-blue-400'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
+                  ? 'border-blue-500 text-blue-500 font-semibold'
+                  : isDark ? 'border-transparent text-slate-400 hover:text-slate-200' : 'border-transparent text-slate-600 hover:text-slate-900'
               }`}
             >
               {tab.label}

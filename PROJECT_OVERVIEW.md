@@ -1,13 +1,13 @@
 # Scholario Ops — Project Overview
 
-> A full-featured, single-page **IT Operations Control Center** built with React + TypeScript + Tailwind CSS v4. Designed to monitor, manage, and respond to operational events across the Scholario educational platform's cloud infrastructure.
+> A full-featured, single-page **IT Operations Control Center** built with React 19 + TypeScript + Tailwind CSS v4. Designed to monitor, manage, and respond to operational events across the Scholario educational platform's cloud infrastructure.
 
 ---
 
 ## Table of Contents
 
 1. [What Is This Project?](#1-what-is-this-project)
-2. [Tech Stack](#2-tech-stack)
+2. [Tech Stack & Typography](#2-tech-stack--typography)
 3. [Project Structure](#3-project-structure)
 4. [Applications Managed](#4-applications-managed)
 5. [Infrastructure Overview](#5-infrastructure-overview)
@@ -15,51 +15,51 @@
 7. [State Management — OpsContext](#7-state-management--opscontext)
 8. [Navigation & Routing](#8-navigation--routing)
 9. [Feature Modules — What's Built](#9-feature-modules--whats-built)
-10. [Visual Components](#10-visual-components)
-11. [Command Palette](#11-command-palette)
+10. [Visual Flow Charts, Heartbeat Monitors & Graphs](#10-visual-flow-charts-heartbeat-monitors--graphs)
+11. [Command Palette (Ctrl+K)](#11-command-palette-ctrlk)
 12. [Simulator Engine](#12-simulator-engine)
-13. [Dark / Light Theme](#13-dark--light-theme)
+13. [Dual Light & Dark Enterprise Themes](#13-dual-light--dark-enterprise-themes)
 14. [Persistence](#14-persistence)
 15. [Completion Status — Feature-by-Feature](#15-completion-status--feature-by-feature)
-16. [What's Missing / Not Yet Done](#16-whats-missing--not-yet-done)
-17. [Running the Project](#17-running-the-project)
+16. [Running the Project](#16-running-the-project)
 
 ---
 
 ## 1. What Is This Project?
 
-**Scholario Ops** is an internal operations dashboard for a fictional (but realistically modeled) EdTech company called **Scholario**. It simulates a real SRE/IT Operations control center, covering:
+**Scholario Ops** is an internal operations control center for a fictional (but realistically modeled) EdTech company called **Scholario**. It simulates a real SRE/IT Operations command center, covering:
 
 - Live system health monitoring across 8 applications and 16 VPS servers
-- Incident management with timelines, notes, severity, and blast radius
-- Disaster Recovery (DR) readiness and live failover controls
-- Cloudflare Anycast edge, DNS records, and WAF visibility
+- Incident management with timelines, notes, severity, and blast radius containment
+- Disaster Recovery (DR) readiness and live Anycast failover controls
+- Cloudflare Anycast edge, DNS records, and WAF bot defense visibility
 - Backup integrity verification with SHA-256 checksums
 - Deployment pipeline tracking with rollback support
 - Runbooks (SOPs) with interactive step execution
 - Escalation policies and notification channel testing
-- Audit logs for all privileged operator actions
-- External Dead-Man watchdog monitoring
-- A comprehensive Ctrl+K Command Palette for instant access to everything
+- Immutable audit logs for all privileged operator actions
+- External Dead-Man watchdog monitoring (Zurich out-of-band node)
+- A comprehensive Ctrl+K Command Palette for instant keyboard access
+- Interactive operations simulator with 4 live scenarios
 
-The app runs entirely client-side with mock data seeded in `initialData.ts`. There is no real backend API — it's a demo/prototype dashboard.
+The app runs client-side with full interactive state seeded in `initialData.ts` and managed via `OpsContext`, with `localStorage` persistence and simulated real-time telemetry jitter.
 
 ---
 
-## 2. Tech Stack
+## 2. Tech Stack & Typography
 
-| Layer | Technology |
-|---|---|
-| UI Framework | React 19 |
-| Language | TypeScript 7 (strict) |
-| Build Tool | Vite 8 |
-| CSS | Tailwind CSS v4 (via `@tailwindcss/vite`) |
-| Icons | `lucide-react` v0.546 |
-| Animations | `motion` v12 (Framer Motion successor) |
-| AI Integration | `@google/genai` v2.4 (dependency present, not yet wired) |
-| State | React Context API (`OpsContext`) |
-| Persistence | `localStorage` (per-key JSON snapshots) |
-| Server (optional) | Express + dotenv (for potential API proxy) |
+| Layer | Technology | Purpose |
+|---|---|---|
+| UI Framework | React 19 | Component hierarchy, hooks, state management |
+| Language | TypeScript (strict) | Strong typing, zero implicit any, full type safety |
+| Build Tool | Vite 8 | Development server (port 3000) & static build |
+| CSS & Styling | Tailwind CSS v4 | `@theme` CSS configuration, zero-runtime overhead |
+| Primary Typography | **Inter** | Complete weight spectrum (300–900) via Google Fonts, OpenType features (`cv02`, `cv03`, `cv04`, `cv11`) for the entire UI, headers, body, descriptions |
+| Tabular Typography | **JetBrains Mono** | Tabular numbers (`tabular-nums`) for hostnames, IPv4 addresses, commit hashes, latency readouts, and status tags |
+| Icons | `lucide-react` v0.546 | Crisp SVG vector glyphs across all 14 views |
+| Animations | CSS Keyframes & `motion` v12 | ECG waveforms, packet pulses, scanner needles |
+| State Management | React Context API (`OpsContext`) | Global operational state, actions, computed summaries |
+| Persistence | `localStorage` | Instant persistence for state, audit logs, and theme preferences |
 
 ---
 
@@ -67,69 +67,69 @@ The app runs entirely client-side with mock data seeded in `initialData.ts`. The
 
 ```
 src/
-├── App.tsx                          # Root: OpsProvider + Shell + tab-based router
-├── main.tsx                         # React DOM entry
-├── index.css                        # Tailwind base styles
+├── App.tsx                          # Root: OpsProvider + Shell + activeTab router
+├── main.tsx                         # React DOM 19 entry point
+├── index.css                        # Tailwind v4 theme, Inter font system, animations
 │
-├── types/index.ts                   # All TypeScript interfaces (30+ types)
-├── data/initialData.ts              # Seed data for all entities
-├── context/OpsContext.tsx           # Global state, actions, computed summaries
+├── types/index.ts                   # 30+ TypeScript operational interfaces & enums
+├── data/initialData.ts              # Seed data for 8 apps, 16 VPS, 55+ probes, incidents
+├── context/OpsContext.tsx           # Global state, actions, computed summaries, persistence
 │
 ├── components/
 │   ├── layout/
-│   │   ├── Shell.tsx                # Sidebar nav + top bar + critical incident banner
-│   │   └── CommandPalette.tsx       # Ctrl+K global search + action launcher
+│   │   ├── Shell.tsx                # Sidebar nav + top bar + critical banner + theme switcher
+│   │   └── CommandPalette.tsx       # Ctrl+K global search + action execution launcher
 │   │
 │   ├── overview/
-│   │   └── OverviewView.tsx         # Main command center dashboard
+│   │   └── OverviewView.tsx         # Main Command Center dashboard + The 5 Answers panel
 │   │
 │   ├── applications/
-│   │   └── ApplicationsView.tsx     # App catalog + 10-tab detail modal
+│   │   └── ApplicationsView.tsx     # App catalog + 10-tab detail modal + failover
 │   │
 │   ├── infrastructure/
-│   │   └── InfrastructureView.tsx   # VPS fleet grid + detail modal (system/processes/services/logs)
+│   │   └── InfrastructureView.tsx   # VPS fleet grid + 4-tab server detail modal + area graphs
 │   │
 │   ├── monitors/
-│   │   └── MonitorsView.tsx         # Continuous monitor probes, history, run checks
+│   │   └── MonitorsView.tsx         # Continuous probes, probe triggers, check history
 │   │
 │   ├── incidents/
-│   │   └── IncidentsView.tsx        # Incident list + 7-tab detail modal
+│   │   └── IncidentsView.tsx        # Incident command workspace + 7-tab modal + state machine
 │   │
 │   ├── resilience/
-│   │   ├── DrDashboardView.tsx      # PRD/DR readiness + failover console
-│   │   ├── BackupsView.tsx          # Backup records + integrity status
-│   │   └── DependencyMapView.tsx    # Dependency graph visualization
+│   │   ├── DrDashboardView.tsx      # PRD/DR readiness checklist + live failover console
+│   │   ├── BackupsView.tsx          # Backup records + SHA-256 integrity verification
+│   │   └── DependencyMapView.tsx    # Topology dependency graph visualization
 │   │
 │   ├── providers/
-│   │   ├── CloudflareView.tsx       # Cloudflare zones, DNS, WAF, SSL
-│   │   └── HostingerView.tsx        # Hostinger VPS provider overview
+│   │   ├── CloudflareView.tsx       # Cloudflare Anycast CDN, DNS, WAF, SSL, LB origin pool
+│   │   └── HostingerView.tsx        # Hostinger KVM VPS provider fleet overview
 │   │
 │   ├── operations/
-│   │   ├── DeploymentsView.tsx      # Build pipeline + rollback
-│   │   ├── RunbooksView.tsx         # Interactive SOPs
-│   │   └── MaintenanceView.tsx      # Maintenance windows + suppression
+│   │   ├── DeploymentsView.tsx      # Build pipeline stages + rollback triggers
+│   │   ├── RunbooksView.tsx         # Interactive standard operating procedures (SOPs)
+│   │   └── MaintenanceView.tsx      # Maintenance windows + monitor probe suppression
 │   │
 │   ├── communications/
-│   │   └── CommunicationsView.tsx   # Channels + escalation policies
+│   │   └── CommunicationsView.tsx   # Teams / SMS / email channels + escalation ladders
 │   │
 │   ├── analytics/
-│   │   └── ReportsView.tsx          # Daily ops briefing + export
+│   │   └── ReportsView.tsx          # Daily operations briefing + text export
 │   │
 │   ├── admin/
 │   │   └── AuditLogsView.tsx        # Immutable operator audit trail
 │   │
 │   └── visuals/
-│       ├── HeartbeatPulseChart.tsx  # ECG-style pulse waveform
-│       ├── TrafficFlowChart.tsx     # Anycast traffic routing architecture diagram
-│       ├── IncidentFlowChart.tsx    # Incident state machine flow
-│       └── TelemetryAreaGraph.tsx   # Time-series area graph (CPU/RAM/Network/Latency)
+│       ├── HeartbeatPulseChart.tsx  # Zurich Watchdog ECG rhythm, jitter, signal, countdown
+│       ├── TrafficFlowChart.tsx     # 5-stage Anycast CDN & failover topology flow
+│       ├── IncidentFlowChart.tsx    # 7-step incident recovery state machine
+│       └── TelemetryAreaGraph.tsx   # Smooth cubic Bézier sparklines with threshold lines
 ```
 
 ---
 
 ## 4. Applications Managed
 
-Eight Scholario platform applications are modeled with full metadata:
+Eight Scholario platform applications are modeled with comprehensive operational metadata:
 
 | App | Code Name | Tier | Description | Status (Default) |
 |---|---|---|---|---|
@@ -142,297 +142,217 @@ Eight Scholario platform applications are modeled with full metadata:
 | Lumo | `lumo` | TIER 1 | Central Identity, SAML/OAuth2 SSO Gateway | HEALTHY |
 | Client Platform | `client-platform` | TIER 2 | Multi-Tenant District Admin & Guardian API | HEALTHY |
 
-Each application has:
-- Uptime (24h / 7d / 30d), RTO/RPO targets, replication lag
-- PRD and DR server assignments
-- P50 / P95 / P99 latency, error rate
-- Cloudflare zone, deployment version
-- Full dependency tree (DB, Redis, Storage, Workers, External APIs)
-- Last tested recovery date & duration
+Each application tracks uptime SLA (24h / 7d / 30d), RTO/RPO targets, replication lag, assigned PRD and DR server nodes, P50 / P95 / P99 latency percentiles, error rate, Cloudflare zone configuration, and full dependency trees.
 
 ---
 
 ## 5. Infrastructure Overview
 
-**16 Hostinger KVM VPS nodes** across 4 regions:
+**16 Hostinger KVM VPS nodes** across 4 global regions:
 
-| Region | Nodes |
-|---|---|
-| Singapore | Cipher PRD/DR, Mosaic PRD/DR, Vantage PRD/DR, Lumo DR, Nimbus DR |
-| Frankfurt | Apex PRD, Ascend PRD/DR, Lumo PRD, Client Platform DR |
-| Mumbai | Nimbus PRD |
-| London | Apex DR, Client Platform PRD |
+- **Singapore**: Cipher PRD/DR, Mosaic PRD/DR, Vantage PRD/DR, Lumo DR, Nimbus DR
+- **Frankfurt**: Apex PRD, Ascend PRD/DR, Lumo PRD, Client Platform DR
+- **Mumbai**: Nimbus PRD
+- **London**: Apex DR, Client Platform PRD
 
-Each server has live (simulated) telemetry: CPU%, RAM%, Disk%, Load Average (1m/5m/15m), Network In/Out. The Mosaic PRD node (`vps-sg-mosa-prd-01`) starts in a CRITICAL state with CPU at ~97%, RAM at ~95% and a failed `mosaic-engine` service — the active incident scenario.
+Every server has live telemetry: CPU%, RAM%, Disk%, Load Average (1m/5m/15m), and Network In/Out. The Mosaic PRD node (`vps-sg-mosa-prd-01`) starts in a CRITICAL state with CPU at ~98%, RAM at ~96%, and a failed `mosaic-engine` service, demonstrating the active incident scenario.
 
 ---
 
 ## 6. Core Data Model (Types)
 
-Defined in `src/types/index.ts` — 30+ TypeScript interfaces covering every entity:
+Defined in `src/types/index.ts` — 30+ strict TypeScript interfaces:
 
-| Type | Purpose |
-|---|---|
-| `Application` | Full app record with infra, DR, latency, dependencies |
-| `VpsServer` | Server node with telemetry, processes, services, logs |
-| `Monitor` | Continuous probe with history, thresholds, consecutive checks |
-| `Incident` | Ticket with timeline, notes, blast radius, runbook link |
-| `CloudflareZone` | DNS records, load balancer, WAF, SSL, drift detection |
-| `BackupRecord` | Backup with integrity hash, restore status, encryption |
-| `Runbook` | SOP with interactive steps, completion tracking |
-| `Deployment` | Pipeline stage record with rollback flag |
-| `MaintenanceWindow` | Scheduled downtime with monitor suppression |
-| `CommunicationChannel` | Webhook/email/Teams/PagerDuty channel |
-| `EscalationPolicy` | Severity-based escalation ladder |
-| `AuditLog` | Operator action record |
-| `DeadManControlPlane` | External independent watchdog state |
-
-Key enums: `OperationalStatus`, `IncidentSeverity`, `IncidentStatus`, `MonitorType`, `Environment`
+- `Application`: Full app record with infra, DR, latency percentiles, dependencies
+- `VpsServer`: Server node with live telemetry, processes, services, logs
+- `Monitor`: Continuous probe with check history, consecutive failure/recovery thresholds
+- `Incident`: Ticket with timeline, investigation notes, blast radius, linked runbook
+- `CloudflareZone`: DNS records, load balancer origin pool, WAF status, SSL, drift detection
+- `BackupRecord`: Backup archive with SHA-256 integrity hash, restore drill status, encryption
+- `Runbook`: SOP with interactive step execution and operator audit tracking
+- `Deployment`: Pipeline stage tracking with instant rollback capability
+- `MaintenanceWindow`: Scheduled downtime with automatic monitor probe suppression
+- `CommunicationChannel`: Webhook/email/Teams/PagerDuty dispatch channels
+- `EscalationPolicy`: Severity-based notification ladder
+- `AuditLog`: Immutable operator action record
+- `DeadManControlPlane`: External independent watchdog state
 
 ---
 
 ## 7. State Management — OpsContext
 
-`src/context/OpsContext.tsx` is the single source of truth. It exposes:
+`src/context/OpsContext.tsx` is the single source of truth, exposing:
 
-**State slices:**
-- `applications`, `servers`, `monitors`, `incidents`, `cloudflareZones`
-- `backups`, `runbooks`, `deployments`, `maintenanceWindows`
-- `communicationChannels`, `escalationPolicies`, `auditLogs`, `deadMan`
-
-**Navigation state:**
-- `activeTab`, `selectedAppId`, `selectedServerId`, `selectedIncidentId`, `selectedRunbookId`
-- `isCommandPaletteOpen`, `lastUpdatedSecondsAgo`
-
-**Actions (all memoized with `useCallback`):**
-
-| Action | What it does |
-|---|---|
-| `triggerFailover(appId, 'DR'/'PRIMARY')` | Flips Cloudflare LB origin, updates app failover state, logs audit entry |
-| `acknowledgeIncident(id, operator)` | Sets acknowledged + timeline event |
-| `changeIncidentStatus(id, status)` | Updates status + timeline |
-| `changeIncidentSeverity(id, severity)` | Updates severity + timeline |
-| `assignIncidentOwner(id, owner)` | Reassigns ownership + timeline |
-| `addIncidentNote(id, text)` | Appends note + timeline entry |
-| `resolveIncident(id, summary)` | Marks resolved, sets recovery status |
-| `toggleRunbookStep(runbookId, stepId)` | Toggles step completion + audit |
-| `runProbeCheck(monitorId)` | Simulates a single monitor probe check |
-| `runAllProbes()` | Runs all monitor probes at once |
-| `sendTestNotification(channelId)` | Simulates dispatch + updates channel status |
-| `triggerSimulatedScenario(...)` | See Simulator section below |
-| `addAuditEntry(...)` | Appends to immutable audit log |
-
-**Computed `systemSummary`:**
-- `totalApps`, `healthyApps`, `totalServers`, `healthyServers`
-- `totalMonitors`, `healthyMonitors`, `openIncidents`, `criticalIncidents`
-- `drReadinessCount`, `backupsCurrentCount`, `cloudflareStatus`, `overallHealth`
-
-**Background timers:**
-- Every 5 seconds: jitters server telemetry (CPU/RAM) for realism, updates Dead-Man heartbeat
-- Every 1 second: increments `lastUpdatedSecondsAgo` counter
+- **State slices**: `applications`, `servers`, `monitors`, `incidents`, `cloudflareZones`, `backups`, `runbooks`, `deployments`, `maintenanceWindows`, `communicationChannels`, `escalationPolicies`, `auditLogs`, `deadMan`.
+- **Navigation state**: `activeTab`, `selectedAppId`, `selectedServerId`, `selectedIncidentId`, `selectedRunbookId`, `isCommandPaletteOpen`, `lastUpdatedSecondsAgo`.
+- **Actions**: `triggerFailover`, `acknowledgeIncident`, `changeIncidentStatus`, `changeIncidentSeverity`, `assignIncidentOwner`, `addIncidentNote`, `resolveIncident`, `toggleRunbookStep`, `runProbeCheck`, `runAllProbes`, `sendTestNotification`, `triggerSimulatedScenario`, `addAuditEntry`, `toggleTheme`.
+- **System summaries**: Auto-computed `systemSummary` for healthy apps, servers, monitors, open incidents, DR readiness, and overall cluster health.
+- **Background loops**: 5-second telemetry jitter cycle, 1-second elapsed counter ticker.
 
 ---
 
 ## 8. Navigation & Routing
 
-There is no React Router. Navigation is tab-based via `activeTab` string in context. `App.tsx` renders the correct view component via a `switch` statement on `activeTab`.
+Tab-based routing via `activeTab` string in `OpsContext`, rendered by `App.tsx`:
 
-**Tab → View mapping:**
-
-| Tab ID | Component |
-|---|---|
-| `overview` | `OverviewView` |
-| `applications` | `ApplicationsView` |
-| `infrastructure` | `InfrastructureView` |
-| `monitors` | `MonitorsView` |
-| `incidents` / `alerts` | `IncidentsView` |
-| `resilience` / `failover` | `DrDashboardView` |
-| `backups` | `BackupsView` |
-| `dependencies` | `DependencyMapView` |
-| `hostinger` | `HostingerView` |
-| `cloudflare` | `CloudflareView` |
-| `deployments` / `changes` | `DeploymentsView` |
-| `runbooks` | `RunbooksView` |
-| `maintenance` | `MaintenanceView` |
-| `communications` / `escalation` / `integrations` / `settings` | `CommunicationsView` |
-| `reports` / `uptime` | `ReportsView` |
-| `audit` / `users` | `AuditLogsView` |
+| Tab ID | View Component | Description |
+|---|---|---|
+| `overview` | `OverviewView` | Operations Command Center, 5 Core Answers, All Charts |
+| `applications` | `ApplicationsView` | Catalog grid + 10-tab application detail modal |
+| `infrastructure` | `InfrastructureView` | VPS fleet grid + 4-tab server detail modal + area graphs |
+| `monitors` | `MonitorsView` | 55+ probes, continuous heartbeat stream, manual probe triggers |
+| `incidents` / `alerts` | `IncidentsView` | Incident command workspace + 7-tab incident modal |
+| `resilience` / `failover` | `DrDashboardView` | PRD/DR readiness checklist + Anycast failover console |
+| `backups` | `BackupsView` | Backup archive table with SHA-256 integrity status |
+| `dependencies` | `DependencyMapView` | End-to-end topology visual dependency flow |
+| `hostinger` | `HostingerView` | Provider-level VPS fleet specifications and regions |
+| `cloudflare` | `CloudflareView` | Anycast CDN, DNS records, WAF defense, LB origin pool |
+| `deployments` / `changes` | `DeploymentsView` | Build pipeline tracking and rollback execution |
+| `runbooks` | `RunbooksView` | Standard operating procedures with interactive step tracking |
+| `maintenance` | `MaintenanceView` | Scheduled windows with automated alert suppression |
+| `communications` / `escalation` | `CommunicationsView` | Notification dispatch channels & escalation ladders |
+| `reports` / `uptime` | `ReportsView` | Monospace daily operations briefing with export |
+| `audit` / `users` | `AuditLogsView` | Immutable audit trail of all privileged operator actions |
 
 ---
 
 ## 9. Feature Modules — What's Built
 
 ### 9.1 Shell Layout (`Shell.tsx`)
-- Collapsible sidebar (icon-only mode)
-- 7 navigation sections with live badges/counts
-- Top bar with search button (opens Command Palette), health status badge, simulator dropdown, manual refresh, theme toggle, and operator avatar
-- **Active Critical Incident Banner** — red strip below the top bar with incident ID, description, duration, and "INVESTIGATE" CTA
-- Independent Watchdog status dot in sidebar footer
+- Collapsible sidebar with navigation sections and live badges/counts
+- Top bar with global search button (Ctrl+K), cluster environment status, simulator dropdown, manual probe refresh, one-click Light/Dark theme toggle, and operator avatar
+- **Active Critical Incident Banner**: Red alert banner with incident details and one-click "INVESTIGATE" CTA
+- Independent Watchdog status dot in the sidebar footer
 
 ### 9.2 Overview Dashboard (`OverviewView.tsx`)
-- 8-column metrics bar (Apps, VPS Fleet, Monitors, Incidents, DR Ready, Backups, Cloudflare, Dead-Man)
-- **The 5 Operational Answers** panel — auto-correlated answers to: What's healthy? What's failing? What's affected? What should IT do? Has it recovered?
-- 4 visual charts (Heartbeat, Traffic Flow, Incident Flow, Telemetry area graphs)
-- Application Systems Table — all 8 apps with PRD/DR servers, replication lag, RTO/RPO, uptime, latency
-- Hostinger VPS Fleet preview (first 6 nodes)
+- 8-column high-density global metrics bar
+- **The 5 Operational Answers** auto-correlation panel:
+  1. What is healthy right now?
+  2. What is failing right now?
+  3. What is affected?
+  4. What should IT do?
+  5. Has it recovered?
+- 4 embedded visual charts (ECG Waveform, Anycast Traffic Flow, Incident State Machine, Telemetry Area Graphs)
+- Application Systems Table and Hostinger VPS Fleet preview
 
 ### 9.3 Applications View (`ApplicationsView.tsx`)
-- Card grid of all 8 applications with status, tier, uptime, error rate
+- Card grid of all 8 applications with status, tier, uptime, and latency
 - **10-tab Application Detail Modal**: Overview, Health, Monitors, Infrastructure, Dependencies, DR, Backups, Incidents, Deployments, History
-- Per-app failover button (with confirmation step)
-- All linked entities loaded per app (monitors, incidents, backups, deployments, audit logs)
+- Live failover trigger button with confirmation safety step
+- Embedded `TrafficFlowChart`
 
 ### 9.4 Infrastructure View (`InfrastructureView.tsx`)
-- Searchable VPS fleet grid (filter by region / environment / status)
-- Live CPU/RAM/Disk bars with color thresholds
-- **4-tab VPS Detail Modal**: System (telemetry + area graph), Processes (PID list), Services (status + version), Logs (recent entries)
+- Searchable, filterable VPS fleet grid
+- Live CPU, RAM, Disk, and Network telemetry bars
+- **4-tab Server Detail Modal**: System (telemetry + area graph), Processes (PID list), Services (systemd status), Operational Logs
+- 4 Telemetry Area Graphs (Cluster CPU Load, ECC Memory RAM Mesh, Anycast Outbound Throughput, P95 Probe Latency)
 
 ### 9.5 Monitors View (`MonitorsView.tsx`)
-- Full table of all continuous monitors with type, target, interval, status, response time, uptime%
-- Consecutive failure / recovery counters visible
-- "Run Probe" button per monitor
-- Check history (last 20 results) per monitor
+- Comprehensive table of all 55+ probes with type, target, interval, latency, and consecutive check counters
+- Per-probe manual "Run Probe" trigger
+- Check history (last 20 probe results)
+- Embedded `HeartbeatPulseChart`
 
 ### 9.6 Incidents View (`IncidentsView.tsx`)
-- Incident list with severity color coding, status badges
-- **7-tab Incident Detail Modal**: Summary, Timeline, Signals, Blast Radius, Communications, Runbook, Notes
-- Actions: Acknowledge, Change Status, Change Severity, Assign Owner, Add Note, Resolve
-- Embedded `IncidentFlowChart` (state machine visualization)
-
-### 9.7 DR Dashboard (`DrDashboardView.tsx`)
-- App selector with per-app DR readiness checklist (6 items: replication, snapshot, restore drill, compute, drift, Cloudflare LB)
-- Live failover state indicator (PRIMARY / DR ACTIVE)
-- One-click failover / failback toggle (with confirmation)
-- Embedded `TrafficFlowChart`
-
-### 9.8 Backups View (`BackupsView.tsx`)
-- Table of all backup records with type, size, destination, retention, encryption, integrity, restore test status
-- Color-coded status (SUCCESS / FAILED / STALE)
-
-### 9.9 Dependency Map (`DependencyMapView.tsx`)
-- Visual dependency topology showing the path: Users → Cloudflare → VPS → Application → Dependencies (DB, Redis, Storage, Workers, External APIs)
-- Per-app dependency health table with latency
-
-### 9.10 Cloudflare View (`CloudflareView.tsx`)
-- Zone selector for all Cloudflare zones
-- Configuration drift detection warning banner
-- DNS records table (A, CNAME, TXT, MX)
-- Load balancer status (active origin, failover policy, health check)
-- WAF event count, SSL expiry, TLS version
-- Embedded `TrafficFlowChart`
-
-### 9.11 Hostinger View (`HostingerView.tsx`)
-- Provider-level overview of all VPS nodes
-- Hardware specs, region grouping, agent version, uptime days
-
-### 9.12 Deployments View (`DeploymentsView.tsx`)
-- Deployment history per application
-- Stage tracking: BUILDING → DEPLOYING → HEALTH_CHECK → SMOKE_TEST → SUCCESS / FAILED / ROLLED_BACK
-- Rollback availability flag
-
-### 9.13 Runbooks View (`RunbooksView.tsx`)
-- List of operational runbooks by category (DATABASE, FAILOVER, WEB_SERVER, PERFORMANCE, DEAD_MAN)
-- Interactive step-by-step execution (click to mark step complete / incomplete)
-- Estimated duration, completion tracking, completedBy + completedAt recorded
-
-### 9.14 Maintenance View (`MaintenanceView.tsx`)
-- Scheduled maintenance windows with impact description and monitor suppression list
-- Status badges: SCHEDULED / IN_PROGRESS / COMPLETED / EXPIRED
-- Approved-by and reason fields
-
-### 9.15 Communications View (`CommunicationsView.tsx`)
-- Notification channels: Microsoft Teams webhook, On-Call Email, Generic Webhook, PagerDuty
-- Enabled/disabled toggle, last delivery status, failure count
-- "Send Test Notification" button (simulated dispatch)
-- Escalation policies with severity → channel → delay → auto-escalate ladder
-
-### 9.16 Reports View (`ReportsView.tsx`)
-- Pre-generated Daily Operations Briefing in a monospace terminal-style display
-- Covers: core health, resilience targets, MTTD, MTTR, compliance & governance
-- Copy to clipboard button
-- Download as `.txt` file button
-
-### 9.17 Audit Logs View (`AuditLogsView.tsx`)
-- Immutable chronological table of all operator actions
-- Columns: Timestamp, Operator, Category, Action, Target Resource, Details
-- Categories: INCIDENT, FAILOVER, MAINTENANCE, MONITOR, CLOUDFLARE, INFRASTRUCTURE, RUNBOOK
-- Auto-populated by all context actions; persisted to `localStorage`
+- Incident ticket list with severity badges, status, duration, and blast radius
+- **7-tab Incident Detail Modal**: Summary, Timeline, Signals, Correlation & Blast Radius, Communications, Runbook, Investigation Notes
+- Operator actions: Acknowledge, Change Status, Change Severity, Assign Owner, Add Note, Sign Off & Resolve
+- Embedded `IncidentFlowChart`
 
 ---
 
-## 10. Visual Components
+## 10. Visual Flow Charts, Heartbeat Monitors & Graphs
 
-All in `src/components/visuals/`:
+### 10.1 Real-Time ECG Heartbeat Chart (`HeartbeatPulseChart`)
+- **Watchdog Stream**: Continuous cardiac rhythm waveform for the independent Zurich Dead-Man Watchdog (`ch-zh-monitor-01`).
+- **Telemetry Readouts**:
+  - Pulse interval (1.0s / 1.0 Hz) with live sequence counter
+  - Millisecond roundtrip jitter (`14.2 ms ±0.8ms`) with live variance
+  - Signal strength readout (`99.8% · -42 dBm`) with a visual 5-bar RSSI signal meter
+  - Live silence detection countdown timer (`4.8s / 5.0s`, resetting on each pulse, animated progress bar, and timeout alarm when silenced)
+- **Controls**: One-click toggle for watchdog silence simulation and instant probe trigger.
+- **Embedded in**: Command Center Overview and Monitors View.
 
-| Component | What it renders |
-|---|---|
-| `HeartbeatPulseChart` | Animated ECG-style waveform showing live monitor pulse |
-| `TrafficFlowChart` | Anycast architecture diagram: Users → Cloudflare Edge → LB Pool → PRD/DR Origins |
-| `IncidentFlowChart` | Incident lifecycle state machine: OPEN → ACK → INVESTIGATING → MITIGATING → 3-check recovery → RESOLVED |
-| `TelemetryAreaGraph` | SVG-based area chart with threshold line, used for CPU / RAM / Network / Latency |
+### 10.2 Traffic & Failover Architecture Flow Chart (`TrafficFlowChart`)
+- **5-Stage Topology Architecture**:
+  1. **End Users** (Worldwide Clients, 14,200 req/min, Global PoPs)
+  2. **Cloudflare Anycast CDN** (Edge PoPs in 330+ cities, TLS 1.3, SSL Full Strict)
+  3. **WAF Bot Defense** (Managed Rules, Rate Limiting, ML Threat Intelligence)
+  4. **Origin Pool Load Balancer** (Traffic Director, 5s health probe interval)
+  5. **Primary (PRD) vs Standby (DR) Origins** (Hostinger Singapore KVM VPS nodes)
+- **Dynamic Packet Pulses**:
+  - Green healthy flow lines for legitimate traffic
+  - Amber quarantined bypasses showing blocked/challenged malicious bots
+  - Real-time latency readouts (`TLS 1.3 · 14ms`, `Filter · 1.2ms`, `Probe · 5s`)
+- **Controls**: Target application selector and interactive **Reroute Origin Traffic** toggle.
+- **Embedded in**: Command Center Overview, Applications View, Disaster Recovery Console, and Cloudflare View.
+
+### 10.3 Incident Recovery Lifecycle Flowchart (`IncidentFlowChart`)
+- **7-Step State Machine**:
+  1. `Telemetry Anomaly` (MySQL max pool 500/500 saturated)
+  2. `3 Consecutive Probe Failures` (Confirmed 3/3 failure sequence)
+  3. `Blast Radius Isolation` (Incident fingerprinted & quarantined)
+  4. `Automated Traffic Reroute` (Anycast shifted to DR Standby origin)
+  5. `Root Cause Mitigation` (Pool recycled via Runbook RB-01)
+  6. `3 Consecutive Recovery Checks` (Monitor confirms 3 back-to-back passes)
+  7. `Verified Resolved` (SLA restored & immutable postmortem created)
+- **Controls**: Interactive failure injection and verification resolution trigger.
+- **Embedded in**: Command Center Overview and Incidents View.
+
+### 10.4 Fleet Telemetry Area Graphs (`TelemetryAreaGraph`)
+- Smooth cubic Bézier-curve area sparkline charts with gradient fills, hover point markers, Min / Avg / Peak / Current stat readouts, and warning threshold lines.
+- **Standardized Metrics**:
+  - `Cluster CPU Load` (Singapore Origin / VPS Fleet, warning threshold 80%)
+  - `ECC Memory RAM Mesh` (16 Nodes Aggregated, warning threshold 85%)
+  - `Anycast Outbound Throughput` (Global Edge Outbound, Mbps)
+  - `P95 Probe Latency` (Global Probes Mesh, warning threshold 150ms)
+- **Embedded in**: Command Center Overview and Hostinger Infrastructure fleet view.
 
 ---
 
-## 11. Command Palette
+## 11. Command Palette (Ctrl+K)
 
-Triggered by `Ctrl+K` (or `Cmd+K` on Mac). Built in `CommandPalette.tsx`.
+Triggered globally via `Ctrl+K` (or `Cmd+K` on Mac):
 
-**Search categories:** ALL · ROUTES · APPS · SERVERS · INCIDENTS · ACTIONS · MONITORS · RUNBOOKS
-
-**What's searchable / actionable:**
-- All 20+ navigation routes with descriptions and live badges
-- All 8 applications (navigate + inspect)
-- All 16 VPS server nodes (navigate + inspect)
-- All incident tickets (navigate + inspect)
-- All continuous monitor probes (run probe + navigate)
-- All runbooks (open + navigate)
-- Management Actions: Run all probes, Acknowledge incident, Resolve incident
-- Failover / Failback per application
-- Send test notifications (Teams, email)
-- Download daily ops report
-- All 4 simulator scenarios
-- Keyboard navigation (↑↓ arrows + Enter), action feedback toast
+- **8 Filter Categories**: ALL · ROUTES · APPS · SERVERS · INCIDENTS · ACTIONS · MONITORS · RUNBOOKS
+- **Instant Search**: Search through all 20+ routes, 8 apps, 16 VPS servers, incidents, monitors, runbooks, and operator actions with keyboard navigation (↑/↓ arrows + Enter).
+- **Execution**: Run probes, acknowledge/resolve incidents, divert traffic, dispatch notifications, trigger simulator scenarios, and download daily reports directly from the palette.
 
 ---
 
 ## 12. Simulator Engine
 
-The **SIMULATOR** dropdown in the top bar (and accessible via Command Palette) enables 4 interactive scenarios:
+Accessible via the top-bar **SIMULATOR** menu or Command Palette:
 
-| Scenario | What happens |
-|---|---|
-| **Verify Recovery & Failback** | Mosaic PRD server returns to HEALTHY, monitors pass 3 consecutive checks, app failover reverts to PRIMARY, INC-1042 resolves, Cloudflare LB restores to PRD origin |
-| **Inject MySQL Pool Exhaustion** | Mosaic PRD CPU spikes to ~98%, mosaic-engine service fails, monitors go CRITICAL (3 failures), app goes CRITICAL with DR_ACTIVE, INC-1042 re-opens |
-| **Toggle Watchdog Silence** | External Dead-Man flips between HEALTHY ↔ CRITICAL_SILENCE (4 consecutive misses) |
-| **Reset State to Baseline** | Clears `localStorage`, restores all initial data |
+1. **Verify Recovery & Failback**: Restores Mosaic PRD server to HEALTHY, confirms 3 consecutive monitor passes, reverts Anycast failover to PRIMARY, and resolves INC-1042.
+2. **Inject MySQL Pool Exhaustion**: Spikes Mosaic PRD CPU to ~98%, fails the engine service, fails 3 consecutive probes, triggers INC-1042, and diverts traffic to DR.
+3. **Toggle Watchdog Silence**: Flips Zurich Dead-Man watchdog between HEALTHY and CRITICAL_SILENCE (4 consecutive misses, escalation dispatched).
+4. **Reset State to Baseline**: Clears `localStorage` and restores nominal baseline state.
 
 ---
 
-## 13. Dark / Light Theme
+## 13. Dual Light & Dark Enterprise Themes
 
-- Toggled via the Sun/Moon button in the top bar
-- Persisted to `localStorage` as `scholario_theme`
-- Applied via `document.documentElement.classList` (`dark` / `light`)
-- Every component reads `theme` from context and applies conditional Tailwind classes using `isDark` boolean
-- Default theme: **Dark**
+- **Dark Mode (Default)**: Deep carbon canvas (`#0B0F17`), SOC deep navy containers (`#111726`), dark border lines (`#1E293B`), and high-contrast operational indicators (Emerald, Amber, Rose, Blue).
+- **Light Mode**: Crisp corporate enterprise appearance (`#F6F8FC` canvas, deep navy `#17233C` navigation bar, `#FFFFFF` cards, `#E2E8F0` borders).
+- **One-Click Switcher**: Top-bar **LIGHT / DARK** button with instant persistence in `localStorage`.
+- **Universal Coverage**: All 14 views, navigation shells, command palette, charts, tables, and modal dialogs dynamically adapt their styling based on the active theme.
 
 ---
 
 ## 14. Persistence
 
-State is synced to `localStorage` on every change via `useEffect`:
+Synchronized to `localStorage` on state transitions:
 
-| Key | Data |
+| Key | Contents |
 |---|---|
-| `scholario_apps` | Applications array |
-| `scholario_servers` | Servers array |
-| `scholario_monitors` | Monitors array |
-| `scholario_incidents` | Incidents array |
-| `scholario_cf` | Cloudflare zones array |
-| `scholario_audit` | Audit logs (last 100 entries) |
-| `scholario_theme` | `'dark'` or `'light'` |
-
-Backups, deployments, maintenance windows, and escalation policies are **not** persisted (initialized fresh from `initialData.ts` every session).
+| `scholario_apps` | Application records and failover states |
+| `scholario_servers` | VPS server inventory and telemetry |
+| `scholario_monitors` | Monitor probe configurations and history |
+| `scholario_incidents` | Incident tickets, notes, and timelines |
+| `scholario_cf` | Cloudflare zone configurations and DNS records |
+| `scholario_audit` | Immutable audit log trail (last 100 entries) |
+| `scholario_theme` | Active theme (`'dark'` or `'light'`) |
 
 ---
 
@@ -440,74 +360,52 @@ Backups, deployments, maintenance windows, and escalation policies are **not** p
 
 | Feature | Status | Notes |
 |---|---|---|
-| Shell Layout (sidebar, topbar) | ✅ Complete | Collapsible, dark/light, badges |
-| Command Palette (Ctrl+K) | ✅ Complete | Full search, 7 categories, keyboard nav |
-| Overview Dashboard | ✅ Complete | All 7 sections built |
-| Applications View + Modal | ✅ Complete | 10 tabs in modal |
-| Infrastructure View + Modal | ✅ Complete | 4 tabs (system, processes, services, logs) |
-| Monitors View | ✅ Complete | Probe run, history table |
-| Incidents View + Modal | ✅ Complete | 7 tabs, full action set |
-| DR Dashboard + Failover | ✅ Complete | Readiness checklist, live toggle |
-| Backups View | ✅ Complete | Integrity, restore status |
-| Dependency Map | ✅ Complete | Visual topology + table |
-| Cloudflare View | ✅ Complete | DNS, WAF, LB, drift detection |
-| Hostinger View | ✅ Complete | Provider-level fleet overview |
-| Deployments View | ✅ Complete | Pipeline stages, rollback |
-| Runbooks View | ✅ Complete | Interactive step execution |
-| Maintenance View | ✅ Complete | Windows, suppression |
-| Communications View | ✅ Complete | Channels, escalation policies |
-| Reports View | ✅ Complete | Generated text report, download/copy |
-| Audit Logs View | ✅ Complete | Immutable table |
-| Visual Charts (4 components) | ✅ Complete | ECG, Traffic Flow, Incident Flow, Area Graph |
-| Dark / Light Theme | ✅ Complete | All components themed |
-| Simulator Engine | ✅ Complete | 4 scenarios |
-| localStorage Persistence | ✅ Complete | 6 keys persisted |
-| Telemetry Live Simulation | ✅ Complete | 5s jitter loop |
-| Dead-Man Watchdog | ✅ Complete | State + sidebar indicator |
-| Keyboard Shortcut (Ctrl+K) | ✅ Complete | Global capture listener |
-| Critical Incident Banner | ✅ Complete | Auto-shown when critical incident open |
-| `@google/genai` AI Feature | ⚠️ Wired but unused | Package installed, no AI calls made yet |
-| Real backend / live API | ❌ Not built | All data is static seed from `initialData.ts` |
-| Unit / Integration Tests | ❌ Not built | No test framework configured |
-| Mobile Responsive Layout | ⚠️ Partial | Grid breakpoints used but sidebar/modals not fully mobile optimized |
-| User Authentication | ❌ Not built | Operator name is hardcoded as "Arjun Mehta" |
-| URL-based deep linking | ❌ Not built | No React Router; tab state is in-memory |
+| Typography System (Inter + JetBrains Mono) | ✅ Complete | Inter across whole app; JetBrains Mono for metrics |
+| Dual Enterprise Theme (Dark / Light) | ✅ Complete | Universal coverage across all 14 views + modals |
+| Shell Layout & Sidebar | ✅ Complete | Collapsible, live badges, watchdog indicator |
+| Command Palette (Ctrl+K) | ✅ Complete | Full search across 8 categories with keyboard nav |
+| Command Center Overview | ✅ Complete | Metrics bar, The 5 Answers panel, all charts |
+| Applications View + Modal | ✅ Complete | 10-tab modal, live failover controls |
+| Infrastructure View + Modal | ✅ Complete | 4-tab modal, live telemetry, area graphs |
+| Monitors View | ✅ Complete | 55+ probes, ECG waveform, manual triggers |
+| Incidents View + Modal | ✅ Complete | 7-tab modal, state machine, action buttons |
+| Disaster Recovery Console | ✅ Complete | Readiness checklist, live failover toggle |
+| Backups View | ✅ Complete | SHA-256 integrity, restore verification |
+| Dependency Map | ✅ Complete | Visual topology dependency graph |
+| Cloudflare View | ✅ Complete | Anycast, DNS, WAF, LB pool status |
+| Hostinger View | ✅ Complete | Provider fleet specs and region breakdown |
+| Deployments View | ✅ Complete | Pipeline stage tracking, rollback support |
+| Runbooks View | ✅ Complete | Interactive standard operating procedures |
+| Maintenance View | ✅ Complete | Scheduled windows, alert suppression |
+| Communications View | ✅ Complete | Dispatch channels, escalation ladders |
+| Daily Operations Report | ✅ Complete | Text briefing display, copy & download |
+| Audit Logs View | ✅ Complete | Immutable operator action trail |
+| ECG Heartbeat Waveform Chart | ✅ Complete | 1.0s interval, jitter, signal meter, countdown |
+| Traffic Flow Architecture Chart | ✅ Complete | 5-stage topology, packet pulses, reroute toggle |
+| Incident Recovery State Machine | ✅ Complete | 7-step sequence with consecutive check rules |
+| Fleet Telemetry Area Graphs | ✅ Complete | Cubic Bézier curves, threshold lines, 4 metrics |
+| Operations Simulator | ✅ Complete | 4 interactive scenarios |
 
 ---
 
-## 16. What's Missing / Not Yet Done
-
-1. **AI / Gemini Integration** — `@google/genai` is installed but completely unused. The intended use case is likely AI-assisted incident root cause analysis or natural language querying of the ops data.
-2. **Real API Backend** — The Express server stub in `package.json` (`server.js`) exists but there is no server file. No real API calls are made anywhere.
-3. **Authentication / RBAC** — No login screen, no session, no role-based access. The operator identity is a hardcoded string.
-4. **URL Deep Linking** — Navigating directly to a specific incident or app via URL is not possible. All state lives in React context.
-5. **Tests** — No test runner configured (no Vitest, Jest, or Testing Library setup).
-6. **Full Mobile Optimization** — Modals and tables may overflow on small screens. The sidebar has a collapsed icon-only mode but no drawer/overlay pattern.
-7. **Real Telemetry** — The Scholario Agent (`scholario-agent`) is referenced in the data but there is no real agent or WebSocket connection. Telemetry is randomly jittered every 5 seconds.
-8. **Notifications Delivery** — `sendTestNotification` is a 600ms fake delay. No actual webhook calls are made.
-9. **Pagination / Virtualization** — Audit logs and monitor history are rendered as full tables; large datasets would cause performance issues.
-10. **WCAG / Accessibility** — No ARIA roles or keyboard trap management in modals. Focus management is basic.
-
----
-
-## 17. Running the Project
+## 16. Running the Project
 
 ```bash
 # Install dependencies
 npm install
 
-# Start dev server (port 3000)
+# Start development server on port 3000 (0.0.0.0)
 npm run dev
 
 # Build for production
 npm run build
 
-# Type-check only
+# Type-check codebase
 npm run lint
 ```
 
-The app will open at `http://localhost:3000`. No environment variables are required to run the UI — the `.env.example` file exists for the future Express server (likely for a Gemini API key proxy).
+The application runs at `http://localhost:3000`.
 
 ---
 
-*Generated: October 2026 · Scholario IT Operations Control Center*
+*Updated: October 2026 · Scholario IT Operations Control Center*

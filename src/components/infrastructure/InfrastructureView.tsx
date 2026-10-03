@@ -296,8 +296,8 @@ export const InfrastructureView: React.FC = () => {
   // Time-series sample points for Fleet Telemetry Area Graphs
   const fleetCpuHistory = [38, 41, 44, 48, 55, 62, 70, 78, 82, 85, 76, 72];
   const fleetRamHistory = [60, 61, 62, 64, 66, 71, 74, 76, 78, 77, 76, 75];
-  const fleetDiskHistory = [48, 48, 49, 49, 50, 50, 51, 51, 52, 52, 52, 52];
   const fleetNetworkHistory = [18, 22, 25, 29, 38, 56, 72, 88, 70, 60, 52, 58];
+  const fleetLatencyHistory = [98, 102, 110, 115, 142, 168, 195, 180, 162, 145, 138, 126];
 
   const filteredServers = servers
     .filter(s => {
@@ -414,33 +414,34 @@ export const InfrastructureView: React.FC = () => {
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           <TelemetryAreaGraph
-            title="Fleet Average CPU"
-            subtitle="16 Hostinger VPS"
+            title="Cluster CPU Load"
+            subtitle="16 Hostinger VPS Fleet"
             data={fleetCpuHistory}
             unit="%"
             warningThreshold={80}
             color="rose"
           />
           <TelemetryAreaGraph
-            title="Fleet Average RAM"
-            subtitle="ECC Memory Mesh"
+            title="ECC Memory RAM Mesh"
+            subtitle="Total Fleet Memory"
             data={fleetRamHistory}
             unit="%"
             warningThreshold={85}
             color="amber"
           />
           <TelemetryAreaGraph
-            title="NVMe Disk Allocation"
-            subtitle="RAID-10 Arrays"
-            data={fleetDiskHistory}
-            unit="%"
-            color="blue"
-          />
-          <TelemetryAreaGraph
-            title="Network Inbound / Out"
+            title="Anycast Outbound Throughput"
             subtitle="Bandwidth Saturation"
             data={fleetNetworkHistory}
             unit=" Mbps"
+            color="blue"
+          />
+          <TelemetryAreaGraph
+            title="P95 Probe Latency"
+            subtitle="Global Probes Mesh"
+            data={fleetLatencyHistory}
+            unit=" ms"
+            warningThreshold={150}
             color="emerald"
           />
         </div>
