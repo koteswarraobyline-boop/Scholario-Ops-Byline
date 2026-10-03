@@ -54,7 +54,7 @@ router.post('/', authenticate, requirePermission('create', 'monitors'), validate
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'MONITOR_CREATED', category: 'MONITOR',
-      targetId: mon.id, details: `Created monitor: ${mon.name}`, requestId: req.id,
+      targetId: mon.id, details: `Created monitor: ${mon.name}`, requestId: String(req.id ?? ''),
     });
     created(res, mon);
   } catch (err) { next(err); }
@@ -66,7 +66,7 @@ router.patch('/:id', authenticate, requirePermission('update', 'monitors'), asyn
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'MONITOR_UPDATED', category: 'MONITOR',
-      targetId: req.params.id, details: `Updated monitor`, requestId: req.id,
+      targetId: req.params.id, details: `Updated monitor`, requestId: String(req.id ?? ''),
     });
     ok(res, mon);
   } catch (err) { next(err); }
@@ -86,7 +86,7 @@ router.delete('/:id', authenticate, requirePermission('delete', 'monitors'), asy
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'MONITOR_DELETED', category: 'MONITOR',
-      targetId: req.params.id, details: `Deleted monitor`, requestId: req.id,
+      targetId: req.params.id, details: `Deleted monitor`, requestId: String(req.id ?? ''),
     });
     noContent(res);
   } catch (err) { next(err); }

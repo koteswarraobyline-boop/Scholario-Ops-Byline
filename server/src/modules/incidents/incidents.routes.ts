@@ -46,7 +46,7 @@ router.post('/:id/acknowledge', authenticate, requirePermission('acknowledge', '
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'INCIDENT_ACKNOWLEDGED', category: 'INCIDENT',
-      targetId: req.params.id, details: `Acknowledged by ${req.user!.email}`, requestId: req.id,
+      targetId: req.params.id, details: `Acknowledged by ${req.user!.email}`, requestId: String(req.id ?? ''),
     });
     ok(res, inc);
   } catch (err) { next(err); }
@@ -59,7 +59,7 @@ router.patch('/:id/status', authenticate, requirePermission('update_status', 'in
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'INCIDENT_STATUS_CHANGE', category: 'INCIDENT',
-      targetId: req.params.id, details: `Status → ${status}`, requestId: req.id,
+      targetId: req.params.id, details: `Status → ${status}`, requestId: String(req.id ?? ''),
     });
     ok(res, inc);
   } catch (err) { next(err); }
@@ -72,7 +72,7 @@ router.patch('/:id/severity', authenticate, requirePermission('update_status', '
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'INCIDENT_SEVERITY_CHANGE', category: 'INCIDENT',
-      targetId: req.params.id, details: `Severity → ${severity}`, requestId: req.id,
+      targetId: req.params.id, details: `Severity → ${severity}`, requestId: String(req.id ?? ''),
     });
     ok(res, inc);
   } catch (err) { next(err); }
@@ -85,7 +85,7 @@ router.patch('/:id/assign', authenticate, requirePermission('assign', 'incidents
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'INCIDENT_REASSIGNED', category: 'INCIDENT',
-      targetId: req.params.id, details: `Assigned to ${ownerName}`, requestId: req.id,
+      targetId: req.params.id, details: `Assigned to ${ownerName}`, requestId: String(req.id ?? ''),
     });
     ok(res, inc);
   } catch (err) { next(err); }
@@ -106,7 +106,7 @@ router.post('/:id/resolve', authenticate, requirePermission('resolve', 'incident
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'INCIDENT_RESOLVED', category: 'INCIDENT',
-      targetId: req.params.id, details: `Resolved: ${resolution}`, requestId: req.id,
+      targetId: req.params.id, details: `Resolved: ${resolution}`, requestId: String(req.id ?? ''),
     });
     ok(res, inc);
   } catch (err) { next(err); }

@@ -54,7 +54,7 @@ router.get('/:id', authenticate, requirePermission('read', 'deployments'), async
 router.post('/', authenticate, requirePermission('read', 'deployments'), validate(createSchema), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const d = req.body;
-    const [dep] = await query(
+    const [dep] = await query<Record<string,unknown>>(
       `INSERT INTO deployments (id,application_id,version,commit_hash,commit_message,environment,author,status)
        VALUES ($1,$2,$3,$4,$5,$6,$7,'BUILDING') RETURNING *`,
       [uuidv4(), d.applicationId, d.version, d.commitHash ?? null, d.commitMessage ?? null, d.environment, d.author ?? req.user!.email]
@@ -66,7 +66,7 @@ router.post('/', authenticate, requirePermission('read', 'deployments'), validat
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'DEPLOYMENT_CREATED', category: 'INFRASTRUCTURE',
-      targetId: dep.id, details: `Deploy ${d.version} for app ${d.applicationId}`, requestId: req.id,
+      targetId: dep.id as string, details: `Deploy ${d.version} for app ${d.applicationId}`, requestId: String(req.id ?? ''),
     });
     created(res, dep);
   } catch (err) { next(err); }
@@ -78,7 +78,7 @@ router.patch('/:id/status', authenticate, requirePermission('read', 'deployments
     const { status, message } = req.body as { status: string; message?: string };
     const completedStatuses = ['SUCCESS', 'FAILED', 'ROLLED_BACK'];
     const isComplete = completedStatuses.includes(status);
-    const [dep] = await query(
+    const [dep] = await query<Record<string,unknown>>(
       `UPDATE deployments SET status = $1,
          completed_at = CASE WHEN $2 THEN NOW() ELSE completed_at END,
          duration_sec = CASE WHEN $3 THEN EXTRACT(EPOCH FROM (NOW() - started_at))::INT ELSE duration_sec END,

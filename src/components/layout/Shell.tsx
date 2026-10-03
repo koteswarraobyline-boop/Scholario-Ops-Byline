@@ -1,5 +1,8 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
+import { useAuth } from '../../context/AuthContext';
+import { WsStatusBadge } from '../ui/WsStatusBadge';
 import { 
   Activity, 
   AlertTriangle, 
@@ -19,16 +22,15 @@ import {
   FileText, 
   Sliders, 
   Radio, 
-  Cpu, 
-  Lock, 
-  ExternalLink,
+  Cpu,
   Zap,
   CheckCircle2,
   AlertOctagon,
   ArrowRight,
   Shield,
   Sun,
-  Moon
+  Moon,
+  LogOut
 } from 'lucide-react';
 import { CommandPalette } from './CommandPalette';
 
@@ -63,9 +65,13 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     triggerSimulatedScenario,
     runAllProbes,
     theme,
-    toggleTheme
+    toggleTheme,
+    wsStatus,
+    refreshData,
   } = useOps();
 
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
   const isDark = theme === 'dark';
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -77,8 +83,16 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
   const handleManualRefresh = () => {
     setIsRefreshing(true);
     runAllProbes();
-    setTimeout(() => setIsRefreshing(false), 500);
+    refreshData();
+    setTimeout(() => setIsRefreshing(false), 800);
   };
+
+  const handleLogout = async () => {
+    await logout();
+    navigate('/login', { replace: true });
+  };
+
+  const displayName = user?.displayName ?? user?.fullName?.split(' ')[0] ?? 'Operator';
 
   const navSections: NavSection[] = [
     {
@@ -448,10 +462,26 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
               <RefreshCw className="w-3.5 h-3.5" />
             </button>
 
-            {/* Operator avatar */}
+            {/* WebSocket status */}
+            <WsStatusBadge status={wsStatus} isDark={isDark} />
+
+            {/* Operator avatar + logout */}
             <div className={`flex items-center gap-2 pl-2 border-l ${isDark ? 'border-slate-800' : 'border-slate-300'}`}>
-              <span className={`font-mono text-[11px] font-medium ${isDark ? 'text-slate-300' : 'text-slate-800'}`}>A. Mehta</span>
-              <span className="w-1.5 h-1.5 rounded-full bg-blue-500" title="On-Call Primary" />
+              <span className={`font-mono text-[11px] font-medium ${isDark ? 'text-slate-300' : 'text-slate-800'}`}>
+                {displayName}
+              </span>
+              {user?.isOnCall && (
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-500" title="On-Call Primary" />
+              )}
+              <button
+                onClick={handleLogout}
+                title="Sign out"
+                className={`p-1 rounded transition-colors cursor-pointer ${
+                  isDark ? 'text-slate-500 hover:text-rose-400 hover:bg-rose-950/40' : 'text-slate-400 hover:text-rose-600 hover:bg-rose-50'
+                }`}
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
             </div>
 
           </div>

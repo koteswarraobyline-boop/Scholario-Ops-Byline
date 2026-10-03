@@ -26,7 +26,7 @@ export async function loginHandler(
       details: `User ${user.email} logged in`,
       ipAddress: req.ip,
       userAgent: req.get('user-agent'),
-      requestId: req.id,
+      requestId: String(req.id ?? ''),
     });
 
     ok(res, { user, tokens });
@@ -66,7 +66,7 @@ export async function logoutHandler(
         category: 'AUTH',
         targetId: req.user.sub,
         details: 'User logged out',
-        requestId: req.id,
+        requestId: String(req.id ?? ''),
       });
     }
 

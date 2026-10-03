@@ -85,7 +85,7 @@ router.post('/', authenticate, requirePermission('create', 'servers'), async (re
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'SERVER_CREATED', category: 'INFRASTRUCTURE',
-      targetId: srv.id, details: `Created server: ${srv.hostname}`, requestId: req.id,
+      targetId: srv.id, details: `Created server: ${srv.hostname}`, requestId: String(req.id ?? ''),
     });
     created(res, srv);
   } catch (err) { next(err); }
@@ -98,7 +98,7 @@ router.patch('/:id', authenticate, requirePermission('update', 'servers'), async
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'SERVER_UPDATED', category: 'INFRASTRUCTURE',
-      targetId: req.params.id, details: `Updated server`, requestId: req.id,
+      targetId: req.params.id, details: `Updated server`, requestId: String(req.id ?? ''),
     });
     ok(res, srv);
   } catch (err) { next(err); }
@@ -111,7 +111,7 @@ router.delete('/:id', authenticate, requirePermission('delete', 'servers'), asyn
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'SERVER_DELETED', category: 'INFRASTRUCTURE',
-      targetId: req.params.id, details: `Soft-deleted server`, requestId: req.id,
+      targetId: req.params.id, details: `Soft-deleted server`, requestId: String(req.id ?? ''),
     });
     noContent(res);
   } catch (err) { next(err); }

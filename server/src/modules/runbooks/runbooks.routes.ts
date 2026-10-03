@@ -58,7 +58,7 @@ router.get('/:id', authenticate, requirePermission('read', 'runbooks'), async (r
 router.post('/', authenticate, requirePermission('execute', 'runbooks'), validate(createSchema), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const d = req.body;
-    const [rb] = await query(
+    const [rb] = await query<{ id: string; title: string }>(
       `INSERT INTO runbooks (id,title,description,category,estimated_duration_min,created_by_id)
        VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
       [uuidv4(), d.title, d.description ?? null, d.category, d.estimatedDurationMin, req.user!.sub]
@@ -73,7 +73,7 @@ router.post('/', authenticate, requirePermission('execute', 'runbooks'), validat
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'RUNBOOK_CREATED', category: 'RUNBOOK',
-      targetId: rb.id, details: `Created runbook: ${rb.title}`, requestId: req.id,
+      targetId: rb.id, details: `Created runbook: ${rb.title}`, requestId: String(req.id ?? ''),
     });
     const steps = await query(`SELECT * FROM runbook_steps WHERE runbook_id = $1 ORDER BY step_order`, [rb.id]);
     created(res, { ...rb, steps });
@@ -100,7 +100,7 @@ router.post('/:id/execute', authenticate, requirePermission('execute', 'runbooks
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'RUNBOOK_EXECUTION', category: 'RUNBOOK',
-      targetId: req.params.id, details: `Started execution of: ${rb.title}`, requestId: req.id,
+      targetId: req.params.id, details: `Started execution of: ${rb.title}`, requestId: String(req.id ?? ''),
     });
     created(res, exec);
   } catch (err) { next(err); }
