@@ -80,7 +80,7 @@ router.patch('/:id/verify', authenticate, requirePermission('read', 'backups'), 
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'BACKUP_INTEGRITY_VERIFIED', category: 'INFRASTRUCTURE',
-      targetId: req.params.id, details: `Integrity verification: ${verified}`, requestId: req.id,
+      targetId: req.params.id, details: `Integrity verification: ${verified}`, requestId: String(req.id ?? ''),
     });
     ok(res, updated);
   } catch (err) { next(err); }
@@ -99,7 +99,7 @@ router.patch('/:id/restore-test', authenticate, requirePermission('read', 'backu
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'BACKUP_RESTORE_TEST', category: 'INFRASTRUCTURE',
-      targetId: req.params.id, details: `Restore drill: ${restoreStatus} in ${durationMin}m`, requestId: req.id,
+      targetId: req.params.id, details: `Restore drill: ${restoreStatus} in ${durationMin}m`, requestId: String(req.id ?? ''),
     });
     ok(res, updated);
   } catch (err) { next(err); }

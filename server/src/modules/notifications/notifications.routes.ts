@@ -20,7 +20,7 @@ router.post('/channels/:id/test', authenticate, requirePermission('manage', 'com
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'TEST_NOTIFICATION_SENT', category: 'NOTIFICATION',
       targetId: req.params.id, details: `Test notification dispatched, success: ${result}`,
-      requestId: req.id,
+      requestId: String(req.id ?? ''),
     });
     ok(res, { success: result });
   } catch (err) { next(err); }

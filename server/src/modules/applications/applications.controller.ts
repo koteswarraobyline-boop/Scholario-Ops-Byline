@@ -30,7 +30,7 @@ export async function createApplication(req: Request, res: Response, next: NextF
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'APPLICATION_CREATED', category: 'INFRASTRUCTURE',
       targetId: app.id, details: `Created application: ${app.name}`,
-      requestId: req.id,
+      requestId: String(req.id ?? ''),
     });
     created(res, app);
   } catch (err) { next(err); }
@@ -43,7 +43,7 @@ export async function updateApplication(req: Request, res: Response, next: NextF
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'APPLICATION_UPDATED', category: 'INFRASTRUCTURE',
       targetId: app.id, details: `Updated application: ${app.name}`,
-      requestId: req.id,
+      requestId: String(req.id ?? ''),
     });
     ok(res, app);
   } catch (err) { next(err); }
@@ -56,7 +56,7 @@ export async function deleteApplication(req: Request, res: Response, next: NextF
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'APPLICATION_DELETED', category: 'INFRASTRUCTURE',
       targetId: req.params.id, details: `Soft-deleted application`,
-      requestId: req.id,
+      requestId: String(req.id ?? ''),
     });
     noContent(res);
   } catch (err) { next(err); }

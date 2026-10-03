@@ -48,7 +48,7 @@ router.get('/:id', authenticate, requirePermission('read', 'monitors'), async (r
 router.post('/', authenticate, requirePermission('create', 'maintenance'), validate(createSchema), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const d = req.body;
-    const [mw] = await query(
+    const [mw] = await query<{ id: string; title: string }>(
       `INSERT INTO maintenance_windows
          (id,title,application_id,environment,start_time,end_time,expected_impact,suppress_monitors,reason,approved_by,approved_by_id,created_by_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
@@ -66,7 +66,7 @@ router.post('/', authenticate, requirePermission('create', 'maintenance'), valid
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'MAINTENANCE_CREATED', category: 'MAINTENANCE',
-      targetId: mw.id, details: `Created maintenance: ${d.title}`, requestId: req.id,
+      targetId: mw.id, details: `Created maintenance: ${d.title}`, requestId: String(req.id ?? ''),
     });
     created(res, mw);
   } catch (err) { next(err); }
@@ -88,7 +88,7 @@ router.patch('/:id/complete', authenticate, requirePermission('update', 'mainten
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'MAINTENANCE_COMPLETED', category: 'MAINTENANCE',
-      targetId: req.params.id, details: `Maintenance window completed`, requestId: req.id,
+      targetId: req.params.id, details: `Maintenance window completed`, requestId: String(req.id ?? ''),
     });
     ok(res, { status: 'COMPLETED' });
   } catch (err) { next(err); }

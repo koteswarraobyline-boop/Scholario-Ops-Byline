@@ -39,7 +39,7 @@ router.get('/summary', authenticate, requirePermission('read', 'reports'), async
        JOIN servers s ON s.id = a.dr_server_id
        WHERE a.deleted_at IS NULL AND s.status = 'HEALTHY'`
     );
-    const deadMan = await queryOne(
+    const deadMan = await queryOne<{ status: string; last_heartbeat_received_at: string | null }>(
       `SELECT status, last_heartbeat_received_at FROM dead_man_controls LIMIT 1`
     );
     const cfDegraded = await queryOne<{ count: string }>(
@@ -79,14 +79,6 @@ router.get('/summary', authenticate, requirePermission('read', 'reports'), async
 // GET /api/reports/daily — structured daily ops briefing text
 router.get('/daily', authenticate, requirePermission('read', 'reports'), async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const summaryRes = await new Promise<Record<string, unknown>>((resolve) => {
-      const fakeRes = {
-        json: (body: Record<string, unknown>) => resolve(body.data as Record<string, unknown>),
-        status: () => fakeRes,
-      };
-      // Re-use summary logic
-    });
-
     const apps = await query(
       `SELECT name, status, uptime_30d, p95_ms, error_rate_percent FROM applications WHERE deleted_at IS NULL ORDER BY tier, name`
     );
@@ -102,18 +94,20 @@ router.get('/daily', authenticate, requirePermission('read', 'reports'), async (
       '============================================================',
       '1. APPLICATION HEALTH',
       '============================================================',
-      ...apps.map((a: Record<string, unknown>) =>
-        `  ${String(a.name).padEnd(20)} | ${String(a.status).padEnd(10)} | Uptime: ${a.uptime_30d ?? 'N/A'}% | P95: ${a.p95_ms ?? 'N/A'}ms`
-      ),
+      ...apps.map((a: unknown) => {
+        const app = a as Record<string, unknown>;
+        return `  ${String(app.name).padEnd(20)} | ${String(app.status).padEnd(10)} | Uptime: ${app.uptime_30d ?? 'N/A'}% | P95: ${app.p95_ms ?? 'N/A'}ms`;
+      }),
       '',
       '============================================================',
       '2. OPEN INCIDENTS',
       '============================================================',
       openInc.length === 0
         ? '  No open incidents — all systems nominal.'
-        : openInc.map((i: Record<string, unknown>) =>
-            `  [${i.ticket_number}] ${i.severity} — ${i.title} (${i.status})`
-          ).join('\n'),
+        : openInc.map((i: unknown) => {
+            const inc = i as Record<string, unknown>;
+            return `  [${inc.ticket_number}] ${inc.severity} — ${inc.title} (${inc.status})`;
+          }).join('\n'),
       '',
       '============================================================',
       '3. COMPLIANCE & GOVERNANCE',

@@ -43,7 +43,7 @@ export const DrService = {
     // 2. DR server health
     const drServer = await queryOne<{ status: string; agent_status: string; hostname: string }>(
       `SELECT status, agent_status, hostname FROM servers WHERE id = $1 AND deleted_at IS NULL`,
-      [(app as Record<string, unknown>).dr_server_id as string]
+      [(app as unknown as Record<string, unknown>).dr_server_id as string]
     );
     checks.push({
       category: 'DR Standby Compute',

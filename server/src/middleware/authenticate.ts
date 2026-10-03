@@ -16,6 +16,8 @@ export interface JwtPayload {
 declare global {
   namespace Express {
     interface Request {
+      id: string;
+      startTime: number;
       user?: JwtPayload;
     }
   }

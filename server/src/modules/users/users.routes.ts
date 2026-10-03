@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { authenticate } from '../../middleware/authenticate';
 import { requireRole, requirePermission } from '../../middleware/authorize';
 import { validate } from '../../middleware/validate';
-import { AuthService } from '../auth/auth.service';
+import * as AuthService from '../auth/auth.service';
 import { query, queryOne } from '../../database/pool';
 import { AuditService } from '../audit/audit.service';
 import { ok, created, noContent, paginated, parsePagination } from '../../utils/response';
@@ -71,7 +71,7 @@ router.post('/', authenticate, requirePermission('manage', 'users'), validate(cr
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'USER_CREATED', category: 'USER',
       targetId: user.id, details: `Created user: ${user.email} with role: ${user.roleName}`,
-      requestId: req.id,
+      requestId: String(req.id ?? ''),
     });
     created(res, user);
   } catch (err) { next(err); }
@@ -104,7 +104,7 @@ router.patch('/:id', authenticate, requirePermission('manage', 'users'), validat
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'USER_UPDATED', category: 'USER',
-      targetId: req.params.id, details: `Updated user fields`, requestId: req.id,
+      targetId: req.params.id, details: `Updated user fields`, requestId: String(req.id ?? ''),
     });
     ok(res, updated);
   } catch (err) { next(err); }
@@ -120,11 +120,10 @@ router.delete('/:id', authenticate, requireRole('super_admin'), async (req: Requ
     await AuditService.log({
       operatorId: req.user!.sub, operator: req.user!.email,
       action: 'USER_DELETED', category: 'USER',
-      targetId: req.params.id, details: `Deactivated user account`, requestId: req.id,
+      targetId: req.params.id, details: `Deactivated user account`, requestId: String(req.id ?? ''),
     });
     noContent(res);
   } catch (err) { next(err); }
 });
 
-export { AuthService };
 export default router;
