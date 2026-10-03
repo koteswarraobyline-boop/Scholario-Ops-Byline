@@ -11,7 +11,8 @@ import {
   Check, 
   FileText,
   Sliders,
-  Cloud
+  Cloud,
+  CheckCheck
 } from 'lucide-react';
 
 export const IncidentFlowChart: React.FC = () => {
@@ -21,7 +22,7 @@ export const IncidentFlowChart: React.FC = () => {
   const mosaicIncident = incidents.find(i => i.id === 'INC-1042');
   const isResolved = !mosaicIncident || mosaicIncident.status === 'RESOLVED';
 
-  // 7 standard incident lifecycle steps
+  // 7 standard incident recovery lifecycle steps from specification
   const steps = [
     {
       num: 1,
@@ -32,42 +33,42 @@ export const IncidentFlowChart: React.FC = () => {
     },
     {
       num: 2,
-      title: '3-Check Confirmation',
+      title: '3 Consecutive Probe Failures',
       detail: 'Continuous probe failed 3 consecutive times',
       status: 'COMPLETED',
       time: '16m ago'
     },
     {
       num: 3,
-      title: 'Incident Deduplication',
-      detail: 'INC-1042 fingerprinted & dispatched to MS Teams',
+      title: 'Blast Radius Isolation',
+      detail: 'INC-1042 quarantined & dispatched to MS Teams',
       status: 'COMPLETED',
       time: '15m ago'
     },
     {
       num: 4,
-      title: 'Cloudflare DR Reroute',
+      title: 'Automated Traffic Reroute',
       detail: 'Anycast origin shifted to Singapore DR Standby',
       status: 'COMPLETED',
       time: '14m ago'
     },
     {
       num: 5,
-      title: 'Root Mitigation',
+      title: 'Root Cause Mitigation',
       detail: 'Pool recycled & connections drained via Runbook RB-01',
       status: isResolved ? 'COMPLETED' : 'ACTIVE',
       time: isResolved ? '2m ago' : 'In Progress'
     },
     {
       num: 6,
-      title: '3-Check Verification',
+      title: '3 Consecutive Recovery Checks',
       detail: 'Monitor confirms 3 consecutive passing health checks',
       status: isResolved ? 'COMPLETED' : 'PENDING',
       time: isResolved ? 'Just now' : 'Awaiting 3 passes'
     },
     {
       num: 7,
-      title: 'Incident Resolution',
+      title: 'Verified Resolved',
       detail: 'SLA restored & immutable postmortem created',
       status: isResolved ? 'COMPLETED' : 'PENDING',
       time: isResolved ? 'Resolved' : 'Pending signoff'
@@ -77,11 +78,13 @@ export const IncidentFlowChart: React.FC = () => {
   return (
     <div className={`rounded-lg border p-4 transition-colors ${
       isDark 
-        ? 'bg-[#0F172A] border-[#1E293B] text-slate-100' 
+        ? 'bg-[#111726] border-[#1E293B] text-slate-100' 
         : 'bg-white border-[#E2E8F0] text-slate-900 shadow-xs'
     }`}>
       {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-inherit">
+      <div className={`flex flex-wrap items-center justify-between gap-3 pb-3 border-b ${
+        isDark ? 'border-[#1E293B]' : 'border-slate-100'
+      }`}>
         <div className="flex items-center gap-2.5">
           <div className={`p-1.5 rounded ${
             isResolved 
@@ -92,7 +95,7 @@ export const IncidentFlowChart: React.FC = () => {
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <span className="font-semibold text-xs tracking-tight">Incident Mitigation &amp; Recovery State Machine</span>
+              <span className="font-semibold text-xs tracking-tight">Incident Recovery Lifecycle Flowchart</span>
               <span className={`text-[10px] font-mono px-2 py-0.2 rounded font-semibold ${
                 isResolved 
                   ? (isDark ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-emerald-100 text-emerald-800 border border-emerald-300')
@@ -102,7 +105,7 @@ export const IncidentFlowChart: React.FC = () => {
               </span>
             </div>
             <p className={`text-[11px] font-mono mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-              Lifecycle for INC-1042: Consecutive Failure Threshold → Blast Radius Containment → Recovery Verification
+              State Machine: Telemetry Anomaly → 3 Probe Failures → Blast Radius Isolation → Traffic Reroute → Root Mitigation → 3 Recovery Checks → Verified Resolved
             </p>
           </div>
         </div>
@@ -112,7 +115,7 @@ export const IncidentFlowChart: React.FC = () => {
           {isResolved ? (
             <button
               onClick={() => triggerSimulatedScenario('TRIGGER_MOSAIC_FAIL')}
-              className={`px-3 py-1 text-xs font-mono rounded flex items-center gap-1.5 transition-colors border ${
+              className={`px-3 py-1 text-xs font-mono rounded flex items-center gap-1.5 transition-colors border cursor-pointer ${
                 isDark 
                   ? 'bg-[#182030] hover:bg-[#202B40] text-rose-300 border-rose-900/60' 
                   : 'bg-rose-50 hover:bg-rose-100 text-rose-800 border-rose-200'
@@ -124,7 +127,7 @@ export const IncidentFlowChart: React.FC = () => {
           ) : (
             <button
               onClick={() => triggerSimulatedScenario('RESOLVE_MOSAIC')}
-              className={`px-3 py-1 text-xs font-mono rounded flex items-center gap-1.5 transition-colors border shadow-xs ${
+              className={`px-3 py-1 text-xs font-mono rounded flex items-center gap-1.5 transition-colors border shadow-xs cursor-pointer ${
                 isDark 
                   ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400' 
                   : 'bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-700'
@@ -138,11 +141,11 @@ export const IncidentFlowChart: React.FC = () => {
       </div>
 
       {/* Horizontal Flow Steps */}
-      <div className="py-4">
-        <div className={`p-4 rounded-lg border overflow-x-auto ${
-          isDark ? 'bg-[#080C14] border-[#182336]' : 'bg-[#F8FAFC] border-[#E2E8F0]'
+      <div className="py-3 w-full min-w-0">
+        <div className={`w-full min-w-0 p-4 rounded-lg border overflow-x-auto ${
+          isDark ? 'bg-[#070B12] border-[#182336]' : 'bg-[#F8FAFC] border-[#E2E8F0]'
         }`}>
-          <div className="min-w-[840px] flex items-center justify-between relative">
+          <div className="min-w-[900px] flex items-center justify-between relative">
             {steps.map((st, idx) => {
               const isCurrent = st.status === 'ACTIVE';
               const isDone = st.status === 'COMPLETED';
@@ -150,61 +153,58 @@ export const IncidentFlowChart: React.FC = () => {
               return (
                 <React.Fragment key={st.num}>
                   {/* Step Card */}
-                  <div className={`w-28 p-2.5 rounded-lg border flex flex-col items-center text-center relative transition-all ${
+                  <div className={`w-30 p-2.5 rounded-lg border flex flex-col items-center text-center relative transition-all ${
                     isCurrent
                       ? (isDark ? 'bg-[#21160C] border-amber-500 ring-2 ring-amber-500/40' : 'bg-amber-50 border-amber-400 ring-2 ring-amber-400/40 shadow-xs')
                       : isDone
                         ? (isDark ? 'bg-[#0D1F15] border-emerald-800/80 text-emerald-300' : 'bg-white border-emerald-300 text-emerald-950 shadow-xs')
-                        : (isDark ? 'bg-[#121A2B] border-slate-800 text-slate-500' : 'bg-slate-100 border-slate-200 text-slate-400')
+                        : (isDark ? 'bg-[#111726] border-slate-800 text-slate-500' : 'bg-slate-100 border-slate-200 text-slate-400')
                   }`}>
                     {/* Circle icon */}
-                    <div className={`w-6 h-6 rounded-full flex items-center justify-center font-mono text-[10px] font-bold mb-1.5 ${
+                    <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold font-mono mb-1.5 ${
                       isCurrent
-                        ? 'bg-amber-500 text-black animate-pulse'
+                        ? 'bg-amber-500 text-white animate-pulse'
                         : isDone
-                          ? 'bg-emerald-600 text-white'
+                          ? 'bg-emerald-500 text-white'
                           : (isDark ? 'bg-slate-800 text-slate-400' : 'bg-slate-200 text-slate-500')
                     }`}>
-                      {isDone ? <Check className="w-3.5 h-3.5" /> : st.num}
+                      {isDone ? <Check className="w-3.5 h-3.5 stroke-[3]" /> : st.num}
                     </div>
 
+                    {/* Step Title */}
                     <span className="font-semibold text-[11px] font-mono leading-tight">
                       {st.title}
                     </span>
 
-                    <span className={`text-[9px] font-mono mt-1 line-clamp-2 ${
+                    {/* Time indicator */}
+                    <span className={`text-[9px] font-mono mt-1 ${
                       isCurrent 
-                        ? (isDark ? 'text-amber-300' : 'text-amber-800') 
+                        ? 'text-amber-400 font-semibold' 
                         : isDone 
-                          ? (isDark ? 'text-slate-300' : 'text-slate-600') 
-                          : (isDark ? 'text-slate-500' : 'text-slate-400')
-                    }`}>
-                      {st.detail}
-                    </span>
-
-                    <span className={`text-[9px] font-mono mt-1.5 px-1.5 py-0.2 rounded font-semibold ${
-                      isCurrent 
-                        ? 'bg-amber-500/20 text-amber-400' 
-                        : isDone 
-                          ? 'bg-emerald-500/20 text-emerald-400' 
+                          ? (isDark ? 'text-emerald-400' : 'text-emerald-600') 
                           : 'text-slate-500'
                     }`}>
                       {st.time}
                     </span>
+
+                    {/* Detail subtitle */}
+                    <p className={`text-[9px] font-sans mt-1 line-clamp-2 ${
+                      isDark ? 'text-slate-400' : 'text-slate-600'
+                    }`}>
+                      {st.detail}
+                    </p>
                   </div>
 
-                  {/* Flow Arrow Connector between steps */}
+                  {/* Connector Arrow */}
                   {idx < steps.length - 1 && (
-                    <div className="flex-1 flex items-center justify-center px-1">
-                      <div className={`h-0.5 w-full relative ${
-                        isDone 
-                          ? 'bg-emerald-500' 
-                          : (isDark ? 'bg-slate-800' : 'bg-slate-300')
-                      }`}>
-                        {isCurrent && (
-                          <div className="absolute inset-0 bg-amber-400 animate-pulse" />
-                        )}
-                      </div>
+                    <div className="flex-1 px-1 flex justify-center">
+                      <ArrowRight className={`w-3.5 h-3.5 ${
+                        isDone && steps[idx + 1].status !== 'PENDING'
+                          ? 'text-emerald-500'
+                          : isCurrent
+                            ? 'text-amber-500 animate-pulse'
+                            : (isDark ? 'text-slate-700' : 'text-slate-300')
+                      }`} />
                     </div>
                   )}
                 </React.Fragment>
@@ -214,21 +214,40 @@ export const IncidentFlowChart: React.FC = () => {
         </div>
       </div>
 
-      {/* Recovery Principle Callout */}
-      <div className={`p-2.5 rounded border text-xs font-mono flex items-center justify-between gap-3 ${
-        isDark ? 'bg-[#0B1220] border-[#182338] text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'
-      }`}>
-        <div className="flex items-center gap-2">
-          <span className="text-blue-500 font-bold">OPERATIONAL PRINCIPLE:</span>
-          <span>Never resolve an incident on a single green check. Require 3 consecutive passing probes across 30 seconds.</span>
-        </div>
-        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-          isResolved 
-            ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' 
-            : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+      {/* Incident State Machine Guarantees */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-1 font-mono text-xs">
+        <div className={`p-2.5 rounded border ${
+          isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
         }`}>
-          {isResolved ? '3/3 PASSES CONFIRMED' : '1/3 CHECKS PASSING'}
-        </span>
+          <div className="text-[10px] text-blue-500 uppercase tracking-wider font-semibold">
+            Flapping Protection
+          </div>
+          <p className={`text-[11px] font-sans mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            Requires 3 consecutive probe confirmations before status transition can fire, eliminating spurious alarm flapping.
+          </p>
+        </div>
+
+        <div className={`p-2.5 rounded border ${
+          isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
+        }`}>
+          <div className="text-[10px] text-amber-500 uppercase tracking-wider font-semibold">
+            Blast Radius Containment
+          </div>
+          <p className={`text-[11px] font-sans mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            Automated DNS and Anycast load balancing decouples failed origins and diverts users to warm DR nodes in &lt;15 seconds.
+          </p>
+        </div>
+
+        <div className={`p-2.5 rounded border ${
+          isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
+        }`}>
+          <div className="text-[10px] text-emerald-500 uppercase tracking-wider font-semibold">
+            Verified Resolution Criteria
+          </div>
+          <p className={`text-[11px] font-sans mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            Recovery is not verified until 3 back-to-back synthetic probes return HTTP 200 within P95 latency bounds.
+          </p>
+        </div>
       </div>
     </div>
   );

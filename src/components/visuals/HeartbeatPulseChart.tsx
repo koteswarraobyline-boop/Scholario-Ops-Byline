@@ -1,25 +1,47 @@
 import React, { useState, useEffect } from 'react';
 import { useOps } from '../../context/OpsContext';
-import { Activity, ShieldCheck, AlertTriangle, Radio, RefreshCw, Zap } from 'lucide-react';
+import { Activity, ShieldCheck, AlertTriangle, Radio, RefreshCw, Zap, Wifi } from 'lucide-react';
 
 export const HeartbeatPulseChart: React.FC = () => {
   const { deadMan, triggerSimulatedScenario, runAllProbes, theme } = useOps();
   const isDark = theme === 'dark';
 
   const [tick, setTick] = useState(0);
-  const [pulseAnimation, setPulseAnimation] = useState(true);
+  const [pulseCount, setPulseCount] = useState(0);
+  const [countdownMs, setCountdownMs] = useState(5000);
+  const [jitterMs, setJitterMs] = useState(14.2);
 
+  const isHealthy = deadMan.status === 'HEALTHY';
+  const toleranceMs = (deadMan.toleranceSec || 5) * 1000;
+
+  // 1.0s pulse interval loop + countdown timer
+  useEffect(() => {
+    const pulseInterval = setInterval(() => {
+      if (isHealthy) {
+        setPulseCount(p => p + 1);
+        setCountdownMs(toleranceMs); // reset silence countdown on each pulse
+        setJitterMs(+(13.8 + Math.random() * 0.9).toFixed(1));
+      }
+    }, 1000);
+
+    return () => clearInterval(pulseInterval);
+  }, [isHealthy, toleranceMs]);
+
+  // Fast animation ticker & countdown decrement
   useEffect(() => {
     const timer = setInterval(() => {
       setTick(t => (t + 1) % 100);
-    }, 1200);
-    return () => clearInterval(timer);
-  }, []);
+      if (isHealthy) {
+        setCountdownMs(prev => Math.max(0, prev - 100));
+      } else {
+        setCountdownMs(0);
+      }
+    }, 100);
 
-  const isHealthy = deadMan.status === 'HEALTHY';
+    return () => clearInterval(timer);
+  }, [isHealthy]);
 
   // ECG points data string representing normal sinus rhythm with P-Q-R-S-T wave
-  // Normal wave: flat baseline, slight P bump, dip Q, high sharp R peak, deep S dip, gentle T wave, flat baseline
   const normalEcgPath = `
     M 0,28
     L 30,28
@@ -71,14 +93,19 @@ export const HeartbeatPulseChart: React.FC = () => {
     L 600,28
   `;
 
+  const countdownSec = (countdownMs / 1000).toFixed(1);
+  const countdownPercent = Math.min(100, Math.max(0, (countdownMs / toleranceMs) * 100));
+
   return (
     <div className={`rounded-lg border p-4 transition-colors ${
       isDark 
-        ? 'bg-[#0F172A] border-[#1E293B] text-slate-100' 
+        ? 'bg-[#111726] border-[#1E293B] text-slate-100' 
         : 'bg-white border-[#E2E8F0] text-slate-900 shadow-xs'
     }`}>
       {/* Top Header */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-inherit">
+      <div className={`flex flex-wrap items-center justify-between gap-3 pb-3 border-b ${
+        isDark ? 'border-[#1E293B]' : 'border-slate-100'
+      }`}>
         <div className="flex items-center gap-2.5">
           <div className={`p-1.5 rounded ${
             isHealthy 
@@ -99,7 +126,7 @@ export const HeartbeatPulseChart: React.FC = () => {
               </span>
             </div>
             <p className={`text-[11px] font-mono mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-              Origin: Zurich Switzerland node (ch-zh-monitor-01) · Out-of-band dead-man interval: 1000ms
+              Origin: Zurich Switzerland node (ch-zh-monitor-01) · Out-of-band dead-man interval: 1.0s
             </p>
           </div>
         </div>
@@ -108,7 +135,7 @@ export const HeartbeatPulseChart: React.FC = () => {
         <div className="flex items-center gap-2">
           <button
             onClick={() => triggerSimulatedScenario('DEADMAN_SILENCE')}
-            className={`px-2.5 py-1 text-[11px] font-mono rounded transition-colors flex items-center gap-1.5 border ${
+            className={`px-2.5 py-1 text-[11px] font-mono rounded transition-colors flex items-center gap-1.5 border cursor-pointer ${
               isHealthy
                 ? (isDark ? 'bg-[#182030] hover:bg-[#202B40] text-amber-300 border-amber-900/60' : 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-200')
                 : (isDark ? 'bg-[#182030] hover:bg-[#202B40] text-emerald-300 border-emerald-900/60' : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-200')
@@ -121,7 +148,7 @@ export const HeartbeatPulseChart: React.FC = () => {
 
           <button
             onClick={() => runAllProbes()}
-            className={`p-1.5 text-xs font-mono rounded transition-colors border ${
+            className={`p-1.5 text-xs font-mono rounded transition-colors border cursor-pointer ${
               isDark 
                 ? 'bg-[#162033] hover:bg-[#223048] text-slate-300 border-slate-700' 
                 : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
@@ -170,7 +197,7 @@ export const HeartbeatPulseChart: React.FC = () => {
               strokeLinecap="round"
               strokeLinejoin="round"
               fill="none"
-              className={pulseAnimation && isHealthy ? 'animate-ecg' : ''}
+              className={isHealthy ? 'animate-ecg' : ''}
               style={{
                 filter: isHealthy 
                   ? 'drop-shadow(0px 0px 4px rgba(16, 185, 129, 0.7))' 
@@ -198,7 +225,7 @@ export const HeartbeatPulseChart: React.FC = () => {
               isHealthy ? 'bg-emerald-500 animate-ping' : 'bg-rose-500'
             }`} />
             <span className={isDark ? 'text-slate-400' : 'text-slate-600'}>
-              {isHealthy ? 'PULSE ACTIVE · 60 BPM' : 'HEARTBEAT DROP DETECTED'}
+              {isHealthy ? `PULSE ACTIVE · 60 BPM · SEQ #${pulseCount}` : 'HEARTBEAT DROP DETECTED'}
             </span>
           </div>
         </div>
@@ -206,59 +233,93 @@ export const HeartbeatPulseChart: React.FC = () => {
 
       {/* High-Level Telemetry Cards Underneath */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 font-mono text-xs">
-        <div className={`p-2 rounded border ${
-          isDark ? 'bg-[#121A2B] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
+        {/* 1. Pulse Interval */}
+        <div className={`p-2.5 rounded border ${
+          isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
         }`}>
           <div className={`text-[10px] uppercase tracking-wider ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-            Probe Interval
+            Pulse Interval
           </div>
           <div className="font-semibold text-sm mt-0.5 text-blue-500">
-            {deadMan.intervalSec}s (1000ms)
+            {deadMan.intervalSec}.0s <span className="text-[10px] font-normal text-slate-400">(1.0 Hz)</span>
           </div>
-          <div className={`text-[10px] mt-0.5 ${isDark ? 'text-slate-500' : 'text-slate-600'}`}>
-            Out-of-band independent
+          <div className={`text-[10px] mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            Zurich ZH4 out-of-band probe
           </div>
         </div>
 
-        <div className={`p-2 rounded border ${
-          isDark ? 'bg-[#121A2B] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
+        {/* 2. Millisecond Jitter */}
+        <div className={`p-2.5 rounded border ${
+          isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
         }`}>
           <div className={`text-[10px] uppercase tracking-wider ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-            Roundtrip Jitter
+            Millisecond Jitter
           </div>
           <div className="font-semibold text-sm mt-0.5 text-emerald-500">
-            14.2 ms <span className="text-[10px] font-normal text-slate-400">±1.1ms</span>
+            {isHealthy ? `${jitterMs} ms` : 'N/A'}{' '}
+            <span className="text-[10px] font-normal text-slate-400">±0.8ms</span>
           </div>
-          <div className={`text-[10px] mt-0.5 ${isDark ? 'text-slate-500' : 'text-slate-600'}`}>
-            Packet loss: 0.00%
-          </div>
-        </div>
-
-        <div className={`p-2 rounded border ${
-          isDark ? 'bg-[#121A2B] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
-        }`}>
-          <div className={`text-[10px] uppercase tracking-wider ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-            Tolerance Window
-          </div>
-          <div className="font-semibold text-sm mt-0.5 text-indigo-400">
-            {deadMan.toleranceSec}s max delay
-          </div>
-          <div className={`text-[10px] mt-0.5 ${isDark ? 'text-slate-500' : 'text-slate-600'}`}>
-            Misses: {deadMan.consecutiveMisses}
+          <div className={`text-[10px] mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            RTT variance · 0% loss
           </div>
         </div>
 
-        <div className={`p-2 rounded border ${
-          isDark ? 'bg-[#121A2B] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
+        {/* 3. Signal Strength */}
+        <div className={`p-2.5 rounded border ${
+          isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
         }`}>
           <div className={`text-[10px] uppercase tracking-wider ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-            Alert Escalation
+            Signal Strength
           </div>
-          <div className={`font-semibold text-sm mt-0.5 ${isHealthy ? 'text-slate-400' : 'text-rose-500'}`}>
-            {isHealthy ? 'Armed (Standby)' : 'DISPATCHED'}
+          <div className="font-semibold text-sm mt-0.5 text-indigo-400 flex items-center justify-between">
+            <span>{isHealthy ? '99.8%' : '0.0%'} <span className="text-[10px] font-normal text-slate-400">(-42 dBm)</span></span>
+            {/* Visual 5-bar signal strength meter */}
+            <div className="flex items-end gap-0.5 h-3.5">
+              <span className={`w-1 rounded-xs ${isHealthy ? 'h-1.5 bg-emerald-500' : 'h-1.5 bg-rose-500/40'}`} />
+              <span className={`w-1 rounded-xs ${isHealthy ? 'h-2 bg-emerald-500' : 'h-2 bg-rose-500/40'}`} />
+              <span className={`w-1 rounded-xs ${isHealthy ? 'h-2.5 bg-emerald-500' : 'h-2.5 bg-rose-500/40'}`} />
+              <span className={`w-1 rounded-xs ${isHealthy ? 'h-3 bg-emerald-500' : 'h-3 bg-rose-500/40'}`} />
+              <span className={`w-1 rounded-xs ${isHealthy ? 'h-3.5 bg-emerald-500' : 'h-3.5 bg-rose-500/40'}`} />
+            </div>
           </div>
-          <div className={`text-[10px] mt-0.5 ${isDark ? 'text-slate-500' : 'text-slate-600'}`}>
-            Teams + On-Call SMS
+          <div className={`text-[10px] mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            Full mesh telemetry uplink
+          </div>
+        </div>
+
+        {/* 4. Live Silence Detection Countdown Timer */}
+        <div className={`p-2.5 rounded border ${
+          !isHealthy 
+            ? (isDark ? 'bg-rose-950/30 border-rose-900/60' : 'bg-rose-50 border-rose-300')
+            : (isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200')
+        }`}>
+          <div className="flex items-center justify-between">
+            <span className={`text-[10px] uppercase tracking-wider ${
+              !isHealthy ? 'text-rose-400 font-semibold' : (isDark ? 'text-slate-400' : 'text-slate-500')
+            }`}>
+              Silence Countdown
+            </span>
+            <span className={`text-[10px] font-bold ${
+              !isHealthy ? 'text-rose-500' : 'text-emerald-500'
+            }`}>
+              {isHealthy ? `${countdownSec}s / 5.0s` : 'EXPIRED'}
+            </span>
+          </div>
+
+          {/* Visual Countdown Progress Bar */}
+          <div className="w-full bg-slate-700/30 h-1.5 rounded-full overflow-hidden mt-1.5">
+            <div 
+              className={`h-full transition-all duration-100 ${
+                !isHealthy ? 'bg-rose-500 w-full' : 'bg-emerald-500'
+              }`}
+              style={{ width: isHealthy ? `${countdownPercent}%` : '100%' }}
+            />
+          </div>
+
+          <div className={`text-[10px] mt-1 truncate ${
+            !isHealthy ? 'text-rose-400 font-semibold' : (isDark ? 'text-slate-400' : 'text-slate-600')
+          }`}>
+            {isHealthy ? 'Tolerance window (5.0s max delay)' : `Misses: ${deadMan.consecutiveMisses} · Teams Dispatched`}
           </div>
         </div>
       </div>

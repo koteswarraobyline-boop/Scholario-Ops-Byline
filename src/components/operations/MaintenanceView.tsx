@@ -28,23 +28,23 @@ export const MaintenanceView: React.FC = () => {
             <div key={m.id} className={`p-4 rounded-lg border space-y-3 transition-colors ${
               isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
             }`}>
-              <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-3 ${
+              <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-3 min-w-0 ${
                 isDark ? 'border-[#1A2332]' : 'border-slate-100'
               }`}>
-                <div className="flex items-center gap-3">
-                  <div className={`w-8 h-8 rounded flex items-center justify-center ${
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className={`w-8 h-8 rounded flex items-center justify-center shrink-0 ${
                     isDark ? 'bg-[#162033] text-indigo-400' : 'bg-indigo-50 text-indigo-600 border border-indigo-200'
                   }`}>
                     <Calendar className="w-4 h-4" />
                   </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold text-sm font-sans">{m.title}</span>
-                      <span className="text-xs text-blue-500 font-semibold">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-bold text-sm font-sans truncate">{m.title}</span>
+                      <span className="text-xs text-blue-500 font-semibold shrink-0">
                         {app?.name} ({m.environment})
                       </span>
                     </div>
-                    <p className={`text-xs font-sans mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{m.reason}</p>
+                    <p className={`text-xs font-sans mt-0.5 break-words ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{m.reason}</p>
                   </div>
                 </div>
 

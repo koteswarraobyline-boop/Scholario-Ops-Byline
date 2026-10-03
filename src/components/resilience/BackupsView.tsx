@@ -57,8 +57,8 @@ export const BackupsView: React.FC = () => {
       <div className={`rounded-lg border overflow-hidden transition-colors ${
         isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
       }`}>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs font-mono">
+        <div className="w-full min-w-0 overflow-x-auto">
+          <table className="w-full text-left text-xs font-mono min-w-[760px]">
             <thead className={`font-medium border-b ${
               isDark ? 'bg-[#0B0F17] text-slate-400 border-[#1A2332]' : 'bg-slate-50 text-slate-600 border-slate-200'
             }`}>
@@ -98,7 +98,7 @@ export const BackupsView: React.FC = () => {
                       {b.retentionDays}d
                     </td>
 
-                    <td className={`py-2.5 px-3.5 max-w-xs truncate text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                    <td className={`py-2.5 px-3.5 max-w-xs truncate text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`} title={b.integrityHash}>
                       {b.integrityHash}
                     </td>
 

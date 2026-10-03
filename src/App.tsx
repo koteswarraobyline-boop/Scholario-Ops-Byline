@@ -23,6 +23,7 @@ import { CommunicationsView} from './components/communications/CommunicationsVie
 import { ReportsView }       from './components/analytics/ReportsView';
 import { AuditLogsView }     from './components/admin/AuditLogsView';
 import { UsersView }         from './components/admin/UsersView';
+import { ProjectOverviewView } from './components/overview/ProjectOverviewView';
 
 // ── Protected Route ──────────────────────────────────────────────────────────
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -78,6 +79,8 @@ const DashboardView: React.FC<{ tab: string }> = ({ tab }) => {
     uptime:         <ReportsView />,
     audit:          <AuditLogsView />,
     users:          <UsersView />,
+    'project-overview': <ProjectOverviewView />,
+    docs:           <ProjectOverviewView />,
   };
 
   return <Shell>{viewMap[tab] ?? <OverviewView />}</Shell>;
@@ -135,6 +138,8 @@ const DashboardRoutes: React.FC = () => (
     <Route path="/audit"         element={<DashboardView tab="audit" />} />
     <Route path="/users"         element={<DashboardView tab="users" />} />
     <Route path="/settings"      element={<DashboardView tab="settings" />} />
+    <Route path="/project-overview" element={<DashboardView tab="project-overview" />} />
+    <Route path="/docs"          element={<DashboardView tab="docs" />} />
     <Route path="*"              element={<Navigate to="/overview" replace />} />
   </Routes>
 );

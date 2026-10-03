@@ -1248,6 +1248,133 @@ export const INITIAL_INCIDENTS: Incident[] = [
         content: 'Identified query `SELECT * FROM exam_submissions WHERE tenant_id IS NULL` running across 40 parallel threads without index. Traffic is safe on DR origin.'
       }
     ]
+  },
+  {
+    id: 'INC-1041',
+    title: 'Cipher LMS Redis Cache Eviction Spike & Session Latency',
+    severity: 'HIGH',
+    status: 'RESOLVED',
+    applicationId: 'app-cipher',
+    environment: 'PRD',
+    fingerprint: 'cipher:prd:mon-ciph-redis:mem_eviction_spike',
+    rootCause: 'Redis maxmemory limit reached (98%) due to orphan student exam tokens without TTL, triggering sudden latency spikes on session validation.',
+    startedAt: new Date(Date.now() - 3.5 * 60 * 60 * 1000).toISOString(),
+    resolvedAt: new Date(Date.now() - 2.8 * 60 * 60 * 1000).toISOString(),
+    durationMinutes: 42,
+    owner: 'Sofia Chen (SRE)',
+    acknowledged: true,
+    acknowledgedAt: new Date(Date.now() - 3.3 * 60 * 60 * 1000).toISOString(),
+    acknowledgedBy: 'Sofia Chen',
+    affectedServices: ['Cipher Student Auth', 'Redis Session Cluster', 'Course Catalog Cache'],
+    affectedMonitors: ['mon-ciph-https', 'mon-ciph-db-conn'],
+    dependentFailures: [
+      'Redis maxmemory 8GB ceiling reached',
+      'Session lookup latency degraded from 2ms to 420ms',
+      'API gateway token introspection returned 504'
+    ],
+    timeline: [
+      { id: 'ev-1041-1', timestamp: new Date(Date.now() - 3.5 * 60 * 60 * 1000).toISOString(), source: 'mon-ciph-redis', level: 'WARN', message: 'Redis cache memory exceeded 85% watermark.' },
+      { id: 'ev-1041-2', timestamp: new Date(Date.now() - 3.4 * 60 * 60 * 1000).toISOString(), source: 'mon-ciph-https', level: 'CRITICAL', message: 'Auth token verification latency exceeded 400ms threshold.' },
+      { id: 'ev-1041-3', timestamp: new Date(Date.now() - 3.3 * 60 * 60 * 1000).toISOString(), source: 'Escalation Engine', level: 'INFO', message: 'Alert dispatched to Teams #ops-incidents. Incident acknowledged by Sofia Chen.' },
+      { id: 'ev-1041-4', timestamp: new Date(Date.now() - 3.0 * 60 * 60 * 1000).toISOString(), source: 'Sofia Chen', level: 'INFO', message: 'Executed volatile-lru purge script on orphan test session namespaces.' },
+      { id: 'ev-1041-5', timestamp: new Date(Date.now() - 2.8 * 60 * 60 * 1000).toISOString(), source: 'Probe Engine', level: 'INFO', message: '3 consecutive probe checks nominal (latency 1.8ms, memory 44%). Incident verified and resolved.' }
+    ],
+    recoveryStatus: 'Resolved: Volatile-lru eviction policy enforced and orphan session keys purged.',
+    runbookId: 'run-db-starve',
+    mitigationActionTaken: 'Evicted orphan tokens and adjusted key expiration policy to 7200s.',
+    notes: [
+      {
+        id: 'note-1041-1',
+        author: 'Sofia Chen',
+        role: 'SRE Lead',
+        timestamp: new Date(Date.now() - 3.1 * 60 * 60 * 1000).toISOString(),
+        content: 'Fixed key generation in auth service to guarantee explicit TTL on all student OAuth refresh tokens.'
+      }
+    ]
+  },
+  {
+    id: 'INC-1040',
+    title: 'Apex SIS Origin Edge TLS Handshake Negotiation Glitch',
+    severity: 'WARNING',
+    status: 'RESOLVED',
+    applicationId: 'app-apex',
+    environment: 'PRD',
+    fingerprint: 'apex:prd:mon-apex-tls:handshake_timeout',
+    rootCause: 'Intermediate certificate chain authority rotation caused transient handshake negotiation timeouts on Frankfurt Nginx reverse proxy.',
+    startedAt: new Date(Date.now() - 19.5 * 60 * 60 * 1000).toISOString(),
+    resolvedAt: new Date(Date.now() - 19.1 * 60 * 60 * 1000).toISOString(),
+    durationMinutes: 24,
+    owner: 'Marcus Thorne (SecOps)',
+    acknowledged: true,
+    acknowledgedAt: new Date(Date.now() - 19.3 * 60 * 60 * 1000).toISOString(),
+    acknowledgedBy: 'Marcus Thorne',
+    affectedServices: ['Apex SIS Web App', 'Frankfurt Origin Proxy'],
+    affectedMonitors: ['mon-apex-https'],
+    dependentFailures: [
+      'TLS 1.3 handshake negotiation stall on older cipher suites',
+      'Origin returned 502 to Cloudflare edge'
+    ],
+    timeline: [
+      { id: 'ev-1040-1', timestamp: new Date(Date.now() - 19.5 * 60 * 60 * 1000).toISOString(), source: 'mon-apex-https', level: 'WARN', message: 'Zurich probe detected TLS handshake latency > 1200ms.' },
+      { id: 'ev-1040-2', timestamp: new Date(Date.now() - 19.4 * 60 * 60 * 1000).toISOString(), source: 'mon-apex-https', level: 'WARN', message: 'Consecutive probe failure confirmed. Warning incident opened.' },
+      { id: 'ev-1040-3', timestamp: new Date(Date.now() - 19.3 * 60 * 60 * 1000).toISOString(), source: 'Marcus Thorne', level: 'INFO', message: 'Marcus Thorne acknowledged. Updated fullchain.pem with cross-signed intermediate.' },
+      { id: 'ev-1040-4', timestamp: new Date(Date.now() - 19.2 * 60 * 60 * 1000).toISOString(), source: 'Nginx Service', level: 'INFO', message: 'Executed zero-downtime graceful config reload (kill -HUP).' },
+      { id: 'ev-1040-5', timestamp: new Date(Date.now() - 19.1 * 60 * 60 * 1000).toISOString(), source: 'Probe Engine', level: 'INFO', message: '3/3 SSL probes passed with TLS 1.3 strict ciphers. Incident resolved.' }
+    ],
+    recoveryStatus: 'Resolved: Complete certificate chain reloaded with zero dropped connections.',
+    runbookId: 'run-cf-drift',
+    mitigationActionTaken: 'Reloaded fullchain.pem bundle on vps-fra-apex-prd-01.',
+    notes: [
+      {
+        id: 'note-1040-1',
+        author: 'Marcus Thorne',
+        role: 'SecOps',
+        timestamp: new Date(Date.now() - 19.2 * 60 * 60 * 1000).toISOString(),
+        content: 'Added automated cert validation pre-hook in Let’s Encrypt renewal cron.'
+      }
+    ]
+  },
+  {
+    id: 'INC-1039',
+    title: 'Vantage Billing Webhook Rate Limit Spike & Queue Backlog',
+    severity: 'HIGH',
+    status: 'RESOLVED',
+    applicationId: 'app-vantage',
+    environment: 'PRD',
+    fingerprint: 'vantage:prd:mon-vant-webhook:queue_backlog',
+    rootCause: 'Batch tuition collection cycle dispatched 25,000 asynchronous webhooks concurrently, exhausting Go worker pool goroutine limits.',
+    startedAt: new Date(Date.now() - 38 * 60 * 60 * 1000).toISOString(),
+    resolvedAt: new Date(Date.now() - 37.1 * 60 * 60 * 1000).toISOString(),
+    durationMinutes: 54,
+    owner: 'Arjun Mehta',
+    acknowledged: true,
+    acknowledgedAt: new Date(Date.now() - 37.7 * 60 * 60 * 1000).toISOString(),
+    acknowledgedBy: 'Arjun Mehta',
+    affectedServices: ['Vantage Payment Webhooks', 'District Ledger Export', 'Go Worker Pool'],
+    affectedMonitors: ['mon-vant-https'],
+    dependentFailures: [
+      'Webhook Redis queue backlog reached 14,200 events',
+      'Worker queue processing latency exceeded 2.4s'
+    ],
+    timeline: [
+      { id: 'ev-1039-1', timestamp: new Date(Date.now() - 38 * 60 * 60 * 1000).toISOString(), source: 'mon-vant-https', level: 'WARN', message: 'Webhook delivery queue depth > 10,000 items.' },
+      { id: 'ev-1039-2', timestamp: new Date(Date.now() - 37.8 * 60 * 60 * 1000).toISOString(), source: 'mon-vant-https', level: 'CRITICAL', message: 'Delivery timeout rate exceeded 5% threshold.' },
+      { id: 'ev-1039-3', timestamp: new Date(Date.now() - 37.7 * 60 * 60 * 1000).toISOString(), source: 'Arjun Mehta', level: 'INFO', message: 'Incident acknowledged. Scaled worker concurrency from 100 to 350 goroutines.' },
+      { id: 'ev-1039-4', timestamp: new Date(Date.now() - 37.4 * 60 * 60 * 1000).toISOString(), source: 'Vantage Core', level: 'INFO', message: 'Queue drain rate increased to 450 msg/sec. Backlog dropping.' },
+      { id: 'ev-1039-5', timestamp: new Date(Date.now() - 37.1 * 60 * 60 * 1000).toISOString(), source: 'Probe Engine', level: 'INFO', message: 'Queue fully drained (0 remaining, latency 28ms). 3 consecutive passes confirmed. Incident resolved.' }
+    ],
+    recoveryStatus: 'Resolved: Concurrency cap raised and rate limiting bucket deployed.',
+    runbookId: 'run-db-starve',
+    mitigationActionTaken: 'Scaled Go worker pool to 350 goroutines; configured leaky bucket queue rate limiter.',
+    notes: [
+      {
+        id: 'note-1039-1',
+        author: 'Arjun Mehta',
+        role: 'Lead On-Call',
+        timestamp: new Date(Date.now() - 37.3 * 60 * 60 * 1000).toISOString(),
+        content: 'Implemented sliding window rate limiting on outbound payment webhook dispatcher.'
+      }
+    ]
   }
 ];
 

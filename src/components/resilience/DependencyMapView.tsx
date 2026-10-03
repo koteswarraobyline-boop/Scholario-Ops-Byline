@@ -106,7 +106,7 @@ export const DependencyMapView: React.FC = () => {
                         dependencies: n.deps,
                         dependents: n.dependents
                       })}
-                      className={`p-3 rounded border text-left transition-all cursor-pointer ${
+                      className={`p-3 rounded border text-left transition-all cursor-pointer min-w-0 ${
                         isSelected 
                           ? 'border-blue-500 bg-blue-500/10 shadow-xs ring-1 ring-blue-500' 
                           : isCrit 
