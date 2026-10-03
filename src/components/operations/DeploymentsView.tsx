@@ -36,25 +36,25 @@ export const DeploymentsView: React.FC = () => {
           const isRollbackActive = rollingBackId === dep.id;
 
           return (
-            <div key={dep.id} className={`p-4 rounded-lg border space-y-3 transition-colors ${
+            <div key={dep.id} className={`p-4 rounded-lg border space-y-3 transition-colors min-w-0 ${
               isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
             }`}>
-              <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-3 ${
+              <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-3 min-w-0 ${
                 isDark ? 'border-[#1A2332]' : 'border-slate-100'
               }`}>
-                <div className="flex items-center gap-3">
-                  <div className={`w-8 h-8 rounded flex items-center justify-center ${
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className={`w-8 h-8 rounded flex items-center justify-center shrink-0 ${
                     isDark ? 'bg-[#162033] text-blue-400' : 'bg-blue-50 text-blue-600 border border-blue-200'
                   }`}>
                     <GitBranch className="w-4 h-4" />
                   </div>
-                  <div>
-                    <div className="flex items-center gap-2">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="font-bold text-sm font-sans">{app?.name}</span>
                       <span className="text-xs text-blue-500 font-semibold">{dep.version}</span>
                       <span className={isDark ? 'text-slate-500' : 'text-slate-400'}>({dep.commitHash})</span>
                     </div>
-                    <p className={`text-xs font-sans mt-0.5 ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>{dep.commitMessage}</p>
+                    <p className={`text-xs font-sans mt-0.5 truncate ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>{dep.commitMessage}</p>
                   </div>
                 </div>
 
@@ -91,7 +91,7 @@ export const DeploymentsView: React.FC = () => {
                 ))}
               </div>
 
-              <div className={`flex justify-between text-[11px] pt-1 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+              <div className={`flex flex-wrap justify-between gap-1 sm:gap-2 text-[11px] pt-1 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
                 <span>Author: {dep.author} · Pipeline: {dep.durationSec}s</span>
                 <span>Completed: {new Date(dep.startedAt).toLocaleString()}</span>
               </div>

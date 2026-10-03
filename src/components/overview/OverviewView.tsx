@@ -473,8 +473,8 @@ export const OverviewView: React.FC = () => {
           </button>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs font-mono">
+        <div className="w-full min-w-0 overflow-x-auto">
+          <table className="w-full text-left text-xs font-mono min-w-[760px]">
             <thead className={`font-medium border-b ${
               isDark ? 'bg-[#0B0F17] text-slate-400 border-[#1A2332]' : 'bg-slate-50 text-slate-600 border-slate-200'
             }`}>

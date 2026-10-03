@@ -259,6 +259,19 @@ Tab-based routing via `activeTab` string in `OpsContext`, rendered by `App.tsx`:
 - Operator actions: Acknowledge, Change Status, Change Severity, Assign Owner, Add Note, Sign Off & Resolve
 - Embedded `IncidentFlowChart`
 
+### 9.7 Project Overview & Operations Manual (`ProjectOverviewView.tsx`)
+- **Real-Time Summary KPI Cards**:
+  - **Active Incidents**: Live open/critical incident count with status badge and direct triage link
+  - **Server Uptime Percentage**: Cluster-wide 30-day SLA availability with healthy node tally
+  - **Pending Deployments**: In-flight / running pipeline stages with status tags
+  - **PRD / DR Standby Mesh**: Standby readiness score and Zurich watchdog pulse status
+- **Interactive Architecture & System Manual**:
+  - 5-stage topology flow explorer
+  - Full technology stack & Inter typography breakdown
+  - Catalog of all 14 operational views with one-click direct routing
+  - SOC Dark vs Corporate Light theme color specifications
+  - Core SRE operational principles (consecutive checks, watchdog decoupling, rapid Anycast rerouting)
+
 ---
 
 ## 10. Visual Flow Charts, Heartbeat Monitors & Graphs

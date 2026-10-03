@@ -93,7 +93,7 @@ Audit Trail:             Immutable operator action records maintained`;
       <div className={`rounded-lg border p-5 space-y-3 font-mono transition-colors ${
         isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
       }`}>
-        <div className={`flex items-center justify-between border-b pb-2 text-xs ${
+        <div className={`flex flex-wrap items-center justify-between gap-2 border-b pb-2 text-xs ${
           isDark ? 'border-[#1A2332]' : 'border-slate-100'
         }`}>
           <div className="flex items-center gap-2">
@@ -105,7 +105,7 @@ Audit Trail:             Immutable operator action records maintained`;
           <span className={`text-[11px] ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>CERTIFIED AUDIT ARTIFACT</span>
         </div>
 
-        <pre className={`p-4 rounded border text-xs leading-relaxed overflow-x-auto ${
+        <pre className={`w-full min-w-0 p-4 rounded border text-xs leading-relaxed overflow-x-auto ${
           isDark 
             ? 'bg-[#080B12] text-slate-300 border-[#182338]' 
             : 'bg-slate-900 text-emerald-300 border-slate-800'

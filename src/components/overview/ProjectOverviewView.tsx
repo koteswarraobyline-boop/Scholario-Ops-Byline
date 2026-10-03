@@ -19,48 +19,227 @@ import {
   GitBranch,
   RefreshCw,
   Sun,
-  Moon
+  Moon,
+  AlertTriangle,
+  Clock,
+  ExternalLink
 } from 'lucide-react';
 
 export const ProjectOverviewView: React.FC = () => {
-  const { theme, setActiveTab, systemSummary } = useOps();
+  const { 
+    theme, 
+    setActiveTab, 
+    systemSummary, 
+    incidents, 
+    servers, 
+    applications, 
+    deployments,
+    deadMan 
+  } = useOps();
   const isDark = theme === 'dark';
 
   const [activeSection, setActiveSection] = useState<'architecture' | 'stack' | 'features' | 'themes' | 'principles'>('architecture');
 
+  // Calculate real-time health stats
+  const activeIncidents = incidents.filter(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED');
+  const criticalIncidentsCount = incidents.filter(i => i.severity === 'CRITICAL' && i.status !== 'RESOLVED').length;
+
+  // Average cluster uptime across all applications
+  const avgUptime = applications.length > 0 
+    ? +(applications.reduce((acc, app) => acc + app.uptime30d, 0) / applications.length).toFixed(2)
+    : 99.98;
+
+  // Pending / In-flight deployments
+  const pendingDeployments = deployments.filter(d => 
+    d.status === 'BUILDING' || d.status === 'DEPLOYING' || d.status === 'HEALTH_CHECK' || d.status === 'SMOKE_TEST'
+  );
+  const latestDeployment = deployments[0];
+  const latestAppName = latestDeployment 
+    ? (applications.find(a => a.id === latestDeployment.applicationId)?.name || latestDeployment.applicationId)
+    : '';
+
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className={`flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b ${
+    <div className="space-y-5 min-w-0">
+      
+      {/* 1. Page Header */}
+      <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b ${
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
       }`}>
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-lg font-bold tracking-tight font-mono">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-lg font-bold tracking-tight font-mono truncate">
               PROJECT OVERVIEW &amp; SYSTEM ARCHITECTURE
             </h1>
-            <span className="text-[10px] font-mono px-2 py-0.2 rounded font-semibold text-blue-400 bg-blue-950/60 border border-blue-800/80">
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded font-semibold text-blue-400 bg-blue-950/60 border border-blue-800/80 shrink-0">
               OPERATIONS MANUAL
             </span>
           </div>
-          <p className={`text-xs mt-0.5 font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Scholario IT Operations Control Center · Production Specification &amp; Feature Inventory
+          <p className={`text-xs mt-1 font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            Scholario IT Operations Control Center · Production Specification &amp; Real-Time Health Summary
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <button
             onClick={() => setActiveTab('overview')}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded transition-colors shadow-xs cursor-pointer"
           >
-            <span>LIVE COMMAND CENTER</span>
+            <span>COMMAND CENTER</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
 
-      {/* Navigation Pills */}
-      <div className="flex flex-wrap gap-2 font-mono text-xs">
+      {/* 2. REAL-TIME SUMMARY KPI CARDS SECTION */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        
+        {/* KPI 1: Active Incidents */}
+        <div 
+          onClick={() => setActiveTab('incidents')}
+          className={`p-3.5 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 ${
+            activeIncidents.length > 0
+              ? (isDark ? 'bg-[#180E13] border-rose-900/70 hover:border-rose-600' : 'bg-rose-50/60 border-rose-200 hover:border-rose-400 shadow-xs')
+              : (isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs')
+          }`}
+        >
+          <div>
+            <div className="flex items-center justify-between">
+              <span className={`text-[10px] font-mono font-semibold uppercase tracking-wider ${
+                activeIncidents.length > 0 ? 'text-rose-500' : 'text-slate-400'
+              }`}>
+                Active Incidents
+              </span>
+              <AlertTriangle className={`w-3.5 h-3.5 ${
+                activeIncidents.length > 0 ? 'text-rose-500 animate-pulse' : 'text-slate-400'
+              }`} />
+            </div>
+            <div className="mt-1.5 flex items-baseline gap-2">
+              <span className={`text-2xl font-bold font-mono tabular-nums ${
+                activeIncidents.length > 0 ? 'text-rose-500' : (isDark ? 'text-slate-100' : 'text-slate-900')
+              }`}>
+                {activeIncidents.length}
+              </span>
+              <span className={`text-[10px] font-mono font-semibold px-1.5 py-0.2 rounded ${
+                criticalIncidentsCount > 0
+                  ? 'bg-rose-500/20 text-rose-400 border border-rose-800'
+                  : 'bg-emerald-500/10 text-emerald-500'
+              }`}>
+                {criticalIncidentsCount > 0 ? `${criticalIncidentsCount} CRITICAL` : 'NOMINAL'}
+              </span>
+            </div>
+          </div>
+          <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
+            <span className="truncate">
+              {activeIncidents[0] ? `INC-1042: ${activeIncidents[0].title.slice(0, 22)}...` : 'All systems operational'}
+            </span>
+            <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
+          </div>
+        </div>
+
+        {/* KPI 2: Server Uptime Percentage */}
+        <div 
+          onClick={() => setActiveTab('uptime')}
+          className={`p-3.5 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 ${
+            isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs'
+          }`}
+        >
+          <div>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-slate-400">
+                Server Uptime (30d)
+              </span>
+              <Activity className="w-3.5 h-3.5 text-emerald-500" />
+            </div>
+            <div className="mt-1.5 flex items-baseline gap-2">
+              <span className={`text-2xl font-bold font-mono tabular-nums ${
+                avgUptime >= 99.9 ? 'text-emerald-500' : 'text-amber-500'
+              }`}>
+                {avgUptime}%
+              </span>
+              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-emerald-500/10 text-emerald-400 font-semibold">
+                SLA ≥ 99.90%
+              </span>
+            </div>
+          </div>
+          <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
+            <span className="truncate">
+              {systemSummary.healthyServers}/{systemSummary.totalServers} Hostinger VPS Healthy
+            </span>
+            <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
+          </div>
+        </div>
+
+        {/* KPI 3: Pending Deployments */}
+        <div 
+          onClick={() => setActiveTab('deployments')}
+          className={`p-3.5 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 ${
+            isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs'
+          }`}
+        >
+          <div>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-slate-400">
+                Pending Deployments
+              </span>
+              <GitBranch className="w-3.5 h-3.5 text-blue-500" />
+            </div>
+            <div className="mt-1.5 flex items-baseline gap-2">
+              <span className={`text-2xl font-bold font-mono tabular-nums ${
+                pendingDeployments.length > 0 ? 'text-blue-500' : (isDark ? 'text-slate-100' : 'text-slate-900')
+              }`}>
+                {pendingDeployments.length}
+              </span>
+              <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded font-semibold ${
+                pendingDeployments.length > 0 
+                  ? 'bg-blue-500/10 text-blue-400' 
+                  : 'bg-slate-500/10 text-slate-400'
+              }`}>
+                {pendingDeployments.length > 0 ? 'IN PROGRESS' : 'IDLE'}
+              </span>
+            </div>
+          </div>
+          <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
+            <span className="truncate">
+              {latestDeployment ? `Last: ${latestDeployment.version} (${latestAppName})` : 'Zero queued pipelines'}
+            </span>
+            <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
+          </div>
+        </div>
+
+        {/* KPI 4: DR Standby Readiness */}
+        <div 
+          onClick={() => setActiveTab('resilience')}
+          className={`p-3.5 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 ${
+            isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs'
+          }`}
+        >
+          <div>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-slate-400">
+                PRD / DR Standby Mesh
+              </span>
+              <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
+            </div>
+            <div className="mt-1.5 flex items-baseline gap-2">
+              <span className={`text-2xl font-bold font-mono tabular-nums ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
+                {systemSummary.drReadinessCount} / {systemSummary.totalApps}
+              </span>
+              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-indigo-500/10 text-indigo-400 font-semibold">
+                WARM STANDBY
+              </span>
+            </div>
+          </div>
+          <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
+            <span className="truncate">
+              Watchdog: {deadMan.status === 'HEALTHY' ? '1.0s Heartbeat OK' : 'Silenced'}
+            </span>
+            <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
+          </div>
+        </div>
+      </div>
+
+      {/* 3. Navigation Section Switcher */}
+      <div className="flex flex-wrap gap-1.5 font-mono text-xs pt-1">
         {[
           { id: 'architecture', label: '1. Architecture & Data Flow' },
           { id: 'stack', label: '2. Tech Stack & Inter Typography' },
@@ -71,7 +250,7 @@ export const ProjectOverviewView: React.FC = () => {
           <button
             key={sec.id}
             onClick={() => setActiveSection(sec.id as any)}
-            className={`px-3 py-1.5 rounded transition-colors cursor-pointer border ${
+            className={`px-3 py-1.5 rounded text-xs transition-colors cursor-pointer border ${
               activeSection === sec.id
                 ? 'bg-blue-600 text-white font-semibold border-blue-500 shadow-xs'
                 : isDark 
@@ -90,14 +269,14 @@ export const ProjectOverviewView: React.FC = () => {
           <div className={`p-4 rounded-lg border ${
             isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
           }`}>
-            <h2 className="text-sm font-bold font-mono uppercase tracking-wider text-blue-500 mb-2">
+            <h2 className="text-xs font-bold font-mono uppercase tracking-wider text-blue-500 mb-2">
               High-Level Topology Architecture
             </h2>
             <p className={`text-xs leading-relaxed font-sans mb-4 ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
               Scholario Ops manages an EdTech multi-region infrastructure spanning 8 core applications and 16 Hostinger KVM VPS nodes across Singapore, Frankfurt, Mumbai, and London. Traffic routing, DDoS defense, and failover orchestration are decoupled into an Anycast ingress tier and origin cluster.
             </p>
 
-            <div className="grid grid-cols-1 md:grid-cols-5 gap-3 font-mono text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 font-mono text-xs">
               <div className={`p-3 rounded border text-center ${
                 isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
               }`}>
@@ -177,11 +356,11 @@ export const ProjectOverviewView: React.FC = () => {
           <div className={`p-4 rounded-lg border ${
             isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
           }`}>
-            <h2 className="text-sm font-bold font-mono uppercase tracking-wider text-blue-500 mb-2">
+            <h2 className="text-xs font-bold font-mono uppercase tracking-wider text-blue-500 mb-2">
               Technology Stack &amp; Typography Hierarchy
             </h2>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs font-mono">
+            <div className="w-full min-w-0 overflow-x-auto">
+              <table className="w-full text-left text-xs font-mono min-w-[600px]">
                 <thead className={`border-b ${isDark ? 'border-[#1E293B] text-slate-400' : 'border-slate-200 text-slate-600'}`}>
                   <tr>
                     <th className="py-2 px-3">Layer</th>
@@ -235,7 +414,7 @@ export const ProjectOverviewView: React.FC = () => {
       {/* Section 3: 14 Operational Views */}
       {activeSection === 'features' && (
         <div className="space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {[
               { id: 'overview', title: 'Command Center', desc: 'Real-time telemetry, 5 core operational answers, all visual flow charts, and fleet preview.' },
               { id: 'applications', title: 'Applications Catalog', desc: '8 EdTech tier systems with 10-tab modal inspection and failover orchestration.' },
@@ -257,19 +436,21 @@ export const ProjectOverviewView: React.FC = () => {
               <div 
                 key={vw.id}
                 onClick={() => setActiveTab(vw.id)}
-                className={`p-3.5 rounded-lg border transition-all cursor-pointer group ${
+                className={`p-3.5 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between ${
                   isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs'
                 }`}
               >
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-xs font-mono group-hover:text-blue-500 transition-colors">
-                    {vw.title}
-                  </span>
-                  <ArrowRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-blue-500 transition-colors" />
+                <div>
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-xs font-mono group-hover:text-blue-500 transition-colors">
+                      {vw.title}
+                    </span>
+                    <ArrowRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-blue-500 transition-colors shrink-0" />
+                  </div>
+                  <p className={`text-xs font-sans mt-1.5 leading-relaxed ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                    {vw.desc}
+                  </p>
                 </div>
-                <p className={`text-xs font-sans mt-1.5 leading-relaxed ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                  {vw.desc}
-                </p>
               </div>
             ))}
           </div>
@@ -294,7 +475,7 @@ export const ProjectOverviewView: React.FC = () => {
               <ul className="text-xs font-mono space-y-2 text-slate-300">
                 <li>• <strong>Canvas</strong>: Deep carbon `#0B0F17`</li>
                 <li>• <strong>Containers</strong>: SOC deep navy `#111726`</li>
-                <li>• <strong>Borders</strong>: Subtle structural `#1E293B`</li>
+                <li>• <strong>Borders</strong>: Structural slate `#1E293B`</li>
                 <li>• <strong>Indicators</strong>: High-contrast emerald, amber, rose &amp; blue</li>
                 <li>• <strong>Optimal for</strong>: 24/7 Operations Centers, reduced eye fatigue</li>
               </ul>
@@ -316,7 +497,7 @@ export const ProjectOverviewView: React.FC = () => {
                 <li>• <strong>Sidebar</strong>: Enterprise navy `#17233C`</li>
                 <li>• <strong>Containers</strong>: Pure white `#FFFFFF`</li>
                 <li>• <strong>Borders</strong>: Crisp structural slate `#E2E8F0`</li>
-                <li>• <strong>Optimal for</strong>: Daytime daylight viewing, executive reporting</li>
+                <li>• <strong>Optimal for</strong>: Daylight viewing, executive briefing</li>
               </ul>
             </div>
           </div>

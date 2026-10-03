@@ -141,8 +141,8 @@ export const IncidentFlowChart: React.FC = () => {
       </div>
 
       {/* Horizontal Flow Steps */}
-      <div className="py-4">
-        <div className={`p-4 rounded-lg border overflow-x-auto ${
+      <div className="py-3 w-full min-w-0">
+        <div className={`w-full min-w-0 p-4 rounded-lg border overflow-x-auto ${
           isDark ? 'bg-[#070B12] border-[#182336]' : 'bg-[#F8FAFC] border-[#E2E8F0]'
         }`}>
           <div className="min-w-[900px] flex items-center justify-between relative">

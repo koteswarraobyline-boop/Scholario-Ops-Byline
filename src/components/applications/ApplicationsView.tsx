@@ -131,52 +131,52 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
           {activeTab === 'overview' && (
             <div className="space-y-4 font-mono">
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded">
-                  <div className="text-[10px] text-slate-400 uppercase">Availability 24h</div>
-                  <div className="text-base font-bold text-slate-100 tabular-nums">{application.uptime24h}%</div>
+                <div className={`p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                  <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Availability 24h</div>
+                  <div className={`text-base font-bold tabular-nums ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.uptime24h}%</div>
                 </div>
-                <div className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded">
-                  <div className="text-[10px] text-slate-400 uppercase">Availability 30d</div>
-                  <div className="text-base font-bold text-slate-100 tabular-nums">{application.uptime30d}%</div>
+                <div className={`p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                  <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Availability 30d</div>
+                  <div className={`text-base font-bold tabular-nums ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.uptime30d}%</div>
                 </div>
-                <div className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded">
-                  <div className="text-[10px] text-slate-400 uppercase">RTO Target</div>
-                  <div className="text-base font-bold text-slate-100 tabular-nums">{application.rtoTargetMin} min</div>
+                <div className={`p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                  <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>RTO Target</div>
+                  <div className={`text-base font-bold tabular-nums ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.rtoTargetMin} min</div>
                 </div>
-                <div className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded">
-                  <div className="text-[10px] text-slate-400 uppercase">RPO Target</div>
-                  <div className="text-base font-bold text-slate-100 tabular-nums">{application.rpoTargetMin} min</div>
+                <div className={`p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                  <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>RPO Target</div>
+                  <div className={`text-base font-bold tabular-nums ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.rpoTargetMin} min</div>
                 </div>
               </div>
 
-              <div className="p-4 bg-[#0A0F1A] rounded border border-[#1E293B] space-y-2">
-                <div className="text-xs font-bold text-slate-300">Domain &amp; Routing Topology</div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-slate-400">
+              <div className={`p-4 rounded border space-y-2 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                <div className={`text-xs font-bold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Domain &amp; Routing Topology</div>
+                <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                   <div>
-                    <span className="text-slate-400 text-[10px] uppercase">Public Domain:</span>
-                    <div className="text-slate-200 font-semibold">{application.cloudflareZone}</div>
+                    <span className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Public Domain:</span>
+                    <div className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{application.cloudflareZone}</div>
                   </div>
                   <div>
-                    <span className="text-slate-400 text-[10px] uppercase">Active Routing Target:</span>
-                    <div className={`font-semibold ${application.failoverState === 'DR_ACTIVE' ? 'text-rose-400' : 'text-emerald-400'}`}>
+                    <span className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Active Routing Target:</span>
+                    <div className={`font-semibold ${application.failoverState === 'DR_ACTIVE' ? 'text-rose-500' : 'text-emerald-500'}`}>
                       {application.failoverState === 'DR_ACTIVE' ? 'DR Standby Origin' : 'Primary Origin'}
                     </div>
                   </div>
                 </div>
               </div>
 
-              <div className="p-4 bg-[#0A0F1A] rounded border border-[#1E293B] space-y-2">
-                <div className="text-xs font-bold text-slate-300">Dedicated Compute Fleet (Hostinger)</div>
+              <div className={`p-4 rounded border space-y-2 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                <div className={`text-xs font-bold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Dedicated Compute Fleet (Hostinger)</div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div className="p-3 bg-[#111726] border border-[#1E293B] rounded">
-                    <span className="text-[10px] text-blue-400 uppercase">PRIMARY (PRD)</span>
-                    <div className="font-semibold text-slate-100 mt-1">{prdServer?.hostname}</div>
-                    <div className="text-[11px] text-slate-400">{prdServer?.ip} · {prdServer?.region}</div>
+                  <div className={`p-3 rounded border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
+                    <span className="text-[10px] text-blue-500 font-semibold uppercase">PRIMARY (PRD)</span>
+                    <div className={`font-semibold mt-1 ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{prdServer?.hostname}</div>
+                    <div className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{prdServer?.ip} · {prdServer?.region}</div>
                   </div>
-                  <div className="p-3 bg-[#111726] border border-[#1E293B] rounded">
-                    <span className="text-[10px] text-slate-400 uppercase">STANDBY (DR)</span>
-                    <div className="font-semibold text-slate-100 mt-1">{drServer?.hostname}</div>
-                    <div className="text-[11px] text-slate-400">{drServer?.ip} · {drServer?.region}</div>
+                  <div className={`p-3 rounded border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
+                    <span className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>STANDBY (DR)</span>
+                    <div className={`font-semibold mt-1 ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{drServer?.hostname}</div>
+                    <div className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{drServer?.ip} · {drServer?.region}</div>
                   </div>
                 </div>
               </div>
@@ -187,29 +187,29 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
           {activeTab === 'health' && (
             <div className="space-y-4 font-mono">
               <div className="grid grid-cols-3 gap-3">
-                <div className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded">
-                  <div className="text-[10px] text-slate-400 uppercase">Latency P50</div>
-                  <div className="text-lg font-bold text-slate-100 tabular-nums">{application.p50Ms}ms</div>
+                <div className={`p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                  <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Latency P50</div>
+                  <div className={`text-lg font-bold tabular-nums ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.p50Ms}ms</div>
                 </div>
-                <div className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded">
-                  <div className="text-[10px] text-slate-400 uppercase">Latency P95</div>
-                  <div className="text-lg font-bold text-slate-100 tabular-nums">{application.p95Ms}ms</div>
+                <div className={`p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                  <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Latency P95</div>
+                  <div className={`text-lg font-bold tabular-nums ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.p95Ms}ms</div>
                 </div>
-                <div className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded">
-                  <div className="text-[10px] text-slate-400 uppercase">Latency P99</div>
-                  <div className="text-lg font-bold text-slate-100 tabular-nums">{application.p99Ms}ms</div>
+                <div className={`p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                  <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Latency P99</div>
+                  <div className={`text-lg font-bold tabular-nums ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.p99Ms}ms</div>
                 </div>
               </div>
 
-              <div className="p-4 bg-[#0A0F1A] rounded border border-[#1E293B] space-y-2">
-                <div className="text-xs font-bold text-slate-300">HTTP Status Distribution (24h)</div>
-                <div className="flex items-center gap-2 h-2 rounded bg-slate-800 overflow-hidden">
+              <div className={`p-4 rounded border space-y-2 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                <div className={`text-xs font-bold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>HTTP Status Distribution (24h)</div>
+                <div className={`flex items-center gap-2 h-2 rounded overflow-hidden ${isDark ? 'bg-slate-800' : 'bg-slate-200'}`}>
                   <div className="bg-emerald-500 h-full" style={{ width: `${Math.max(0, 100 - application.errorRatePercent)}%` }} />
                   <div className="bg-rose-500 h-full" style={{ width: `${application.errorRatePercent}%` }} />
                 </div>
-                <div className="flex justify-between text-[11px] text-slate-400">
+                <div className={`flex justify-between text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                   <span>2xx/3xx Success: {(100 - application.errorRatePercent).toFixed(2)}%</span>
-                  <span className={application.errorRatePercent > 0.1 ? 'text-rose-400 font-bold' : ''}>
+                  <span className={application.errorRatePercent > 0.1 ? 'text-rose-500 font-bold' : ''}>
                     5xx Errors: {application.errorRatePercent}%
                   </span>
                 </div>
@@ -220,22 +220,22 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
           {/* TAB: MONITORS */}
           {activeTab === 'monitors' && (
             <div className="space-y-3 font-mono">
-              <div className="text-xs font-semibold text-slate-300">Attached Monitor Probes</div>
+              <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Attached Monitor Probes</div>
               <div className="space-y-2">
                 {appMonitors.map(m => (
-                  <div key={m.id} className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded flex items-center justify-between">
+                  <div key={m.id} className={`p-3 rounded border flex items-center justify-between ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
                     <div>
-                      <div className="font-semibold text-slate-100 flex items-center gap-2 font-sans">
+                      <div className={`font-semibold flex items-center gap-2 font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
                         <span>{m.name}</span>
-                        <span className="font-mono text-[10px] text-slate-400">· {m.type}</span>
+                        <span className={`font-mono text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>· {m.type}</span>
                       </div>
-                      <div className="text-slate-400 text-[11px]">{m.target}</div>
+                      <div className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{m.target}</div>
                     </div>
                     <div className="text-right">
-                      <div className={`font-semibold ${m.status === 'HEALTHY' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      <div className={`font-semibold ${m.status === 'HEALTHY' ? 'text-emerald-500' : 'text-rose-500'}`}>
                         {m.status}
                       </div>
-                      <div className="text-[11px] text-slate-400">{m.responseTimeMs}ms</div>
+                      <div className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{m.responseTimeMs}ms</div>
                     </div>
                   </div>
                 ))}
@@ -246,16 +246,16 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
           {/* TAB: INFRASTRUCTURE */}
           {activeTab === 'infra' && (
             <div className="space-y-4 font-mono">
-              <div className="text-xs font-semibold text-slate-300">Compute Node Specs &amp; Telemetry</div>
+              <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Compute Node Specs &amp; Telemetry</div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {prdServer && (
-                  <div className="p-4 border border-[#1E293B] rounded bg-[#0A0F1A] space-y-2">
+                  <div className={`p-4 border rounded space-y-2 ${isDark ? 'border-[#1E293B] bg-[#0A0F1A]' : 'border-slate-200 bg-slate-50'}`}>
                     <div className="flex justify-between items-center">
-                      <span className="font-bold text-slate-100">{prdServer.hostname}</span>
-                      <span className="text-[10px] text-blue-400 uppercase">PRD</span>
+                      <span className={`font-bold ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{prdServer.hostname}</span>
+                      <span className="text-[10px] text-blue-500 font-semibold uppercase">PRD</span>
                     </div>
-                    <div className="text-[11px] text-slate-400">{prdServer.ip} · {prdServer.region}</div>
-                    <div className="pt-2 border-t border-[#1E293B] space-y-1 text-slate-300">
+                    <div className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{prdServer.ip} · {prdServer.region}</div>
+                    <div className={`pt-2 border-t space-y-1 ${isDark ? 'border-[#1E293B] text-slate-300' : 'border-slate-200 text-slate-700'}`}>
                       <div className="flex justify-between"><span>CPU:</span> <strong>{prdServer.telemetry.cpuPercent}%</strong></div>
                       <div className="flex justify-between"><span>RAM:</span> <strong>{prdServer.telemetry.ramPercent}%</strong></div>
                       <div className="flex justify-between"><span>Disk:</span> <strong>{prdServer.telemetry.diskPercent}%</strong></div>
@@ -264,13 +264,13 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                   </div>
                 )}
                 {drServer && (
-                  <div className="p-4 border border-[#1E293B] rounded bg-[#0A0F1A] space-y-2">
+                  <div className={`p-4 border rounded space-y-2 ${isDark ? 'border-[#1E293B] bg-[#0A0F1A]' : 'border-slate-200 bg-slate-50'}`}>
                     <div className="flex justify-between items-center">
-                      <span className="font-bold text-slate-100">{drServer.hostname}</span>
-                      <span className="text-[10px] text-slate-400 uppercase">DR</span>
+                      <span className={`font-bold ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{drServer.hostname}</span>
+                      <span className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>DR</span>
                     </div>
-                    <div className="text-[11px] text-slate-400">{drServer.ip} · {drServer.region}</div>
-                    <div className="pt-2 border-t border-[#1E293B] space-y-1 text-slate-300">
+                    <div className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{drServer.ip} · {drServer.region}</div>
+                    <div className={`pt-2 border-t space-y-1 ${isDark ? 'border-[#1E293B] text-slate-300' : 'border-slate-200 text-slate-700'}`}>
                       <div className="flex justify-between"><span>CPU:</span> <strong>{drServer.telemetry.cpuPercent}%</strong></div>
                       <div className="flex justify-between"><span>RAM:</span> <strong>{drServer.telemetry.ramPercent}%</strong></div>
                       <div className="flex justify-between"><span>Disk:</span> <strong>{drServer.telemetry.diskPercent}%</strong></div>
@@ -285,22 +285,22 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
           {/* TAB: DEPENDENCIES */}
           {activeTab === 'deps' && (
             <div className="space-y-3 font-mono">
-              <div className="text-xs font-semibold text-slate-300">Upstream &amp; Downstream Dependencies</div>
+              <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Upstream &amp; Downstream Dependencies</div>
               <div className="space-y-2">
                 {application.dependencies.map(d => (
-                  <div key={d.id} className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded flex items-center justify-between">
+                  <div key={d.id} className={`p-3 rounded border flex items-center justify-between ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
                     <div>
-                      <div className="font-semibold text-slate-100 flex items-center gap-2 font-sans">
+                      <div className={`font-semibold flex items-center gap-2 font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
                         <span>{d.name}</span>
-                        <span className="font-mono text-[10px] text-slate-400">· {d.type}</span>
+                        <span className={`font-mono text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>· {d.type}</span>
                       </div>
-                      <div className="text-slate-400 text-[11px]">{d.target}</div>
+                      <div className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{d.target}</div>
                     </div>
                     <div className="text-right">
-                      <span className={`font-semibold ${d.status === 'HEALTHY' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      <span className={`font-semibold ${d.status === 'HEALTHY' ? 'text-emerald-500' : 'text-rose-500'}`}>
                         {d.status}
                       </span>
-                      <div className="text-[10px] text-slate-400">{d.latencyMs}ms</div>
+                      <div className={`text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{d.latencyMs}ms</div>
                     </div>
                   </div>
                 ))}
@@ -311,54 +311,54 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
           {/* TAB: PRD / DR & FAILOVER */}
           {activeTab === 'dr' && (
             <div className="space-y-4 font-mono">
-              <div className="p-4 bg-[#0A0F1A] rounded border border-[#1E293B] space-y-3">
+              <div className={`p-4 rounded border space-y-3 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
                 <div className="flex items-center justify-between">
-                  <div className="text-xs font-bold text-slate-300 font-sans">Disaster Recovery Readiness</div>
-                  <span className="text-xs text-blue-400 font-semibold">
+                  <div className={`text-xs font-bold font-sans ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Disaster Recovery Readiness</div>
+                  <span className="text-xs text-blue-500 font-semibold">
                     {application.failoverState}
                   </span>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
-                  <div className="p-2.5 bg-[#111726] border border-[#1E293B] rounded">
-                    <span className="text-[10px] text-slate-400 uppercase">Replication Lag</span>
-                    <div className="font-bold text-slate-100 text-sm mt-0.5">{application.currentReplicationLagSec} seconds</div>
+                  <div className={`p-2.5 rounded border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
+                    <span className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Replication Lag</span>
+                    <div className={`font-bold text-sm mt-0.5 ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.currentReplicationLagSec} seconds</div>
                   </div>
-                  <div className="p-2.5 bg-[#111726] border border-[#1E293B] rounded">
-                    <span className="text-[10px] text-slate-400 uppercase">Last Drill Verification</span>
-                    <div className="font-bold text-slate-100 text-sm mt-0.5">{application.lastTestedRecoveryDate || '2026-09-18'} ({application.lastTestedRecoveryDurationMin || 22}m)</div>
+                  <div className={`p-2.5 rounded border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
+                    <span className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Last Drill Verification</span>
+                    <div className={`font-bold text-sm mt-0.5 ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.lastTestedRecoveryDate || '2026-09-18'} ({application.lastTestedRecoveryDurationMin || 22}m)</div>
                   </div>
                 </div>
 
-                <div className="pt-2 border-t border-[#1E293B]">
+                <div className={`pt-2 border-t ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
                   {!confirmFailover ? (
                     <button
                       onClick={() => setConfirmFailover(true)}
-                      className={`px-3 py-1.5 rounded text-xs font-semibold text-white transition-colors ${
-                        application.failoverState === 'DR_ACTIVE' ? 'bg-blue-600 hover:bg-blue-500' : 'bg-rose-600 hover:bg-rose-500'
+                      className={`px-3 py-1.5 rounded text-xs font-semibold text-white transition-colors cursor-pointer shadow-xs ${
+                        application.failoverState === 'DR_ACTIVE' ? 'bg-blue-600 hover:bg-blue-700' : 'bg-rose-600 hover:bg-rose-700'
                       }`}
                     >
                       {application.failoverState === 'DR_ACTIVE' ? 'Initiate Failback to Primary Origin' : 'Initiate Emergency DR Failover'}
                     </button>
                   ) : (
-                    <div className="p-3 bg-[#1F1710] border border-amber-900 rounded space-y-2 font-sans">
-                      <div className="font-bold text-amber-300 flex items-center gap-1.5 text-xs">
-                        <AlertTriangle className="w-4 h-4 text-amber-400" />
+                    <div className={`p-3 rounded border space-y-2 font-sans ${isDark ? 'bg-[#1F1710] border-amber-900' : 'bg-amber-50 border-amber-300'}`}>
+                      <div className="font-bold text-amber-500 flex items-center gap-1.5 text-xs">
+                        <AlertTriangle className="w-4 h-4 text-amber-500" />
                         <span>Confirm Cloudflare Edge Traffic Reroute</span>
                       </div>
-                      <p className="text-[11px] text-slate-300">
+                      <p className={`text-[11px] ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
                         This action modifies Cloudflare Load Balancer origin pool immediately for {application.name}.
                       </p>
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => handleFailoverClick(application.failoverState === 'DR_ACTIVE' ? 'PRIMARY' : 'DR')}
-                          className="px-3 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded text-xs font-semibold"
+                          className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-xs font-semibold cursor-pointer"
                         >
                           Execute Reroute
                         </button>
                         <button
                           onClick={() => setConfirmFailover(false)}
-                          className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs"
+                          className={`px-3 py-1 rounded text-xs cursor-pointer ${isDark ? 'bg-slate-800 hover:bg-slate-700 text-slate-300' : 'bg-slate-200 hover:bg-slate-300 text-slate-700'}`}
                         >
                           Cancel
                         </button>
@@ -373,17 +373,17 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
           {/* TAB: BACKUPS */}
           {activeTab === 'backups' && (
             <div className="space-y-3 font-mono">
-              <div className="text-xs font-semibold text-slate-300">Cold Snapshot &amp; Database Dumps</div>
+              <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Cold Snapshot &amp; Database Dumps</div>
               {appBackups.map(b => (
-                <div key={b.id} className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded space-y-1">
+                <div key={b.id} className={`p-3 rounded border space-y-1 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
                   <div className="flex justify-between items-center">
-                    <span className="font-bold text-slate-200">{b.type} · {b.sizeGb} GB</span>
-                    <span className="text-[10px] text-emerald-400 uppercase font-semibold">
+                    <span className={`font-bold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{b.type} · {b.sizeGb} GB</span>
+                    <span className="text-[10px] text-emerald-500 uppercase font-semibold">
                       VERIFIED
                     </span>
                   </div>
-                  <div className="text-[11px] text-slate-400">Destination: {b.destination}</div>
-                  <div className="text-[10px] text-slate-500 truncate">SHA-256: {b.integrityHash}</div>
+                  <div className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Destination: {b.destination}</div>
+                  <div className={`text-[10px] truncate ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>SHA-256: {b.integrityHash}</div>
                 </div>
               ))}
             </div>
@@ -401,18 +401,22 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                       setSelectedIncidentId(inc.id);
                       setActiveTab('incidents');
                     }}
-                    className="p-3 bg-[#180E13] border border-rose-900/80 rounded cursor-pointer hover:border-rose-700 transition-colors"
+                    className={`p-3 rounded border cursor-pointer transition-colors ${
+                      isDark 
+                        ? 'bg-[#180E13] border-rose-900/80 hover:border-rose-700' 
+                        : 'bg-rose-50 border-rose-300 hover:border-rose-400'
+                    }`}
                   >
                     <div className="flex justify-between items-center font-mono">
-                      <span className="font-bold text-rose-300">{inc.id} · {inc.severity}</span>
-                      <span className="text-[10px] text-slate-400">{inc.status}</span>
+                      <span className="font-bold text-rose-500">{inc.id} · {inc.severity}</span>
+                      <span className={`text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{inc.status}</span>
                     </div>
-                    <div className="text-slate-100 font-semibold text-xs mt-1">{inc.title}</div>
-                    <div className="text-[11px] text-slate-400 mt-0.5">{inc.rootCause}</div>
+                    <div className={`font-semibold text-xs mt-1 ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{inc.title}</div>
+                    <div className={`text-[11px] mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{inc.rootCause}</div>
                   </div>
                 ))
               ) : (
-                <div className="p-4 text-center text-slate-500 font-mono">No incident records for this application.</div>
+                <div className={`p-4 text-center font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>No incident records for this application.</div>
               )}
             </div>
           )}
@@ -421,13 +425,13 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
           {activeTab === 'deployments' && (
             <div className="space-y-3 font-mono">
               {appDeployments.map(d => (
-                <div key={d.id} className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded space-y-1">
+                <div key={d.id} className={`p-3 rounded border space-y-1 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
                   <div className="flex justify-between items-center">
-                    <span className="font-bold text-slate-100">{d.version} ({d.commitHash})</span>
-                    <span className="text-[10px] text-emerald-400 uppercase">{d.status}</span>
+                    <span className={`font-bold ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{d.version} ({d.commitHash})</span>
+                    <span className="text-[10px] text-emerald-500 uppercase font-semibold">{d.status}</span>
                   </div>
-                  <div className="text-slate-300 text-xs font-sans">{d.commitMessage}</div>
-                  <div className="text-[10px] text-slate-500">
+                  <div className={`text-xs font-sans ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{d.commitMessage}</div>
+                  <div className={`text-[10px] ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
                     Deployed by {d.author} · {new Date(d.startedAt).toLocaleString()}
                   </div>
                 </div>
@@ -440,17 +444,17 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
             <div className="space-y-2 font-mono">
               {appAudits.length > 0 ? (
                 appAudits.map(a => (
-                  <div key={a.id} className="p-2.5 bg-[#0A0F1A] border border-[#1E293B] rounded space-y-0.5 text-xs">
-                    <div className="flex justify-between text-slate-500 text-[10px]">
+                  <div key={a.id} className={`p-2.5 rounded border space-y-0.5 text-xs ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                    <div className={`flex justify-between text-[10px] ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
                       <span>{a.operator}</span>
                       <span>{new Date(a.timestamp).toLocaleString()}</span>
                     </div>
-                    <div className="font-semibold text-blue-400">{a.action}</div>
-                    <div className="text-slate-300 text-[11px] font-sans">{a.details}</div>
+                    <div className="font-semibold text-blue-500">{a.action}</div>
+                    <div className={`text-[11px] font-sans ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{a.details}</div>
                   </div>
                 ))
               ) : (
-                <div className="p-4 text-center text-slate-500">No audit log entries found.</div>
+                <div className={`p-4 text-center ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>No audit log entries found.</div>
               )}
             </div>
           )}
@@ -458,10 +462,16 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
         </div>
 
         {/* Modal Footer */}
-        <div className="p-3 px-6 border-t border-[#1E293B] bg-[#0A0F1A] flex justify-end">
+        <div className={`p-3 px-6 border-t flex justify-end ${
+          isDark ? 'border-[#1E293B] bg-[#0A0F1A]' : 'border-slate-200 bg-slate-50'
+        }`}>
           <button
             onClick={onClose}
-            className="px-3 py-1 bg-[#1A2436] hover:bg-[#23324C] text-slate-200 rounded text-xs font-mono transition-colors"
+            className={`px-3 py-1 rounded text-xs font-mono transition-colors border cursor-pointer ${
+              isDark 
+                ? 'bg-[#1A2436] hover:bg-[#23324C] border-[#223048] text-slate-200' 
+                : 'bg-white hover:bg-slate-100 border-slate-300 text-slate-700 shadow-2xs'
+            }`}
           >
             CLOSE
           </button>
@@ -542,7 +552,7 @@ export const ApplicationsView: React.FC = () => {
             <div
               key={app.id}
               onClick={() => setSelectedAppId(app.id)}
-              className={`rounded border p-3.5 cursor-pointer transition-all flex flex-col justify-between space-y-3 ${
+              className={`rounded border p-3.5 cursor-pointer transition-all flex flex-col justify-between space-y-3 min-w-0 ${
                 !isHealthy 
                   ? (isDark ? 'border-rose-900/80 bg-[#160E13]' : 'border-rose-300 bg-rose-50/60 shadow-xs') 
                   : (isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs')

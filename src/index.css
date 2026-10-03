@@ -15,7 +15,22 @@
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
 
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    width: 100%;
+    min-height: 100%;
+    margin: 0;
+  }
+
   body {
+    overflow-x: hidden;
     font-family: 'Inter', var(--font-sans);
     letter-spacing: -0.011em;
   }

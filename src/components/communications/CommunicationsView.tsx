@@ -110,51 +110,53 @@ export const CommunicationsView: React.FC = () => {
         <div className={`rounded-lg border overflow-hidden transition-colors ${
           isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
         }`}>
-          <table className="w-full text-left text-xs font-mono">
-            <thead className={`font-medium border-b ${
-              isDark ? 'bg-[#0B0F17] text-slate-400 border-[#1A2332]' : 'bg-slate-50 text-slate-600 border-slate-200'
-            }`}>
-              <tr>
-                <th className="py-2.5 px-3.5">Severity Tier</th>
-                <th className="py-2.5 px-3.5">Dispatched Channels</th>
-                <th className="py-2.5 px-3.5">Initial Delay</th>
-                <th className="py-2.5 px-3.5">Reminder Repeat</th>
-                <th className="py-2.5 px-3.5">Auto-Escalate Window</th>
-                <th className="py-2.5 px-3.5 text-right">Escalate Target</th>
-              </tr>
-            </thead>
-            <tbody className={`divide-y ${isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
-              {escalationPolicies.map(pol => (
-                <tr key={pol.id} className={isDark ? 'hover:bg-[#151D2E]' : 'hover:bg-slate-50'}>
-                  <td className="py-2.5 px-3.5 font-bold">
-                    <span className={pol.severity === 'CRITICAL' ? 'text-rose-500' : 'text-amber-500'}>
-                      {pol.severity}
-                    </span>
-                  </td>
-
-                  <td className={`py-2.5 px-3.5 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
-                    {pol.channels.map(c => c.replace('comm-', '').toUpperCase()).join(', ')}
-                  </td>
-
-                  <td className={`py-2.5 px-3.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                    {pol.initialDelayMin === 0 ? 'Immediate (0s)' : `${pol.initialDelayMin} min`}
-                  </td>
-
-                  <td className={`py-2.5 px-3.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                    Every {pol.repeatIntervalMin} min
-                  </td>
-
-                  <td className="py-2.5 px-3.5 text-rose-500 font-bold">
-                    If unacknowledged &gt; {pol.autoEscalateAfterMin} min
-                  </td>
-
-                  <td className={`py-2.5 px-3.5 text-right font-sans ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
-                    {pol.escalateToTeam}
-                  </td>
+          <div className="w-full min-w-0 overflow-x-auto">
+            <table className="w-full text-left text-xs font-mono min-w-[700px]">
+              <thead className={`font-medium border-b ${
+                isDark ? 'bg-[#0B0F17] text-slate-400 border-[#1A2332]' : 'bg-slate-50 text-slate-600 border-slate-200'
+              }`}>
+                <tr>
+                  <th className="py-2.5 px-3.5">Severity Tier</th>
+                  <th className="py-2.5 px-3.5">Dispatched Channels</th>
+                  <th className="py-2.5 px-3.5">Initial Delay</th>
+                  <th className="py-2.5 px-3.5">Reminder Repeat</th>
+                  <th className="py-2.5 px-3.5">Auto-Escalate Window</th>
+                  <th className="py-2.5 px-3.5 text-right">Escalate Target</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className={`divide-y ${isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
+                {escalationPolicies.map(pol => (
+                  <tr key={pol.id} className={isDark ? 'hover:bg-[#151D2E]' : 'hover:bg-slate-50'}>
+                    <td className="py-2.5 px-3.5 font-bold">
+                      <span className={pol.severity === 'CRITICAL' ? 'text-rose-500' : 'text-amber-500'}>
+                        {pol.severity}
+                      </span>
+                    </td>
+
+                    <td className={`py-2.5 px-3.5 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+                      {pol.channels.map(c => c.replace('comm-', '').toUpperCase()).join(', ')}
+                    </td>
+
+                    <td className={`py-2.5 px-3.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                      {pol.initialDelayMin === 0 ? 'Immediate (0s)' : `${pol.initialDelayMin} min`}
+                    </td>
+
+                    <td className={`py-2.5 px-3.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                      Every {pol.repeatIntervalMin} min
+                    </td>
+
+                    <td className="py-2.5 px-3.5 text-rose-500 font-bold">
+                      If unacknowledged &gt; {pol.autoEscalateAfterMin} min
+                    </td>
+
+                    <td className={`py-2.5 px-3.5 text-right font-sans ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
+                      {pol.escalateToTeam}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 

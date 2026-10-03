@@ -205,35 +205,35 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
           {/* TAB: SUMMARY */}
           {activeTab === 'summary' && (
             <div className="space-y-4">
-              <div className="p-4 bg-[#0A0F1A] border border-[#1E293B] rounded space-y-2">
-                <div className="text-xs font-bold text-slate-300 uppercase">Root Cause Diagnosis</div>
-                <p className="text-slate-300 leading-relaxed font-sans text-xs">{incident.rootCause}</p>
-                <div className="text-[11px] text-slate-400 pt-1 border-t border-[#1E293B]">
-                  Deduplication Fingerprint: <span className="text-slate-200">{incident.fingerprint}</span>
+              <div className={`p-4 rounded border space-y-2 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                <div className={`text-xs font-bold uppercase ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Root Cause Diagnosis</div>
+                <p className={`leading-relaxed font-sans text-xs ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{incident.rootCause}</p>
+                <div className={`text-[11px] pt-1 border-t ${isDark ? 'border-[#1E293B] text-slate-400' : 'border-slate-200 text-slate-600'}`}>
+                  Deduplication Fingerprint: <span className={isDark ? 'text-slate-200' : 'text-slate-800'}>{incident.fingerprint}</span>
                 </div>
               </div>
 
-              <div className="p-4 bg-[#0A0F1A] border border-[#1E293B] rounded space-y-2">
-                <div className="text-xs font-bold text-slate-300 uppercase">Current Mitigation State</div>
-                <p className="text-slate-300 font-sans text-xs">
+              <div className={`p-4 rounded border space-y-2 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                <div className={`text-xs font-bold uppercase ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Current Mitigation State</div>
+                <p className={`font-sans text-xs ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
                   {incident.mitigationActionTaken || 'Investigating thread locks and database connection spikes.'}
                 </p>
-                <div className="p-2.5 bg-[#111726] border border-[#1E293B] rounded text-slate-300 text-[11px]">
-                  Recovery Verification: <strong className="text-slate-100">{incident.recoveryStatus}</strong>
+                <div className={`p-2.5 rounded text-[11px] border ${isDark ? 'bg-[#111726] border-[#1E293B] text-slate-300' : 'bg-white border-slate-200 text-slate-700 shadow-2xs'}`}>
+                  Recovery Verification: <strong className={isDark ? 'text-slate-100' : 'text-slate-900'}>{incident.recoveryStatus}</strong>
                 </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded space-y-1">
-                  <span className="text-[10px] text-slate-400 uppercase">Affected Workloads</span>
-                  <div className="space-y-0.5 text-slate-300">
+                <div className={`p-3 rounded border space-y-1 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                  <span className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Affected Workloads</span>
+                  <div className={`space-y-0.5 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
                     {incident.affectedServices.map(s => <div key={s}>• {s}</div>)}
                   </div>
                 </div>
 
-                <div className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded space-y-1">
-                  <span className="text-[10px] text-slate-400 uppercase">Triggering Probes</span>
-                  <div className="space-y-0.5 text-slate-300">
+                <div className={`p-3 rounded border space-y-1 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                  <span className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Triggering Probes</span>
+                  <div className={`space-y-0.5 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
                     {incident.affectedMonitors.map(m => <div key={m}>• {m}</div>)}
                   </div>
                 </div>
@@ -244,10 +244,10 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
           {/* TAB: TIMELINE */}
           {activeTab === 'timeline' && (
             <div className="space-y-3">
-              <div className="text-xs font-semibold text-slate-300 font-sans">
+              <div className={`text-xs font-semibold font-sans ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
                 Timestamped Micro-Event Sequence
               </div>
-              <div className="border-l border-slate-700 ml-2 pl-4 space-y-3.5">
+              <div className={`border-l ml-2 pl-4 space-y-3.5 ${isDark ? 'border-slate-700' : 'border-slate-300'}`}>
                 {incident.timeline.map((ev, idx) => (
                   <div key={ev.id || idx} className="relative">
                     <span className={`w-1.5 h-1.5 rounded-full absolute -left-[20px] top-1.5 ${
@@ -257,14 +257,14 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
                       'bg-blue-400'
                     }`} />
                     <div className="flex items-center gap-2">
-                      <span className="text-[11px] font-bold text-slate-200">
+                      <span className={`text-[11px] font-bold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
                         {new Date(ev.timestamp).toLocaleTimeString()}
                       </span>
-                      <span className="text-[10px] text-slate-400">
+                      <span className={`text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                         [{ev.source}]
                       </span>
                     </div>
-                    <div className="text-xs text-slate-300 font-sans mt-0.5">
+                    <div className={`text-xs font-sans mt-0.5 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
                       {ev.message}
                     </div>
                   </div>
@@ -276,15 +276,17 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
           {/* TAB: CORRELATION */}
           {activeTab === 'correlation' && (
             <div className="space-y-4">
-              <div className="p-4 bg-[#0A0F1A] border border-[#1E293B] rounded space-y-3">
-                <div className="text-xs font-bold text-slate-300 uppercase">Dependency Correlation Flow</div>
+              <div className={`p-4 rounded border space-y-3 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                <div className={`text-xs font-bold uppercase ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Dependency Correlation Flow</div>
                 <div className="space-y-2">
                   {incident.dependentFailures.map((dep, idx) => (
                     <div key={idx} className="flex items-center gap-2 text-xs">
-                      <span className="w-5 h-5 rounded bg-[#162033] text-blue-400 flex items-center justify-center font-bold text-[10px]">
+                      <span className={`w-5 h-5 rounded flex items-center justify-center font-bold text-[10px] ${
+                        isDark ? 'bg-[#162033] text-blue-400' : 'bg-blue-100 text-blue-700'
+                      }`}>
                         {idx + 1}
                       </span>
-                      <span className="text-slate-300 font-sans">{dep}</span>
+                      <span className={`font-sans ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{dep}</span>
                     </div>
                   ))}
                 </div>
@@ -296,12 +298,14 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
           {activeTab === 'signals' && (
             <div className="space-y-2">
               {incident.affectedMonitors.map(mId => (
-                <div key={mId} className="p-3 bg-[#180E13] border border-rose-900/80 rounded flex items-center justify-between">
+                <div key={mId} className={`p-3 rounded border flex items-center justify-between ${
+                  isDark ? 'bg-[#180E13] border-rose-900/80' : 'bg-rose-50 border-rose-200'
+                }`}>
                   <div>
-                    <div className="font-bold text-rose-300">{mId}</div>
-                    <div className="text-[11px] text-slate-400">Consecutive failures: 3 / 3 (Confirmed incident threshold)</div>
+                    <div className={`font-bold ${isDark ? 'text-rose-300' : 'text-rose-700'}`}>{mId}</div>
+                    <div className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Consecutive failures: 3 / 3 (Confirmed incident threshold)</div>
                   </div>
-                  <span className="text-rose-400 font-bold text-[10px]">
+                  <span className={`font-bold text-[10px] ${isDark ? 'text-rose-400' : 'text-rose-600'}`}>
                     CRITICAL
                   </span>
                 </div>
@@ -312,22 +316,22 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
           {/* TAB: COMMUNICATIONS */}
           {activeTab === 'communications' && (
             <div className="space-y-3 font-sans">
-              <div className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded space-y-1">
-                <div className="flex justify-between items-center text-slate-200 font-semibold font-mono text-xs">
+              <div className={`p-3 rounded border space-y-1 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                <div className={`flex justify-between items-center font-semibold font-mono text-xs ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
                   <span>Microsoft Teams (#ops-incidents)</span>
-                  <span className="text-emerald-400 text-[10px]">DELIVERED</span>
+                  <span className="text-emerald-500 font-bold text-[10px]">DELIVERED</span>
                 </div>
-                <p className="text-slate-400 text-[11px]">
+                <p className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                   Alert payload dispatched to engineering webhook immediately upon failure confirmation.
                 </p>
               </div>
 
-              <div className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded space-y-1">
-                <div className="flex justify-between items-center text-slate-200 font-semibold font-mono text-xs">
+              <div className={`p-3 rounded border space-y-1 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                <div className={`flex justify-between items-center font-semibold font-mono text-xs ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
                   <span>Email oncall@scholario.net</span>
-                  <span className="text-emerald-400 text-[10px]">DELIVERED</span>
+                  <span className="text-emerald-500 font-bold text-[10px]">DELIVERED</span>
                 </div>
-                <p className="text-slate-400 text-[11px]">
+                <p className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                   Paging email sent to active on-call rotation lead.
                 </p>
               </div>
@@ -338,11 +342,11 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
           {activeTab === 'runbook' && (
             <div className="space-y-3 font-sans">
               {attachedRunbook ? (
-                <div className="p-4 bg-[#0A0F1A] border border-[#1E293B] rounded space-y-3">
+                <div className={`p-4 rounded border space-y-3 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
                   <div className="flex justify-between items-center">
                     <div>
-                      <div className="font-bold text-slate-100 text-sm font-mono">{attachedRunbook.title}</div>
-                      <div className="text-slate-400 text-xs mt-0.5">{attachedRunbook.description}</div>
+                      <div className={`font-bold text-sm font-mono ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{attachedRunbook.title}</div>
+                      <div className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{attachedRunbook.description}</div>
                     </div>
                     <button
                       onClick={() => {
@@ -350,14 +354,14 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
                         setSelectedRunbookId(attachedRunbook.id);
                         setActiveTab('runbooks');
                       }}
-                      className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-semibold font-mono transition-colors"
+                      className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-semibold font-mono transition-colors shadow-xs cursor-pointer"
                     >
                       OPEN RUNBOOK
                     </button>
                   </div>
                 </div>
               ) : (
-                <div className="p-4 text-center text-slate-500">No automated runbook attached.</div>
+                <div className={`p-4 text-center ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>No automated runbook attached.</div>
               )}
             </div>
           )}
@@ -371,12 +375,14 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
                   placeholder="Record investigation update or diagnostic finding..."
                   value={noteText}
                   onChange={e => setNoteText(e.target.value)}
-                  className="w-full p-2.5 bg-[#0A0F1A] border border-[#1E293B] rounded text-xs text-slate-200 focus:outline-none focus:border-blue-500 font-mono"
+                  className={`w-full p-2.5 rounded border text-xs focus:outline-none focus:border-blue-500 font-mono ${
+                    isDark ? 'bg-[#0A0F1A] border-[#1E293B] text-slate-200' : 'bg-white border-slate-300 text-slate-900'
+                  }`}
                 />
                 <button
                   type="submit"
                   disabled={!noteText.trim()}
-                  className="px-3 py-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded font-semibold text-xs transition-colors flex items-center gap-1.5 ml-auto"
+                  className="px-3 py-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded font-semibold text-xs transition-colors flex items-center gap-1.5 ml-auto cursor-pointer shadow-xs"
                 >
                   <Send className="w-3.5 h-3.5" />
                   <span>Post Note</span>
@@ -385,12 +391,12 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
 
               <div className="space-y-2">
                 {incident.notes.map(note => (
-                  <div key={note.id} className="p-3 bg-[#0A0F1A] border border-[#1E293B] rounded space-y-1">
-                    <div className="flex justify-between items-center text-[10px] font-mono text-slate-500">
-                      <span><strong className="text-slate-300">{note.author}</strong> ({note.role})</span>
+                  <div key={note.id} className={`p-3 rounded border space-y-1 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                    <div className={`flex justify-between items-center text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                      <span><strong className={isDark ? 'text-slate-300' : 'text-slate-700'}>{note.author}</strong> ({note.role})</span>
                       <span>{new Date(note.timestamp).toLocaleTimeString()}</span>
                     </div>
-                    <p className="text-slate-300 text-xs">{note.content}</p>
+                    <p className={`text-xs ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{note.content}</p>
                   </div>
                 ))}
               </div>
@@ -400,8 +406,17 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
         </div>
 
         {/* Footer */}
-        <div className="p-3 px-6 border-t border-[#1E293B] bg-[#0A0F1A] flex justify-end">
-          <button onClick={onClose} className="px-3 py-1 bg-[#1A2436] hover:bg-[#23324C] text-slate-200 rounded text-xs font-mono transition-colors">
+        <div className={`p-3 px-6 border-t flex justify-end ${
+          isDark ? 'border-[#1E293B] bg-[#0A0F1A]' : 'border-slate-200 bg-slate-50'
+        }`}>
+          <button 
+            onClick={onClose} 
+            className={`px-3 py-1 rounded text-xs font-mono transition-colors border cursor-pointer ${
+              isDark 
+                ? 'bg-[#1A2436] hover:bg-[#23324C] border-[#223048] text-slate-200' 
+                : 'bg-white hover:bg-slate-100 border-slate-300 text-slate-700 shadow-2xs'
+            }`}
+          >
             CLOSE
           </button>
         </div>
@@ -473,8 +488,8 @@ export const IncidentsView: React.FC = () => {
       <div className={`rounded-lg border overflow-hidden transition-colors ${
         isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
       }`}>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs font-mono">
+        <div className="w-full min-w-0 overflow-x-auto">
+          <table className="w-full text-left text-xs font-mono min-w-[760px]">
             <thead className={`font-medium border-b ${
               isDark ? 'bg-[#0B0F17] text-slate-400 border-[#1A2332]' : 'bg-slate-50 text-slate-600 border-slate-200'
             }`}>
