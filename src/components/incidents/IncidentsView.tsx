@@ -9,6 +9,7 @@ import {
   ArrowRight
 } from 'lucide-react';
 import { IncidentFlowChart } from '../visuals/IncidentFlowChart';
+import { IncidentTimelineView } from './IncidentTimelineView';
 
 interface IncidentDetailModalProps {
   incident: Incident;
@@ -480,6 +481,9 @@ export const IncidentsView: React.FC = () => {
           ))}
         </div>
       </div>
+
+      {/* Interactive Visual Incident Timeline & Lifecycle Chronology */}
+      <IncidentTimelineView onSelectIncident={(id) => setSelectedIncidentId(id)} />
 
       {/* Active Incident Mitigation State Machine Flowchart */}
       <IncidentFlowChart />
