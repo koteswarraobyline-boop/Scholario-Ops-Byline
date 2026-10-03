@@ -16,6 +16,16 @@ export const DrDashboardView: React.FC = () => {
   const [confirmingFailover, setConfirmingFailover] = useState(false);
 
   const selectedApp = applications.find(a => a.id === selectedAppId) || applications[0];
+
+  // Guard: data still loading
+  if (!selectedApp) {
+    return (
+      <div className={`space-y-6 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+        <div className="text-xs font-mono animate-pulse">Loading DR dashboard...</div>
+      </div>
+    );
+  }
+
   const prdServer = servers.find(s => s.id === selectedApp.prdServerId);
   const drServer = servers.find(s => s.id === selectedApp.drServerId);
   const cfZone = cloudflareZones.find(z => z.domain === selectedApp.cloudflareZone);

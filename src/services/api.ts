@@ -2,9 +2,16 @@
  * Central API client for Scholario Ops.
  * Handles: base URL, Authorization header, automatic token refresh on 401,
  * logout on invalid refresh, typed responses, error normalization.
+ *
+ * In development: uses empty BASE_URL so all requests go through the Vite
+ * proxy at port 3000 → backend at port 4000 (avoids CORS issues).
+ * In production: set VITE_API_URL to the real backend domain.
  */
 
-const BASE_URL = (import.meta.env.VITE_API_URL as string) || 'http://localhost:4000';
+// Use relative URL in dev (proxy handles it), absolute in production
+const BASE_URL = (import.meta.env.VITE_API_URL as string) === 'http://localhost:4000'
+  ? ''  // relative — goes through Vite proxy
+  : ((import.meta.env.VITE_API_URL as string) || '');
 
 // ── Token storage (localStorage keys) ────────────────────────────────────────
 const ACCESS_KEY  = 'scholario_access_token';

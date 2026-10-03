@@ -22,6 +22,7 @@ import { MaintenanceView }   from './components/operations/MaintenanceView';
 import { CommunicationsView} from './components/communications/CommunicationsView';
 import { ReportsView }       from './components/analytics/ReportsView';
 import { AuditLogsView }     from './components/admin/AuditLogsView';
+import { UsersView }         from './components/admin/UsersView';
 
 // ── Protected Route ──────────────────────────────────────────────────────────
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -76,7 +77,7 @@ const DashboardView: React.FC<{ tab: string }> = ({ tab }) => {
     reports:        <ReportsView />,
     uptime:         <ReportsView />,
     audit:          <AuditLogsView />,
-    users:          <AuditLogsView />,
+    users:          <UsersView />,
   };
 
   return <Shell>{viewMap[tab] ?? <OverviewView />}</Shell>;
@@ -85,7 +86,7 @@ const DashboardView: React.FC<{ tab: string }> = ({ tab }) => {
 // ── App root ─────────────────────────────────────────────────────────────────
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <AuthProvider>
         <Routes>
           {/* Public */}

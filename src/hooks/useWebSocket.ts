@@ -1,7 +1,12 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { tokenStore } from '../services/api';
 
-const WS_URL = (import.meta.env.VITE_WS_URL as string) || 'ws://localhost:4000/ws';
+// In dev: use relative WS URL so it goes through Vite proxy
+// In prod: use the configured WS URL
+const _wsUrl = (import.meta.env.VITE_WS_URL as string) || 'ws://localhost:4000/ws';
+const WS_URL = _wsUrl === 'ws://localhost:4000/ws'
+  ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`
+  : _wsUrl;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS  = 30000;
 const PING_INTERVAL_MS  = 25000;

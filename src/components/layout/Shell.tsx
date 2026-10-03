@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
 import { WsStatusBadge } from '../ui/WsStatusBadge';
@@ -72,6 +72,13 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Sync activeTab from current URL path on mount/navigate
+  React.useEffect(() => {
+    const path = location.pathname.replace('/', '') || 'overview';
+    setActiveTab(path);
+  }, [location.pathname, setActiveTab]);
   const isDark = theme === 'dark';
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -211,7 +218,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                 return (
                   <button
                     key={item.id}
-                    onClick={() => setActiveTab(item.id)}
+                    onClick={() => navigate(`/${item.id}`)}
                     title={isSidebarCollapsed ? item.label : undefined}
                     className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors cursor-pointer ${
                       isActive 
@@ -339,7 +346,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
             {/* Health Status Indicator */}
             <button
-              onClick={() => setActiveTab('incidents')}
+              onClick={() => navigate('/incidents')}
               className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded text-xs font-mono transition-colors border cursor-pointer ${
                 systemSummary.overallHealth === 'CRITICAL'
                   ? (isDark ? 'border-rose-900/80 bg-rose-950/40 text-rose-300' : 'border-rose-300 bg-rose-50 text-rose-800')

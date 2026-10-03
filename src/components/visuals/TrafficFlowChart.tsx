@@ -23,6 +23,16 @@ export const TrafficFlowChart: React.FC = () => {
   const [selectedAppId, setSelectedAppId] = useState<string>('app-mosaic');
 
   const app = applications.find(a => a.id === selectedAppId) || applications[0];
+
+  // Guard: applications haven't loaded from API yet
+  if (!app) {
+    return (
+      <div className={`rounded-lg border p-8 flex items-center justify-center ${isDark ? 'bg-[#0F172A] border-[#1E293B]' : 'bg-white border-slate-200'}`}>
+        <div className="text-slate-500 text-xs font-mono animate-pulse">Loading traffic flow...</div>
+      </div>
+    );
+  }
+
   const isDrActive = app.failoverState === 'DR_ACTIVE';
   const isHealthy = app.status === 'HEALTHY';
 

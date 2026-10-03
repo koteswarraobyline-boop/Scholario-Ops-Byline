@@ -12,7 +12,9 @@
     "migrate": "tsx src/database/migrate.ts",
     "migrate:rollback": "tsx src/database/migrate.ts rollback",
     "seed": "tsx src/database/seed.ts",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "vitest run src/tests",
+    "test:watch": "vitest src/tests"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

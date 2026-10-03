@@ -1,18 +1,24 @@
 /**
  * Dead-Man Watchdog Worker
- * Receives heartbeats from external control plane nodes.
- * If a heartbeat is missing past tolerance, fires alert.
+ *
+ * Rules:
+ * 1. If last_heartbeat_received_at is NULL — no heartbeat ever received,
+ *    do NOT mark as silent (system may be starting up).
+ * 2. Only escalate to CRITICAL_SILENCE after consecutive_misses >= 3
+ *    (prevents false alerts from a single missed check).
+ * 3. Only alert via notifications once per 15 minutes.
  */
 import cron from 'node-cron';
-import { query, queryOne } from '../database/pool';
+import { query } from '../database/pool';
 import { NotificationsService } from '../modules/notifications/notifications.service';
 import { broadcast } from '../realtime/websocket';
 import { logger } from '../utils/logger';
 
+const MISS_THRESHOLD = 3; // consecutive misses before CRITICAL_SILENCE
+
 export function startDeadManWorker(): void {
   logger.info('Dead-man watchdog worker starting...');
 
-  // Check every 15 seconds
   cron.schedule('*/15 * * * * *', async () => {
     try {
       await checkDeadManStatus();
@@ -36,74 +42,82 @@ async function checkDeadManStatus(): Promise<void> {
   }>(`SELECT * FROM dead_man_controls`);
 
   for (const ctrl of controls) {
-    if (!ctrl.last_heartbeat_received_at) continue;
+    // Rule 1: No heartbeat ever received — stay HEALTHY, don't alert
+    if (!ctrl.last_heartbeat_received_at) {
+      continue;
+    }
 
     const ageSec = (Date.now() - new Date(ctrl.last_heartbeat_received_at).getTime()) / 1000;
-    const isSilent = ageSec > ctrl.tolerance_sec;
-    const newMisses = isSilent ? ctrl.consecutive_misses + 1 : 0;
-    const newStatus = isSilent ? 'CRITICAL_SILENCE' : 'HEALTHY';
+    const isMissed = ageSec > ctrl.tolerance_sec;
 
-    if (newStatus !== ctrl.status) {
-      await query(
-        `UPDATE dead_man_controls
-         SET status = $1, consecutive_misses = $2, updated_at = NOW()
-         WHERE id = $3`,
-        [newStatus, newMisses, ctrl.id]
-      );
-
-      broadcast('deadman.status.changed', {
-        controlId: ctrl.id,
-        name: ctrl.name,
-        previousStatus: ctrl.status,
-        newStatus,
-        ageSec: Math.round(ageSec),
-        consecutiveMisses: newMisses,
-      });
-
-      if (newStatus === 'CRITICAL_SILENCE') {
-        logger.error({
-          controlId: ctrl.id,
-          ageSec: Math.round(ageSec),
-          misses: newMisses,
-        }, '🚨 DEAD-MAN SILENCE DETECTED — monitoring system may be compromised');
-
-        // Only alert once per 15 minutes
-        const lastAlert = ctrl.last_alert_sent_at
-          ? (Date.now() - new Date(ctrl.last_alert_sent_at).getTime()) / 1000
-          : Infinity;
-
-        if (lastAlert > 900) {
-          await NotificationsService.dispatchIncidentAlert('', 'deadman.silence', {
-            title: `🚨 DEAD-MAN SILENCE: ${ctrl.name}`,
-            text: `The external monitoring watchdog has not received a heartbeat for ${Math.round(ageSec)}s (tolerance: ${ctrl.tolerance_sec}s). The monitoring system may be offline.`,
-            summary: `Dead-man silence: ${ctrl.name}`,
-            color: 'FF0000',
-          }).catch(err => logger.error({ err }, 'Dead-man notification failed'));
-
-          await query(
-            `UPDATE dead_man_controls SET last_alert_sent_at = NOW() WHERE id = $1`,
-            [ctrl.id]
-          );
+    if (!isMissed) {
+      // Heartbeat is current — ensure HEALTHY
+      if (ctrl.status !== 'HEALTHY' || ctrl.consecutive_misses > 0) {
+        await query(
+          `UPDATE dead_man_controls
+           SET status = 'HEALTHY', consecutive_misses = 0, updated_at = NOW()
+           WHERE id = $1`,
+          [ctrl.id]
+        );
+        if (ctrl.status === 'CRITICAL_SILENCE') {
+          broadcast('deadman.status.changed', {
+            controlId: ctrl.id, name: ctrl.name,
+            previousStatus: 'CRITICAL_SILENCE', newStatus: 'HEALTHY',
+            ageSec: Math.round(ageSec),
+          });
+          logger.info({ controlId: ctrl.id }, 'Dead-man watchdog recovered');
         }
       }
-    } else if (!isSilent && ctrl.consecutive_misses > 0) {
-      await query(
-        `UPDATE dead_man_controls SET consecutive_misses = 0, updated_at = NOW() WHERE id = $1`,
-        [ctrl.id]
-      );
+      continue;
+    }
+
+    // Rule 2: Increment misses — only go CRITICAL after threshold
+    const newMisses = ctrl.consecutive_misses + 1;
+    const newStatus = newMisses >= MISS_THRESHOLD ? 'CRITICAL_SILENCE' : ctrl.status;
+
+    await query(
+      `UPDATE dead_man_controls
+       SET consecutive_misses = $1, status = $2, updated_at = NOW()
+       WHERE id = $3`,
+      [newMisses, newStatus, ctrl.id]
+    );
+
+    if (newStatus === 'CRITICAL_SILENCE' && ctrl.status !== 'CRITICAL_SILENCE') {
+      broadcast('deadman.status.changed', {
+        controlId: ctrl.id, name: ctrl.name,
+        previousStatus: ctrl.status, newStatus: 'CRITICAL_SILENCE',
+        ageSec: Math.round(ageSec), consecutiveMisses: newMisses,
+      });
+
+      logger.error({ controlId: ctrl.id, ageSec: Math.round(ageSec), misses: newMisses },
+        '🚨 DEAD-MAN SILENCE DETECTED');
+
+      // Rule 3: Only alert once per 15 minutes
+      const lastAlertSec = ctrl.last_alert_sent_at
+        ? (Date.now() - new Date(ctrl.last_alert_sent_at).getTime()) / 1000
+        : Infinity;
+
+      if (lastAlertSec > 900) {
+        await NotificationsService.dispatchIncidentAlert('', 'deadman.silence', {
+          title: `🚨 DEAD-MAN SILENCE: ${ctrl.name}`,
+          text: `Watchdog has not received a heartbeat for ${Math.round(ageSec)}s (tolerance: ${ctrl.tolerance_sec}s, misses: ${newMisses}).`,
+          summary: `Dead-man silence: ${ctrl.name}`,
+          color: 'FF0000',
+        }).catch(err => logger.error({ err }, 'Dead-man notification dispatch failed'));
+
+        await query(`UPDATE dead_man_controls SET last_alert_sent_at = NOW() WHERE id = $1`, [ctrl.id]);
+      }
     }
   }
 }
 
-// Called by the telemetry endpoint when a heartbeat arrives from the external watchdog
 export async function recordHeartbeat(targetControlPlane: string): Promise<void> {
   await query(
     `UPDATE dead_man_controls
-     SET last_heartbeat_received_at = NOW(),
-         consecutive_misses = 0,
-         status = 'HEALTHY',
-         updated_at = NOW()
+     SET last_heartbeat_received_at = NOW(), consecutive_misses = 0,
+         status = 'HEALTHY', updated_at = NOW()
      WHERE target_control_plane = $1`,
     [targetControlPlane]
   );
+  logger.debug({ targetControlPlane }, 'Dead-man heartbeat received');
 }

@@ -185,11 +185,14 @@ async function runMonitor(mon: {
 async function markStaleAgents(): Promise<void> {
   const staleThreshold = config.monitoring.telemetryStaleThresholdSec;
 
+  // Only mark stale if last_seen was recent enough to have been CONNECTED at some point,
+  // AND the server has actually connected before (last_seen is not null)
   const result = await query<{ id: string; hostname: string }>(
     `UPDATE servers
      SET status = 'STALE', agent_status = 'STALE', updated_at = NOW()
-     WHERE last_seen < NOW() - INTERVAL '${staleThreshold} seconds'
-       AND status != 'STALE'
+     WHERE last_seen IS NOT NULL
+       AND last_seen < NOW() - INTERVAL '${staleThreshold} seconds'
+       AND agent_status = 'CONNECTED'
        AND deleted_at IS NULL
      RETURNING id, hostname`
   );
