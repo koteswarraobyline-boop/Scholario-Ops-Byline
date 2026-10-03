@@ -62,7 +62,7 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
         </div>
 
         {/* Tabs */}
-        <div className={`flex items-center gap-1 px-6 border-b text-xs font-mono ${
+        <div className={`flex items-center gap-1 px-4 sm:px-6 border-b text-xs font-mono overflow-x-auto min-w-0 ${
           isDark ? 'border-[#1E293B] bg-[#0C121E]' : 'border-slate-200 bg-slate-100'
         }`}>
           {[

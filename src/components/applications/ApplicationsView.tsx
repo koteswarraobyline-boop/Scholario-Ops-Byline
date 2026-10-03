@@ -63,7 +63,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
         onClick={e => e.stopPropagation()}
       >
         {/* Modal Header */}
-        <div className={`p-4 px-6 border-b flex items-center justify-between ${
+        <div className={`p-4 px-4 sm:px-6 border-b flex items-center justify-between ${
           isDark ? 'border-[#1E293B] bg-[#0A0F1A]' : 'border-slate-200 bg-slate-50'
         }`}>
           <div className="flex items-center gap-3">
@@ -95,7 +95,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
         </div>
 
         {/* Tab Navigation */}
-        <div className={`flex items-center gap-1 px-6 border-b overflow-x-auto text-xs font-mono ${
+        <div className={`flex items-center gap-1 px-4 sm:px-6 border-b overflow-x-auto min-w-0 text-xs font-mono ${
           isDark ? 'border-[#1E293B] bg-[#0C121E]' : 'border-slate-200 bg-slate-100'
         }`}>
           {[

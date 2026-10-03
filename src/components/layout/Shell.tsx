@@ -76,6 +76,18 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
   const [showSimMenu, setShowSimMenu] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
+  // Close mobile sidebar & dropdowns on Escape key
+  React.useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsMobileSidebarOpen(false);
+        setShowSimMenu(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   const activeCriticalIncident = incidents.find(i => i.severity === 'CRITICAL' && (i.status === 'OPEN' || i.status === 'INVESTIGATING' || i.status === 'MITIGATING' || i.status === 'ACKNOWLEDGED'));
 
   const handleManualRefresh = () => {

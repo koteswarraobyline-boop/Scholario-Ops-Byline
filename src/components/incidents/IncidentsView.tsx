@@ -59,7 +59,7 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
-        <div className={`p-4 px-6 border-b flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+        <div className={`p-4 px-4 sm:px-6 border-b flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
           isDark ? 'border-[#1E293B] bg-[#0A0F1A]' : 'border-slate-200 bg-slate-50'
         }`}>
           <div className="space-y-1">
@@ -105,7 +105,7 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
         </div>
 
         {/* Quick Meta Strip */}
-        <div className={`px-6 py-2 border-b flex flex-wrap items-center justify-between text-xs font-mono gap-2 ${
+        <div className={`px-4 sm:px-6 py-2 border-b flex flex-wrap items-center justify-between text-xs font-mono gap-2 ${
           isDark ? 'bg-[#0C121E] border-[#1E293B] text-slate-400' : 'bg-slate-100 border-slate-200 text-slate-600'
         }`}>
           <div className="flex items-center gap-4">
@@ -173,7 +173,7 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
         )}
 
         {/* Tabs */}
-        <div className={`flex items-center gap-1 px-6 border-b text-xs font-mono overflow-x-auto ${
+        <div className={`flex items-center gap-1 px-4 sm:px-6 border-b text-xs font-mono overflow-x-auto min-w-0 ${
           isDark ? 'border-[#1E293B] bg-[#0C121E]' : 'border-slate-200 bg-slate-100'
         }`}>
           {[

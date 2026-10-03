@@ -61,7 +61,7 @@ export const AuditLogsView: React.FC = () => {
                     {log.targetId}
                   </td>
 
-                  <td className={`py-2.5 px-3.5 font-sans max-w-md ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+                  <td className={`py-2.5 px-3.5 font-sans max-w-md break-words ${isDark ? 'text-slate-300' : 'text-slate-700'}`} title={log.details}>
                     {log.details}
                   </td>
                 </tr>

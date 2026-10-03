@@ -204,7 +204,7 @@ export const MonitorsView: React.FC = () => {
                       </div>
                       <div className={`text-[11px] font-mono mt-0.5 truncate max-w-xs ${
                         isDark ? 'text-slate-400' : 'text-slate-500'
-                      }`}>
+                      }`} title={m.target}>
                         {m.target}
                       </div>
                     </td>

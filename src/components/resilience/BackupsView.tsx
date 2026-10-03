@@ -98,7 +98,7 @@ export const BackupsView: React.FC = () => {
                       {b.retentionDays}d
                     </td>
 
-                    <td className={`py-2.5 px-3.5 max-w-xs truncate text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                    <td className={`py-2.5 px-3.5 max-w-xs truncate text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`} title={b.integrityHash}>
                       {b.integrityHash}
                     </td>
 

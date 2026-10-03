@@ -131,7 +131,7 @@ export const RunbooksView: React.FC = () => {
                       <div className={`mt-2 p-2 rounded border text-[11px] flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 overflow-x-auto min-w-0 ${
                         isDark ? 'bg-[#05080E] text-slate-200 border-[#182338]' : 'bg-slate-900 text-slate-100 border-slate-800'
                       }`}>
-                        <code className="truncate max-w-full font-mono">$ {step.command}</code>
+                        <code className="truncate max-w-full font-mono" title={step.command}>$ {step.command}</code>
                         <span className="text-[10px] text-slate-400 uppercase font-sans shrink-0">Diagnostic Only</span>
                       </div>
                     )}

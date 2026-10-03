@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useOps } from '../../context/OpsContext';
 import { 
   BookOpen, 
@@ -25,6 +25,56 @@ import {
   ExternalLink
 } from 'lucide-react';
 
+/**
+ * Skeleton loading placeholder for KPI health cards.
+ * Designed to exactly mirror the final card dimensions (min-h-[116px], p-3.5 sm:p-4,
+ * identical flex distribution, header, metric, and footer rows) to guarantee ZERO layout shift.
+ */
+export const KpiCardSkeleton: React.FC<{ isDark: boolean; index?: number }> = ({ isDark, index = 0 }) => {
+  const titleWidths = ['w-24 sm:w-28', 'w-36 sm:w-40', 'w-32 sm:w-36', 'w-34 sm:w-38'];
+  const valueWidths = ['w-10 sm:w-12', 'w-20 sm:w-24', 'w-10 sm:w-12', 'w-16 sm:w-20'];
+  const pillWidths = ['w-16 sm:w-20', 'w-20 sm:w-24', 'w-18 sm:w-22', 'w-20 sm:w-24'];
+  const descWidths = ['w-36 sm:w-44', 'w-44 sm:w-52', 'w-36 sm:w-44', 'w-40 sm:w-48'];
+
+  const tWidth = titleWidths[index % titleWidths.length];
+  const vWidth = valueWidths[index % valueWidths.length];
+  const pWidth = pillWidths[index % pillWidths.length];
+  const dWidth = descWidths[index % descWidths.length];
+
+  const shimmer = isDark ? 'bg-[#1C273C] animate-pulse' : 'bg-slate-200 animate-pulse';
+
+  return (
+    <div
+      aria-hidden="true"
+      className={`p-3.5 sm:p-4 rounded-lg border flex flex-col justify-between min-w-0 min-h-[116px] transition-colors select-none ${
+        isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
+      }`}
+    >
+      <div>
+        {/* Top Header Row: Label + Icon */}
+        <div className="flex items-center justify-between gap-2">
+          <div className={`h-2.5 ${tWidth} rounded ${shimmer}`} />
+          <div className={`w-3.5 h-3.5 rounded ${shimmer} shrink-0`} />
+        </div>
+
+        {/* Middle Metric Row: 2xl Value + Status Pill */}
+        <div className="mt-1.5 flex items-baseline gap-2">
+          <div className={`h-7 ${vWidth} rounded ${shimmer}`} />
+          <div className={`h-4.5 ${pWidth} rounded ${shimmer}`} />
+        </div>
+      </div>
+
+      {/* Bottom Footer Row: Description + Arrow */}
+      <div className={`mt-2.5 pt-2 border-t flex items-center justify-between ${
+        isDark ? 'border-[#1E293B]' : 'border-slate-100'
+      }`}>
+        <div className={`h-2.5 ${dWidth} rounded ${shimmer}`} />
+        <div className={`w-3 h-3 rounded ${shimmer} shrink-0 ml-1`} />
+      </div>
+    </div>
+  );
+};
+
 export const ProjectOverviewView: React.FC = () => {
   const { 
     theme, 
@@ -34,11 +84,30 @@ export const ProjectOverviewView: React.FC = () => {
     servers, 
     applications, 
     deployments,
-    deadMan 
+    deadMan,
+    runAllProbes
   } = useOps();
   const isDark = theme === 'dark';
 
+  const [isLoading, setIsLoading] = useState(false);
   const [activeSection, setActiveSection] = useState<'architecture' | 'stack' | 'features' | 'themes' | 'principles'>('architecture');
+
+  // Brief initial loading state to demonstrate zero-CLS transition on mount
+  useEffect(() => {
+    setIsLoading(true);
+    const timer = setTimeout(() => {
+      setIsLoading(false);
+    }, 450);
+    return () => clearTimeout(timer);
+  }, []);
+
+  const handleRefreshMetrics = () => {
+    setIsLoading(true);
+    runAllProbes();
+    setTimeout(() => {
+      setIsLoading(false);
+    }, 550);
+  };
 
   // Calculate real-time health stats
   const activeIncidents = incidents.filter(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED');
@@ -81,6 +150,19 @@ export const ProjectOverviewView: React.FC = () => {
 
         <div className="flex items-center gap-2 shrink-0">
           <button
+            onClick={handleRefreshMetrics}
+            disabled={isLoading}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-medium rounded transition-colors border cursor-pointer ${
+              isDark 
+                ? 'text-slate-300 bg-[#162033] hover:bg-[#1C2942] border-[#243552]' 
+                : 'text-slate-700 bg-white hover:bg-slate-50 border-slate-300 shadow-2xs'
+            }`}
+            title="Poll real-time cluster telemetry and refresh health stats"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 text-blue-500 ${isLoading ? 'animate-spin' : ''}`} />
+            <span>{isLoading ? 'SYNCING...' : 'SYNC STATS'}</span>
+          </button>
+          <button
             onClick={() => setActiveTab('overview')}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded transition-colors shadow-xs cursor-pointer"
           >
@@ -90,152 +172,174 @@ export const ProjectOverviewView: React.FC = () => {
         </div>
       </div>
 
-      {/* 2. REAL-TIME SUMMARY KPI CARDS SECTION */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-        
-        {/* KPI 1: Active Incidents */}
-        <div 
-          onClick={() => setActiveTab('incidents')}
-          className={`p-3.5 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 ${
-            activeIncidents.length > 0
-              ? (isDark ? 'bg-[#180E13] border-rose-900/70 hover:border-rose-600' : 'bg-rose-50/60 border-rose-200 hover:border-rose-400 shadow-xs')
-              : (isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs')
-          }`}
-        >
-          <div>
-            <div className="flex items-center justify-between">
-              <span className={`text-[10px] font-mono font-semibold uppercase tracking-wider ${
-                activeIncidents.length > 0 ? 'text-rose-500' : 'text-slate-400'
-              }`}>
-                Active Incidents
-              </span>
-              <AlertTriangle className={`w-3.5 h-3.5 ${
-                activeIncidents.length > 0 ? 'text-rose-500 animate-pulse' : 'text-slate-400'
-              }`} />
+      {/* 2. REAL-TIME SUMMARY KPI CARDS SECTION (OR SKELETON LOADERS) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+        {isLoading ? (
+          <>
+            <KpiCardSkeleton isDark={isDark} index={0} />
+            <KpiCardSkeleton isDark={isDark} index={1} />
+            <KpiCardSkeleton isDark={isDark} index={2} />
+            <KpiCardSkeleton isDark={isDark} index={3} />
+          </>
+        ) : (
+          <>
+            {/* KPI 1: Active Incidents */}
+            <div 
+              role="button"
+              tabIndex={0}
+              onClick={() => setActiveTab('incidents')}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveTab('incidents'); } }}
+              className={`p-3.5 sm:p-4 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 min-h-[116px] focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none ${
+                activeIncidents.length > 0
+                  ? (isDark ? 'bg-[#180E13] border-rose-900/70 hover:border-rose-600' : 'bg-rose-50/70 border-rose-200 hover:border-rose-400 shadow-xs')
+                  : (isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs')
+              }`}
+            >
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className={`text-[10px] font-mono font-semibold uppercase tracking-wider truncate ${
+                    activeIncidents.length > 0 ? 'text-rose-500' : 'text-slate-400'
+                  }`}>
+                    Active Incidents
+                  </span>
+                  <AlertTriangle className={`w-3.5 h-3.5 shrink-0 ${
+                    activeIncidents.length > 0 ? 'text-rose-500 animate-pulse' : 'text-slate-400'
+                  }`} />
+                </div>
+                <div className="mt-1.5 flex items-baseline gap-2">
+                  <span className={`text-2xl font-bold font-mono tabular-nums ${
+                    activeIncidents.length > 0 ? 'text-rose-500' : (isDark ? 'text-slate-100' : 'text-slate-900')
+                  }`}>
+                    {activeIncidents.length}
+                  </span>
+                  <span className={`text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded ${
+                    criticalIncidentsCount > 0
+                      ? 'bg-rose-500/20 text-rose-400 border border-rose-800'
+                      : 'bg-emerald-500/10 text-emerald-500'
+                  }`}>
+                    {criticalIncidentsCount > 0 ? `${criticalIncidentsCount} CRITICAL` : 'NOMINAL'}
+                  </span>
+                </div>
+              </div>
+              <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
+                <span className="truncate">
+                  {activeIncidents[0] ? `INC-1042: ${activeIncidents[0].title.slice(0, 22)}...` : 'All systems operational'}
+                </span>
+                <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
+              </div>
             </div>
-            <div className="mt-1.5 flex items-baseline gap-2">
-              <span className={`text-2xl font-bold font-mono tabular-nums ${
-                activeIncidents.length > 0 ? 'text-rose-500' : (isDark ? 'text-slate-100' : 'text-slate-900')
-              }`}>
-                {activeIncidents.length}
-              </span>
-              <span className={`text-[10px] font-mono font-semibold px-1.5 py-0.2 rounded ${
-                criticalIncidentsCount > 0
-                  ? 'bg-rose-500/20 text-rose-400 border border-rose-800'
-                  : 'bg-emerald-500/10 text-emerald-500'
-              }`}>
-                {criticalIncidentsCount > 0 ? `${criticalIncidentsCount} CRITICAL` : 'NOMINAL'}
-              </span>
-            </div>
-          </div>
-          <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
-            <span className="truncate">
-              {activeIncidents[0] ? `INC-1042: ${activeIncidents[0].title.slice(0, 22)}...` : 'All systems operational'}
-            </span>
-            <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
-          </div>
-        </div>
 
-        {/* KPI 2: Server Uptime Percentage */}
-        <div 
-          onClick={() => setActiveTab('uptime')}
-          className={`p-3.5 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 ${
-            isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs'
-          }`}
-        >
-          <div>
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-slate-400">
-                Server Uptime (30d)
-              </span>
-              <Activity className="w-3.5 h-3.5 text-emerald-500" />
+            {/* KPI 2: Server Uptime Percentage */}
+            <div 
+              role="button"
+              tabIndex={0}
+              onClick={() => setActiveTab('uptime')}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveTab('uptime'); } }}
+              className={`p-3.5 sm:p-4 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 min-h-[116px] focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none ${
+                isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs'
+              }`}
+            >
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-slate-400 truncate">
+                    Server Uptime Percentage
+                  </span>
+                  <Activity className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                </div>
+                <div className="mt-1.5 flex items-baseline gap-2">
+                  <span className={`text-2xl font-bold font-mono tabular-nums ${
+                    avgUptime >= 99.9 ? 'text-emerald-500' : 'text-amber-500'
+                  }`}>
+                    {avgUptime}%
+                  </span>
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-semibold">
+                    SLA ≥ 99.90%
+                  </span>
+                </div>
+              </div>
+              <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
+                <span className="truncate">
+                  {systemSummary.healthyServers}/{systemSummary.totalServers} Hostinger VPS Healthy
+                </span>
+                <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
+              </div>
             </div>
-            <div className="mt-1.5 flex items-baseline gap-2">
-              <span className={`text-2xl font-bold font-mono tabular-nums ${
-                avgUptime >= 99.9 ? 'text-emerald-500' : 'text-amber-500'
-              }`}>
-                {avgUptime}%
-              </span>
-              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-emerald-500/10 text-emerald-400 font-semibold">
-                SLA ≥ 99.90%
-              </span>
-            </div>
-          </div>
-          <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
-            <span className="truncate">
-              {systemSummary.healthyServers}/{systemSummary.totalServers} Hostinger VPS Healthy
-            </span>
-            <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
-          </div>
-        </div>
 
-        {/* KPI 3: Pending Deployments */}
-        <div 
-          onClick={() => setActiveTab('deployments')}
-          className={`p-3.5 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 ${
-            isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs'
-          }`}
-        >
-          <div>
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-slate-400">
-                Pending Deployments
-              </span>
-              <GitBranch className="w-3.5 h-3.5 text-blue-500" />
+            {/* KPI 3: Pending Deployments */}
+            <div 
+              role="button"
+              tabIndex={0}
+              onClick={() => setActiveTab('deployments')}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveTab('deployments'); } }}
+              className={`p-3.5 sm:p-4 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 min-h-[116px] focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none ${
+                isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs'
+              }`}
+            >
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-slate-400 truncate">
+                    Pending Deployments
+                  </span>
+                  <GitBranch className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                </div>
+                <div className="mt-1.5 flex items-baseline gap-2">
+                  <span className={`text-2xl font-bold font-mono tabular-nums ${
+                    pendingDeployments.length > 0 ? 'text-blue-500' : (isDark ? 'text-slate-100' : 'text-slate-900')
+                  }`}>
+                    {pendingDeployments.length}
+                  </span>
+                  <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded font-semibold ${
+                    pendingDeployments.length > 0 
+                      ? 'bg-blue-500/10 text-blue-400' 
+                      : 'bg-slate-500/10 text-slate-400'
+                  }`}>
+                    {pendingDeployments.length > 0 ? 'IN PROGRESS' : 'IDLE'}
+                  </span>
+                </div>
+              </div>
+              <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
+                <span className="truncate">
+                  {latestDeployment ? `Last: ${latestDeployment.version} (${latestAppName})` : 'Zero queued pipelines'}
+                </span>
+                <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
+              </div>
             </div>
-            <div className="mt-1.5 flex items-baseline gap-2">
-              <span className={`text-2xl font-bold font-mono tabular-nums ${
-                pendingDeployments.length > 0 ? 'text-blue-500' : (isDark ? 'text-slate-100' : 'text-slate-900')
-              }`}>
-                {pendingDeployments.length}
-              </span>
-              <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded font-semibold ${
-                pendingDeployments.length > 0 
-                  ? 'bg-blue-500/10 text-blue-400' 
-                  : 'bg-slate-500/10 text-slate-400'
-              }`}>
-                {pendingDeployments.length > 0 ? 'IN PROGRESS' : 'IDLE'}
-              </span>
-            </div>
-          </div>
-          <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
-            <span className="truncate">
-              {latestDeployment ? `Last: ${latestDeployment.version} (${latestAppName})` : 'Zero queued pipelines'}
-            </span>
-            <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
-          </div>
-        </div>
 
-        {/* KPI 4: DR Standby Readiness */}
-        <div 
-          onClick={() => setActiveTab('resilience')}
-          className={`p-3.5 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 ${
-            isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs'
-          }`}
-        >
-          <div>
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-slate-400">
-                PRD / DR Standby Mesh
-              </span>
-              <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
+            {/* KPI 4: DR Standby Readiness */}
+            <div 
+              role="button"
+              tabIndex={0}
+              onClick={() => setActiveTab('resilience')}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveTab('resilience'); } }}
+              className={`p-3.5 sm:p-4 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 min-h-[116px] focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none ${
+                isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs'
+              }`}
+            >
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-slate-400 truncate">
+                    PRD / DR Standby Mesh
+                  </span>
+                  <ShieldCheck className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                </div>
+                <div className="mt-1.5 flex items-baseline gap-2">
+                  <span className={`text-2xl font-bold font-mono tabular-nums ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
+                    {systemSummary.drReadinessCount} / {systemSummary.totalApps}
+                  </span>
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 font-semibold">
+                    WARM STANDBY
+                  </span>
+                </div>
+              </div>
+              <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
+                <span className="truncate">
+                  Watchdog: {deadMan.status === 'HEALTHY' ? '1.0s Heartbeat OK' : 'Silenced'}
+                </span>
+                <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
+              </div>
             </div>
-            <div className="mt-1.5 flex items-baseline gap-2">
-              <span className={`text-2xl font-bold font-mono tabular-nums ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
-                {systemSummary.drReadinessCount} / {systemSummary.totalApps}
-              </span>
-              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-indigo-500/10 text-indigo-400 font-semibold">
-                WARM STANDBY
-              </span>
-            </div>
-          </div>
-          <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
-            <span className="truncate">
-              Watchdog: {deadMan.status === 'HEALTHY' ? '1.0s Heartbeat OK' : 'Silenced'}
-            </span>
-            <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
-          </div>
-        </div>
+          </>
+        )}
       </div>
 
       {/* 3. Navigation Section Switcher */}
