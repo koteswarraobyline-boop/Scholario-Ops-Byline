@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express';
+import fs from 'fs';
 import http from 'http';
 import net from 'net';
 import path from 'path';
@@ -30,11 +31,15 @@ import {
   DeadManControlPlane,
   MonitorType,
   Environment,
-  OperationalStatus
+  OperationalStatus,
+  RealVpsConfig,
+  RealVpsProbeState,
+  RealVpsErrorCategory
 } from './src/types/index.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const PERSISTED_VPS_CONFIG_PATH = path.join(__dirname, '.real-vps-config.json');
 
 // In-Memory Live State Store (Real-time backend state)
 let applications: Application[] = JSON.parse(JSON.stringify(INITIAL_APPLICATIONS));
@@ -48,80 +53,249 @@ let deadMan: DeadManControlPlane = JSON.parse(JSON.stringify(INITIAL_DEAD_MAN));
 // ── REAL 2-VPS TESTBENCH STATE ────────────────────────────────────────────────
 let isRealVpsOnlyMode = true;
 
-let realVpsConfig = {
-  activeMode: 'real_pair' as 'real_pair' | 'sample_cluster',
-  routing: 'MAIN' as 'MAIN' | 'DR',
-  autoFailover: true,
+const DEFAULT_MAIN_IP = process.env.REAL_VPS_MAIN_IP || '72.61.239.86';
+const DEFAULT_MAIN_PORT = Number(process.env.REAL_VPS_MAIN_PORT) || 6423;
+const DEFAULT_MAIN_HEALTH_URL = process.env.REAL_VPS_MAIN_HEALTH_URL || `http://${DEFAULT_MAIN_IP}:${DEFAULT_MAIN_PORT}/api/health`;
+
+const DEFAULT_DR_IP = process.env.REAL_VPS_DR_IP || '187.126.112.188';
+const DEFAULT_DR_PORT = Number(process.env.REAL_VPS_DR_PORT) || 6423;
+const DEFAULT_DR_HEALTH_URL = process.env.REAL_VPS_DR_HEALTH_URL || `http://${DEFAULT_DR_IP}:${DEFAULT_DR_PORT}/api/health`;
+
+let realVpsConfig: RealVpsConfig = {
+  activeMode: 'real_pair',
+  routing: 'MAIN',
+  autoFailover: false,
   healthCheckIntervalSec: 15,
-  telemetryToken: 'scholario_ops_sec_token_9921',
   main: {
     id: 'vps-real-main',
-    name: 'Main VPS (Primary / PRD)',
-    ip: '185.193.125.101',
-    hostname: 'prd-vps1.main-server.net',
-    port: 80,
-    healthUrl: 'http://185.193.125.101/health',
-    provider: 'Hostinger Cloud VPS (or Custom)',
-    region: 'Primary Region (Main)',
-    environment: 'PRD' as const,
-    status: 'HEALTHY' as OperationalStatus,
-    lastCheckedAt: new Date().toISOString(),
-    latencyMs: 24,
-    httpStatus: 200,
-    tlsStatus: 'TLS 1.3 Active',
-    responseSnippet: 'HTTP/1.1 200 OK - Main VPS Primary Operational',
+    name: 'VPS 1 - MAIN',
+    role: 'PRIMARY / PRODUCTION',
+    ip: DEFAULT_MAIN_IP,
+    hostname: DEFAULT_MAIN_IP,
+    port: DEFAULT_MAIN_PORT,
+    healthUrl: DEFAULT_MAIN_HEALTH_URL,
+    healthPath: '/api/health',
+    provider: 'Hostinger Cloud VPS',
+    region: 'Primary Region (PRD)',
+    environment: 'PRD',
+    status: 'UNKNOWN',
+    probeState: 'UNKNOWN',
+    lastCheckedAt: null,
+    latencyMs: 0,
+    httpStatus: null,
+    tlsStatus: 'HTTP Plain',
+    responseSnippet: 'Awaiting live health check probe...',
+    errorReason: null,
+    errorCategory: null,
+    healthData: null,
     telemetry: {
-      cpuPercent: 28.4,
-      ramPercent: 54.2,
-      diskPercent: 41.0,
-      loadAvg: [1.2, 0.9, 0.7],
+      cpuPercent: 0,
+      ramPercent: 0,
+      diskPercent: 0,
+      loadAvg: [0, 0, 0],
       observedAt: new Date().toISOString()
     }
   },
   dr: {
     id: 'vps-real-dr',
-    name: 'DR VPS (Disaster Recovery / Standby)',
-    ip: '185.193.125.102',
-    hostname: 'dr-vps2.standby-server.net',
-    port: 80,
-    healthUrl: 'http://185.193.125.102/health',
-    provider: 'Hostinger Cloud VPS (or Custom)',
+    name: 'VPS 2 - DR',
+    role: 'DISASTER RECOVERY / STANDBY',
+    ip: DEFAULT_DR_IP,
+    hostname: DEFAULT_DR_IP,
+    port: DEFAULT_DR_PORT,
+    healthUrl: DEFAULT_DR_HEALTH_URL,
+    healthPath: '/api/health',
+    provider: 'Hostinger Cloud VPS',
     region: 'DR Region (Standby)',
-    environment: 'DR' as const,
-    status: 'HEALTHY' as OperationalStatus,
-    lastCheckedAt: new Date().toISOString(),
-    latencyMs: 31,
-    httpStatus: 200,
-    tlsStatus: 'TLS 1.3 Active',
-    responseSnippet: 'HTTP/1.1 200 OK - DR VPS Hot Standby Ready',
+    environment: 'DR',
+    status: 'UNKNOWN',
+    probeState: 'UNKNOWN',
+    lastCheckedAt: null,
+    latencyMs: 0,
+    httpStatus: null,
+    tlsStatus: 'HTTP Plain',
+    responseSnippet: 'Awaiting live health check probe...',
+    errorReason: null,
+    errorCategory: null,
+    healthData: null,
     telemetry: {
-      cpuPercent: 12.1,
-      ramPercent: 38.6,
-      diskPercent: 39.5,
-      loadAvg: [0.4, 0.3, 0.2],
+      cpuPercent: 0,
+      ramPercent: 0,
+      diskPercent: 0,
+      loadAvg: [0, 0, 0],
       observedAt: new Date().toISOString()
     }
   },
   testApp: {
     id: 'app-real-workload',
-    name: 'Production 2-VPS Application',
+    name: 'Node.js / Express API',
     codeName: 'production-workload',
-    domain: 'app.scholario.net',
-    healthPath: '/health',
-    failoverState: 'PRIMARY_ACTIVE' as 'PRIMARY_ACTIVE' | 'DR_ACTIVE',
+    domain: `${DEFAULT_MAIN_IP}:${DEFAULT_MAIN_PORT}`,
+    healthPath: '/api/health',
+    failoverState: 'PRIMARY_ACTIVE',
     mainServerId: 'vps-real-main',
     drServerId: 'vps-real-dr',
     lastFailoverAt: new Date().toISOString()
   }
 };
 
-async function performRealProbe(targetUrl: string, timeoutMs: number = 6000) {
-  const start = Date.now();
+function loadPersistedRealVpsConfig() {
   try {
-    let clean = targetUrl.trim();
-    if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
-      clean = `http://${clean}`;
+    if (fs.existsSync(PERSISTED_VPS_CONFIG_PATH)) {
+      const raw = JSON.parse(fs.readFileSync(PERSISTED_VPS_CONFIG_PATH, 'utf-8'));
+      if (raw && raw.main && raw.dr) {
+        // Ignore legacy mock IPs if present
+        if (raw.main.ip !== '185.193.125.101' && raw.dr.ip !== '185.193.125.102') {
+          realVpsConfig = {
+            ...realVpsConfig,
+            ...raw,
+            main: { ...realVpsConfig.main, ...raw.main },
+            dr: { ...realVpsConfig.dr, ...raw.dr },
+            testApp: { ...realVpsConfig.testApp, ...(raw.testApp || {}) }
+          };
+        }
+      }
     }
+  } catch {
+    // Use defaults if persisted config cannot be read
+  }
+}
+
+function savePersistedRealVpsConfig() {
+  try {
+    fs.writeFileSync(PERSISTED_VPS_CONFIG_PATH, JSON.stringify(realVpsConfig, null, 2), 'utf-8');
+  } catch {
+    // Ignore write errors in read-only filesystems
+  }
+}
+
+loadPersistedRealVpsConfig();
+
+const SENSITIVE_KEY_PATTERN = /key|secret|token|password|passwd|credential|private|auth|jwt|dsn|uri|connection|env|cookie|session/i;
+const SENSITIVE_VALUE_PATTERN = /^(sk-[a-zA-Z0-9_-]{10,}|AIza[a-zA-Z0-9_-]{10,}|eyJ[a-zA-Z0-9_-]{10,}|ghp_[a-zA-Z0-9]{10,}|xox[baprs]-[a-zA-Z0-9-]{10,})/;
+
+function sanitizeValue(val: unknown): string | number | boolean | null {
+  if (val === null || val === undefined) return null;
+  if (typeof val === 'boolean' || typeof val === 'number') return val;
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (SENSITIVE_VALUE_PATTERN.test(trimmed)) return '[REDACTED]';
+    if (trimmed.length > 80 && !trimmed.includes(' ')) return '[REDACTED]';
+    return trimmed.slice(0, 120);
+  }
+  if (typeof val === 'object') {
+    const obj = val as Record<string, unknown>;
+    if (typeof obj.status === 'string') return sanitizeValue(obj.status);
+    if (typeof obj.state === 'string') return sanitizeValue(obj.state);
+    if (typeof obj.enabled === 'boolean') return obj.enabled ? 'enabled' : 'disabled';
+    if (typeof obj.configured === 'boolean') return obj.configured ? 'configured' : 'unconfigured';
+    if (typeof obj.ok === 'boolean') return obj.ok ? 'ok' : 'error';
+    if (typeof obj.provider === 'string') return sanitizeValue(obj.provider);
+    return 'ok';
+  }
+  return null;
+}
+
+function sanitizeHealthPayload(rawText: string): {
+  isJson: boolean;
+  healthStatus: string | null;
+  healthData: Record<string, string | number | boolean> | null;
+  safeSnippet: string;
+} {
+  const trimmed = rawText.trim();
+  if (!trimmed) {
+    return { isJson: false, healthStatus: null, healthData: null, safeSnippet: '' };
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const safeMap: Record<string, string | number | boolean> = {};
+      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+        if (SENSITIVE_KEY_PATTERN.test(k)) continue;
+        const cleanVal = sanitizeValue(v);
+        if (cleanVal !== null) {
+          safeMap[k] = cleanVal;
+        }
+      }
+      const statusRaw = safeMap.status ?? safeMap.health ?? safeMap.state ?? null;
+      const healthStatus = statusRaw !== null ? String(statusRaw) : null;
+      return {
+        isJson: true,
+        healthStatus,
+        healthData: Object.keys(safeMap).length > 0 ? safeMap : null,
+        safeSnippet: JSON.stringify(safeMap)
+      };
+    }
+  } catch {
+    // Not JSON
+  }
+  const safeSnippet = trimmed.replace(/(sk-[a-zA-Z0-9_-]{10,}|AIza[a-zA-Z0-9_-]{10,}|eyJ[a-zA-Z0-9_-]{10,})/g, '[REDACTED]').slice(0, 300);
+  return { isJson: false, healthStatus: null, healthData: null, safeSnippet };
+}
+
+function classifyNetworkError(err: unknown): {
+  probeState: RealVpsProbeState;
+  errorCategory: RealVpsErrorCategory;
+  reason: string;
+} {
+  const anyErr = err as any;
+  const name = anyErr?.name || '';
+  const code = anyErr?.cause?.code || anyErr?.code || '';
+  const causeMsg = anyErr?.cause?.message || (err instanceof Error ? err.message : String(err));
+
+  if (name === 'AbortError' || name === 'TimeoutError' || code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT' || /timed?\s*out/i.test(causeMsg)) {
+    return {
+      probeState: 'TIMEOUT',
+      errorCategory: 'TIMEOUT',
+      reason: 'Connection timed out'
+    };
+  }
+  if (code === 'ECONNREFUSED' || /ECONNREFUSED/i.test(causeMsg)) {
+    return {
+      probeState: 'CONNECTION_REFUSED',
+      errorCategory: 'CONNECTION_REFUSED',
+      reason: 'Connection refused (port closed or service not listening)'
+    };
+  }
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN' || /ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(causeMsg)) {
+    return {
+      probeState: 'UNREACHABLE',
+      errorCategory: 'DNS_FAILURE',
+      reason: 'DNS resolution failed (hostname could not be resolved)'
+    };
+  }
+  if (code === 'EHOSTUNREACH' || code === 'ENETUNREACH' || /EHOSTUNREACH|ENETUNREACH/i.test(causeMsg)) {
+    return {
+      probeState: 'UNREACHABLE',
+      errorCategory: 'NETWORK_UNREACHABLE',
+      reason: `Network or host unreachable (${code || 'EHOSTUNREACH'}) — port may be blocked by firewall or outbound network policy`
+    };
+  }
+  return {
+    probeState: 'UNREACHABLE',
+    errorCategory: 'NETWORK_UNREACHABLE',
+    reason: code ? `Network error (${code})` : 'Target host unreachable'
+  };
+}
+
+function extractHealthPath(urlStr: string): string {
+  try {
+    const u = new URL(urlStr.startsWith('http') ? urlStr : `http://${urlStr}`);
+    return u.pathname + u.search;
+  } catch {
+    return '/api/health';
+  }
+}
+
+async function performRealProbe(targetUrl: string, timeoutMs: number = 6000, vpsType: 'main' | 'dr' | 'custom' = 'custom') {
+  const start = Date.now();
+  let clean = targetUrl.trim();
+  if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
+    clean = `http://${clean}`;
+  }
+  const healthPath = extractHealthPath(clean);
+
+  try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const resp = await fetch(clean, {
@@ -129,7 +303,7 @@ async function performRealProbe(targetUrl: string, timeoutMs: number = 6000) {
       signal: controller.signal,
       headers: {
         'User-Agent': 'Scholario-RealVps-Monitor/2.4',
-        'Accept': '*/*'
+        'Accept': 'application/json, text/plain, */*'
       }
     });
     clearTimeout(timer);
@@ -137,32 +311,82 @@ async function performRealProbe(targetUrl: string, timeoutMs: number = 6000) {
     const bodyText = await resp.text().catch(() => '');
     const headersMap: Record<string, string> = {};
     resp.headers.forEach((val, key) => {
-      headersMap[key] = val;
+      if (!SENSITIVE_KEY_PATTERN.test(key)) {
+        headersMap[key] = val;
+      }
     });
 
+    const sanitized = sanitizeHealthPayload(bodyText);
+
+    let probeState: RealVpsProbeState = 'UNKNOWN';
+    let reachable = false;
+    let error: string | undefined = undefined;
+    let errorCategory: RealVpsErrorCategory | null = null;
+
+    if (resp.status >= 200 && resp.status < 300) {
+      reachable = true;
+      const statusLower = (sanitized.healthStatus || '').toLowerCase();
+      if (sanitized.isJson && (statusLower === 'ok' || statusLower === 'healthy' || statusLower === 'up')) {
+        probeState = 'HEALTHY';
+      } else if (sanitized.isJson && statusLower && statusLower !== 'ok' && statusLower !== 'healthy') {
+        probeState = 'INVALID_HEALTH_RESPONSE';
+        errorCategory = 'INVALID_RESPONSE';
+        error = `Health endpoint returned status: "${sanitized.healthStatus}"`;
+      } else if (!sanitized.isJson && /<!doctype html|<html/i.test(bodyText)) {
+        probeState = 'INVALID_HEALTH_RESPONSE';
+        errorCategory = 'INVALID_RESPONSE';
+        error = 'Endpoint returned HTML instead of expected JSON health payload (status: "ok")';
+      } else if (bodyText.toLowerCase().includes('"ok"') || bodyText.toLowerCase().includes('ok')) {
+        probeState = 'HEALTHY';
+      } else {
+        probeState = 'INVALID_HEALTH_RESPONSE';
+        errorCategory = 'INVALID_RESPONSE';
+        error = 'Response did not contain expected status: "ok"';
+      }
+    } else {
+      reachable = false;
+      probeState = 'HTTP_ERROR';
+      errorCategory = 'HTTP_ERROR';
+      error = `HTTP ${resp.status} ${resp.statusText || 'Error'}`;
+    }
+
     return {
-      reachable: resp.status < 500,
+      target: clean,
+      vpsType,
+      reachable,
+      probeState,
       statusCode: resp.status,
       latencyMs,
+      health: sanitized.healthStatus || (probeState === 'HEALTHY' ? 'ok' : null),
+      healthPath,
+      healthData: sanitized.healthData,
       headers: headersMap,
-      bodySnippet: bodyText.slice(0, 300) || `HTTP ${resp.status} ${resp.statusText}`,
+      bodySnippet: sanitized.safeSnippet || `HTTP ${resp.status} ${resp.statusText}`,
       tlsValid: clean.startsWith('https://'),
-      tlsInfo: clean.startsWith('https://') ? 'TLS Handshake Verified' : undefined,
-      error: undefined,
+      tlsInfo: clean.startsWith('https://') ? 'TLS Handshake Verified' : 'HTTP Plain',
+      error,
+      errorCategory,
       timestamp: new Date().toISOString()
     };
   } catch (err: unknown) {
     const latencyMs = Date.now() - start;
-    const msg = err instanceof Error ? err.message : String(err);
+    const classified = classifyNetworkError(err);
     return {
+      target: clean,
+      vpsType,
       reachable: false,
+      probeState: classified.probeState,
       statusCode: null,
       latencyMs,
+      health: null,
+      healthPath,
+      healthData: null,
       headers: {},
       bodySnippet: undefined,
       tlsValid: false,
-      tlsInfo: undefined,
-      error: msg,
+      tlsInfo: clean.startsWith('https://') ? 'TLS Failed' : 'HTTP Plain',
+      error: classified.reason,
+      errorCategory: classified.errorCategory,
       timestamp: new Date().toISOString()
     };
   }
@@ -199,12 +423,17 @@ function checkTcpPort(host: string, port: number, timeoutMs: number = 3500): Pro
       }
     });
 
-    socket.on('error', (err) => {
+    socket.on('error', (err: NodeJS.ErrnoException) => {
       if (!isResolved) {
         isResolved = true;
         const latencyMs = Date.now() - start;
         cleanup();
-        resolve({ open: false, latencyMs, error: err.message });
+        const code = err.code || '';
+        let friendlyError = err.message;
+        if (code === 'ECONNREFUSED') friendlyError = 'Connection refused (port closed)';
+        else if (code === 'EHOSTUNREACH' || code === 'ENETUNREACH') friendlyError = `Host unreachable / Port filtered (${code})`;
+        else if (code === 'ETIMEDOUT') friendlyError = 'Connection timed out';
+        resolve({ open: false, latencyMs, error: friendlyError });
       }
     });
 
@@ -799,31 +1028,29 @@ async function startServer() {
 
     // If target is an HTTP/HTTPS URL, attempt real check
     if (mon.target.startsWith('http://') || mon.target.startsWith('https://')) {
-      try {
-        const start = Date.now();
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), mon.timeoutSec * 1000);
-        const resp = await fetch(mon.target, { 
-          method: 'GET',
-          signal: controller.signal,
-          headers: { 'User-Agent': 'Scholario-Ops-Synthetic-Probe/2.4' }
-        });
-        clearTimeout(timeoutId);
-        responseTimeMs = Date.now() - start;
-        statusCode = resp.status;
-        detail = `HTTP ${resp.status} ${resp.statusText || 'OK'}`;
-      } catch (err: unknown) {
-        if (!isFailing) {
-          // If simulation was healthy, record nominal network synthetic response
-          responseTimeMs = Math.floor(45 + Math.random() * 60);
-          statusCode = 200;
-          detail = 'Synthetic edge check: Nominal response from Cloudflare Anycast';
-        } else {
-          responseTimeMs = 4500;
-          statusCode = 504;
-          detail = err instanceof Error ? err.message : 'Gateway Timeout / Connection Refused';
-        }
-      }
+      const probeRes = await performRealProbe(mon.target, (mon.timeoutSec || 6) * 1000);
+      responseTimeMs = probeRes.latencyMs;
+      statusCode = probeRes.statusCode || 0;
+      detail = probeRes.error || probeRes.bodySnippet || `HTTP ${probeRes.statusCode}`;
+      const nextStatus: OperationalStatus = probeRes.probeState === 'HEALTHY' ? 'HEALTHY' : 'CRITICAL';
+      const checkRecord = {
+        timestamp: new Date().toISOString(),
+        status: nextStatus,
+        responseTimeMs,
+        statusCode,
+        detail
+      };
+      monitors[idx] = {
+        ...mon,
+        status: nextStatus,
+        lastCheck: new Date().toISOString(),
+        lastSuccess: nextStatus === 'HEALTHY' ? new Date().toISOString() : mon.lastSuccess,
+        lastFailure: nextStatus !== 'HEALTHY' ? new Date().toISOString() : mon.lastFailure,
+        responseTimeMs,
+        history: [checkRecord, ...mon.history.slice(0, 19)]
+      };
+      broadcastSse('monitor_probed', monitors[idx]);
+      return res.json({ success: true, data: monitors[idx], probeResult: checkRecord });
     } else {
       // TCP Socket / DB Port
       if (isFailing) {
@@ -905,57 +1132,18 @@ async function startServer() {
 
   // Real-time live synthetic test probe execution (before saving)
   app.post('/api/v1/monitors/test-synthetic', async (req: Request, res: Response) => {
-    const { target, type, timeoutSec } = req.body;
+    const { target, timeoutSec } = req.body;
     if (!target) return res.status(400).json({ success: false, error: 'Target is required' });
 
-    const timeout = (Number(timeoutSec) || 5) * 1000;
-    const start = Date.now();
-
-    if (target.startsWith('http://') || target.startsWith('https://')) {
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeout);
-        const resp = await fetch(target, { 
-          method: 'GET',
-          signal: controller.signal,
-          headers: { 'User-Agent': 'Scholario-Ops-LiveTester/2.4' }
-        });
-        clearTimeout(timer);
-        const latencyMs = Date.now() - start;
-        const text = await resp.text();
-
-        return res.json({
-          success: true,
-          statusCode: resp.status,
-          latencyMs,
-          resolvedIp: '185.193.125.101',
-          tlsInfo: target.startsWith('https://') ? 'TLS 1.3 · RSA 2048 · Let\'s Encrypt Authority' : undefined,
-          responseSnippet: text.slice(0, 300) || `HTTP ${resp.status} ${resp.statusText}`,
-          testedAt: new Date().toLocaleTimeString()
-        });
-      } catch (err: unknown) {
-        // Fallback synthetic diagnostic
-        const latencyMs = Math.floor(35 + Math.random() * 45);
-        return res.json({
-          success: true,
-          statusCode: 200,
-          latencyMs,
-          resolvedIp: '185.193.125.101',
-          tlsInfo: 'TLS 1.3 · Valid for 84 days',
-          responseSnippet: `HTTP/2 200 OK\r\nserver: cloudflare\r\nx-scholario-node: sg-ciph-prd-01\r\n\r\n{"status":"UP","healthy":true,"uptime_sec":1420800}`,
-          testedAt: new Date().toLocaleTimeString()
-        });
-      }
-    }
-
-    // TCP Port probe
-    const latencyMs = Math.floor(18 + Math.random() * 32);
-    res.json({
-      success: true,
-      statusCode: 200,
-      latencyMs,
-      resolvedIp: target.split(':')[0] || '185.193.125.101',
-      responseSnippet: `TCP Connection Established to ${target} · Handshake ACK 1.4ms · Socket state: OPEN`,
+    const timeout = (Number(timeoutSec) || 6) * 1000;
+    const probeRes = await performRealProbe(target, timeout, 'custom');
+    return res.json({
+      success: probeRes.reachable,
+      statusCode: probeRes.statusCode || 0,
+      latencyMs: probeRes.latencyMs,
+      resolvedIp: target.replace(/^https?:\/\//, '').split(/[/:]/)[0] || '',
+      tlsInfo: probeRes.tlsInfo,
+      responseSnippet: probeRes.bodySnippet || probeRes.error || 'No response body',
       testedAt: new Date().toLocaleTimeString()
     });
   });
@@ -1116,10 +1304,18 @@ async function startServer() {
   app.post('/api/vps/config', (req: Request, res: Response) => {
     const { main, dr, testApp, autoFailover, healthCheckIntervalSec, activeMode } = req.body;
     if (main) {
-      realVpsConfig.main = { ...realVpsConfig.main, ...main };
+      realVpsConfig.main = {
+        ...realVpsConfig.main,
+        ...main,
+        healthPath: main.healthUrl ? extractHealthPath(main.healthUrl) : realVpsConfig.main.healthPath
+      };
     }
     if (dr) {
-      realVpsConfig.dr = { ...realVpsConfig.dr, ...dr };
+      realVpsConfig.dr = {
+        ...realVpsConfig.dr,
+        ...dr,
+        healthPath: dr.healthUrl ? extractHealthPath(dr.healthUrl) : realVpsConfig.dr.healthPath
+      };
     }
     if (testApp) {
       realVpsConfig.testApp = { ...realVpsConfig.testApp, ...testApp };
@@ -1134,8 +1330,9 @@ async function startServer() {
       realVpsConfig.activeMode = activeMode;
     }
 
+    savePersistedRealVpsConfig();
     syncRealVpsStore();
-    addAudit('REAL_VPS_CONFIG_UPDATED', 'INFRASTRUCTURE', 'vps-real-pair', `Configured Main: ${realVpsConfig.main.ip} (${realVpsConfig.main.healthUrl}) | DR: ${realVpsConfig.dr.ip} (${realVpsConfig.dr.healthUrl})`);
+    addAudit('REAL_VPS_CONFIG_UPDATED', 'INFRASTRUCTURE', 'vps-real-pair', `Configured Main: ${realVpsConfig.main.ip}:${realVpsConfig.main.port} (${realVpsConfig.main.healthUrl}) | DR: ${realVpsConfig.dr.ip}:${realVpsConfig.dr.port} (${realVpsConfig.dr.healthUrl})`);
     broadcastSse('real_vps_update', realVpsConfig);
 
     res.json({
@@ -1146,41 +1343,56 @@ async function startServer() {
     });
   });
 
-  app.post('/api/vps/probe', async (req: Request, res: Response) => {
-    const { targetVps, customUrl } = req.body as { targetVps?: 'main' | 'dr'; customUrl?: string };
-    const vpsKey = targetVps === 'dr' ? 'dr' : 'main';
-    const targetUrl = customUrl || realVpsConfig[vpsKey].healthUrl;
-
-    const probeResult = await performRealProbe(targetUrl, 6000);
+  function applyProbeToNode(vpsKey: 'main' | 'dr', probeResult: Awaited<ReturnType<typeof performRealProbe>>) {
     const now = new Date().toISOString();
+    const mappedStatus: OperationalStatus =
+      probeResult.probeState === 'HEALTHY'
+        ? (probeResult.latencyMs > 1200 ? 'WARNING' : 'HEALTHY')
+        : 'UNKNOWN';
 
     realVpsConfig[vpsKey] = {
       ...realVpsConfig[vpsKey],
       lastCheckedAt: now,
       latencyMs: probeResult.latencyMs,
       httpStatus: probeResult.statusCode,
+      probeState: probeResult.probeState,
+      healthPath: probeResult.healthPath || realVpsConfig[vpsKey].healthPath || '/api/health',
+      healthData: probeResult.healthData || null,
+      errorReason: probeResult.error || null,
+      errorCategory: probeResult.errorCategory || null,
       tlsStatus: probeResult.tlsInfo || (probeResult.tlsValid ? 'TLS 1.3 Active' : 'HTTP Plain'),
       responseSnippet: probeResult.bodySnippet || (probeResult.error ? `Error: ${probeResult.error}` : 'No body returned'),
-      status: probeResult.reachable ? (probeResult.latencyMs > 600 ? 'WARNING' : 'HEALTHY') : 'CRITICAL'
+      status: mappedStatus
     };
+  }
 
-    // Auto-failover check
+  app.post('/api/vps/probe', async (req: Request, res: Response) => {
+    const { targetVps, customUrl } = req.body as { targetVps?: 'main' | 'dr'; customUrl?: string };
+    const vpsKey = targetVps === 'dr' ? 'dr' : 'main';
+    const targetUrl = customUrl || realVpsConfig[vpsKey].healthUrl;
+
+    const probeResult = await performRealProbe(targetUrl, 6000, vpsKey);
+    const now = new Date().toISOString();
+    applyProbeToNode(vpsKey, probeResult);
+
+    // Auto-failover check (only if explicitly enabled by operator and DR is healthy)
     let autoFailoverTriggered = false;
     if (
       realVpsConfig.autoFailover && 
       vpsKey === 'main' && 
-      !probeResult.reachable && 
+      probeResult.probeState !== 'HEALTHY' && 
       realVpsConfig.routing === 'MAIN' && 
-      realVpsConfig.dr.status !== 'CRITICAL'
+      realVpsConfig.dr.probeState === 'HEALTHY'
     ) {
       realVpsConfig.routing = 'DR';
       realVpsConfig.testApp.failoverState = 'DR_ACTIVE';
       realVpsConfig.testApp.lastFailoverAt = now;
       autoFailoverTriggered = true;
-      addAudit('AUTO_FAILOVER_TRIGGERED', 'FAILOVER', 'app-real-workload', `CRITICAL: Real probe to Main VPS (${realVpsConfig.main.healthUrl}) failed: ${probeResult.error || `HTTP ${probeResult.statusCode}`}. Auto-diverted traffic to DR Standby node (${realVpsConfig.dr.ip})`);
-      broadcastSse('real_vps_failover', { routing: 'DR', reason: 'Automatic failover triggered: Main probe down', config: realVpsConfig });
+      addAudit('AUTO_FAILOVER_TRIGGERED', 'FAILOVER', 'app-real-workload', `Real probe to ${realVpsConfig.main.name} (${realVpsConfig.main.healthUrl}) returned ${probeResult.probeState}. Auto-diverted routing state to ${realVpsConfig.dr.name} (${realVpsConfig.dr.ip})`);
+      broadcastSse('real_vps_failover', { routing: 'DR', reason: 'Automatic failover triggered: Main probe failed', config: realVpsConfig });
     }
 
+    savePersistedRealVpsConfig();
     syncRealVpsStore();
     broadcastSse('real_vps_probed', { vps: vpsKey, probeResult, config: realVpsConfig, autoFailoverTriggered });
 
@@ -1194,46 +1406,30 @@ async function startServer() {
 
   app.post('/api/vps/probe-both', async (_req: Request, res: Response) => {
     const [mainResult, drResult] = await Promise.all([
-      performRealProbe(realVpsConfig.main.healthUrl, 6000),
-      performRealProbe(realVpsConfig.dr.healthUrl, 6000)
+      performRealProbe(realVpsConfig.main.healthUrl, 6000, 'main'),
+      performRealProbe(realVpsConfig.dr.healthUrl, 6000, 'dr')
     ]);
     const now = new Date().toISOString();
 
-    realVpsConfig.main = {
-      ...realVpsConfig.main,
-      lastCheckedAt: now,
-      latencyMs: mainResult.latencyMs,
-      httpStatus: mainResult.statusCode,
-      tlsStatus: mainResult.tlsInfo || (mainResult.tlsValid ? 'TLS 1.3 Active' : 'HTTP Plain'),
-      responseSnippet: mainResult.bodySnippet || (mainResult.error ? `Error: ${mainResult.error}` : 'No body'),
-      status: mainResult.reachable ? (mainResult.latencyMs > 600 ? 'WARNING' : 'HEALTHY') : 'CRITICAL'
-    };
-
-    realVpsConfig.dr = {
-      ...realVpsConfig.dr,
-      lastCheckedAt: now,
-      latencyMs: drResult.latencyMs,
-      httpStatus: drResult.statusCode,
-      tlsStatus: drResult.tlsInfo || (drResult.tlsValid ? 'TLS 1.3 Active' : 'HTTP Plain'),
-      responseSnippet: drResult.bodySnippet || (drResult.error ? `Error: ${drResult.error}` : 'No body'),
-      status: drResult.reachable ? (drResult.latencyMs > 600 ? 'WARNING' : 'HEALTHY') : 'CRITICAL'
-    };
+    applyProbeToNode('main', mainResult);
+    applyProbeToNode('dr', drResult);
 
     let autoFailoverTriggered = false;
     if (
       realVpsConfig.autoFailover && 
-      !mainResult.reachable && 
+      mainResult.probeState !== 'HEALTHY' && 
       realVpsConfig.routing === 'MAIN' && 
-      drResult.reachable
+      drResult.probeState === 'HEALTHY'
     ) {
       realVpsConfig.routing = 'DR';
       realVpsConfig.testApp.failoverState = 'DR_ACTIVE';
       realVpsConfig.testApp.lastFailoverAt = now;
       autoFailoverTriggered = true;
-      addAudit('AUTO_FAILOVER_TRIGGERED', 'FAILOVER', 'app-real-workload', `Automated Failover: Main VPS unreachable. Rerouted production traffic to DR node (${realVpsConfig.dr.ip})`);
-      broadcastSse('real_vps_failover', { routing: 'DR', reason: 'Automatic failover triggered: Main probe down', config: realVpsConfig });
+      addAudit('AUTO_FAILOVER_TRIGGERED', 'FAILOVER', 'app-real-workload', `Automated Failover: ${realVpsConfig.main.name} (${mainResult.probeState}). Switched routing state to ${realVpsConfig.dr.name} (${realVpsConfig.dr.ip})`);
+      broadcastSse('real_vps_failover', { routing: 'DR', reason: 'Automatic failover triggered: Main probe failed', config: realVpsConfig });
     }
 
+    savePersistedRealVpsConfig();
     syncRealVpsStore();
     broadcastSse('real_vps_probed', { vps: 'both', mainResult, drResult, config: realVpsConfig, autoFailoverTriggered });
 
@@ -1256,22 +1452,23 @@ async function startServer() {
     realVpsConfig.testApp.lastFailoverAt = now;
 
     const targetServer = newTarget === 'MAIN' ? realVpsConfig.main : realVpsConfig.dr;
-    addAudit(`FAILOVER_MANUAL_${newTarget}`, 'FAILOVER', 'app-real-workload', `Operator switched live workload to ${newTarget} node (${targetServer.ip} · ${targetServer.hostname}). Reason: ${reason || 'Manual test verification'}`);
+    savePersistedRealVpsConfig();
+    addAudit(`FAILOVER_MANUAL_${newTarget}`, 'FAILOVER', 'app-real-workload', `Operator confirmed routing switch to ${newTarget} node (${targetServer.ip}:${targetServer.port} · ${targetServer.name}). Reason: ${reason || 'Operator confirmed manual failover'}`);
     syncRealVpsStore();
     broadcastSse('real_vps_failover', { routing: newTarget, config: realVpsConfig });
 
     res.json({
       success: true,
       data: realVpsConfig,
-      message: `Production traffic switched to ${newTarget} node (${targetServer.name} - ${targetServer.ip})`
+      message: `Control Center routing state switched to ${newTarget} (${targetServer.name} - ${targetServer.ip}:${targetServer.port})`
     });
   });
 
-  // TCP Port Reachability Probe (Tests real open ports on VPS: 80, 443, 22, 3000, 8080, etc.)
+  // TCP Port Reachability Probe (Tests real open ports on VPS: 6423, 80, 443, 22, etc.)
   app.post('/api/vps/tcp-probe', async (req: Request, res: Response) => {
     const { targetVps, host, port } = req.body as { targetVps?: 'main' | 'dr'; host?: string; port: number };
     const targetHost = host || (targetVps === 'dr' ? realVpsConfig.dr.ip : realVpsConfig.main.ip);
-    const targetPort = Number(port) || 80;
+    const targetPort = Number(port) || 6423;
 
     const result = await checkTcpPort(targetHost, targetPort, 4000);
     const tcpRecord = {
@@ -1283,7 +1480,7 @@ async function startServer() {
       testedAt: new Date().toISOString()
     };
 
-    addAudit('TCP_PORT_PROBE', 'MONITOR', `${targetHost}:${targetPort}`, `Probed port ${targetPort} on ${targetHost}: ${result.open ? 'OPEN' : 'CLOSED/FILTERED'} (${result.latencyMs}ms)`);
+    addAudit('TCP_PORT_PROBE', 'MONITOR', `${targetHost}:${targetPort}`, `Probed TCP port ${targetPort} on ${targetHost}: ${result.open ? 'OPEN' : `CLOSED/UNREACHABLE (${result.error || 'filtered'})`} (${result.latencyMs}ms)`);
 
     res.json({
       success: true,
@@ -1308,7 +1505,8 @@ async function startServer() {
         method,
         headers: {
           'User-Agent': 'Scholario-Ops-SyntheticTestbench/2.4',
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'Accept': 'application/json, text/plain, */*'
         },
         body: (method === 'POST' || method === 'PUT') && body ? body : undefined,
         signal: controller.signal
@@ -1317,8 +1515,13 @@ async function startServer() {
       const latencyMs = Date.now() - start;
       const text = await resp.text().catch(() => '');
       const headersMap: Record<string, string> = {};
-      resp.headers.forEach((v, k) => { headersMap[k] = v; });
+      resp.headers.forEach((v, k) => {
+        if (!SENSITIVE_KEY_PATTERN.test(k)) {
+          headersMap[k] = v;
+        }
+      });
 
+      const sanitized = sanitizeHealthPayload(text);
       const matchesStatus = resp.status === Number(expectedStatus);
       const matchesText = matchText ? text.toLowerCase().includes(matchText.toLowerCase()) : true;
       const expectedMatch = matchesStatus && matchesText;
@@ -1331,17 +1534,17 @@ async function startServer() {
         latencyMs,
         expectedMatch,
         matchText,
-        responseSnippet: text.slice(0, 500) || `HTTP ${resp.status} ${resp.statusText}`,
+        responseSnippet: sanitized.safeSnippet || `HTTP ${resp.status} ${resp.statusText}`,
         headers: headersMap,
         testedAt: new Date().toISOString()
       };
 
-      addAudit('SYNTHETIC_TRANSACTION_TEST', 'APPLICATION', 'app-real-workload', `Synthetic ${method} probe on ${cleanUrl}: ${expectedMatch ? 'PASSED' : 'ASSERTION_FAILED'} (${latencyMs}ms)`);
+      addAudit('SYNTHETIC_TRANSACTION_TEST', 'MONITOR', 'app-real-workload', `Synthetic ${method} probe on ${cleanUrl}: ${expectedMatch ? 'PASSED' : 'ASSERTION_FAILED'} (${latencyMs}ms)`);
 
       res.json({ success: true, result });
     } catch (err: unknown) {
       const latencyMs = Date.now() - start;
-      const msg = err instanceof Error ? err.message : String(err);
+      const classified = classifyNetworkError(err);
       const result = {
         url,
         method,
@@ -1350,7 +1553,7 @@ async function startServer() {
         latencyMs,
         expectedMatch: false,
         matchText,
-        responseSnippet: `Error: ${msg}`,
+        responseSnippet: `UNREACHABLE (${classified.probeState}): ${classified.reason}`,
         headers: {},
         testedAt: new Date().toISOString()
       };
@@ -1567,7 +1770,19 @@ done
     if (!authHeader) {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
-    const { password: _, ...safeUser } = usersList[1] || usersList[0];
+    const token = authHeader.replace(/^Bearer\s+/i, '');
+    const parts = token.split('_');
+    if (parts.length >= 4) {
+      try {
+        const decoded = JSON.parse(Buffer.from(parts.slice(3).join('_'), 'base64url').toString('utf-8'));
+        const matched = usersList.find(u => u.id === decoded.id || u.email === decoded.email);
+        if (matched) {
+          const { password: _, ...safe } = matched;
+          return res.json({ success: true, data: safe });
+        }
+      } catch {}
+    }
+    const { password: _, ...safeUser } = usersList[0];
     res.json({ success: true, data: safeUser });
   });
 
@@ -1802,7 +2017,7 @@ done
     const total = list.length;
     res.json({
       success: true,
-      data: list.slice((page - 1) * pageSize, page * pageSize),
+      data: list.slice((page - 1) * pageSize, page * pageSize).map(l => ({ ...l, target_id: l.targetId })),
       pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) }
     });
   });

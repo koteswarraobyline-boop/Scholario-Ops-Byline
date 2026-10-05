@@ -53,17 +53,18 @@ export const RealVpsTestbenchView: React.FC = () => {
 
   // TCP Port Scanner states
   const [tcpTarget, setTcpTarget] = useState<'main' | 'dr'>('main');
-  const [customPort, setCustomPort] = useState<number>(80);
-  const [tcpResults, setTcpResults] = useState<Record<number, RealVpsTcpProbeResult>>({});
+  const [customPort, setCustomPort] = useState<number>(6423);
+  const [tcpResults, setTcpResults] = useState<Record<string, RealVpsTcpProbeResult>>({});
   const [isScanningTcp, setIsScanningTcp] = useState<boolean>(false);
   const [scanningPort, setScanningPort] = useState<number | null>(null);
 
   // Synthetic E2E Tester states
-  const [synthUrl, setSynthUrl] = useState<string>(realVpsConfig?.main.healthUrl || 'http://185.193.125.101/health');
+  const [synthTarget, setSynthTarget] = useState<'main' | 'dr' | 'custom'>('main');
+  const [synthUrl, setSynthUrl] = useState<string>(realVpsConfig?.main.healthUrl || 'http://72.61.239.86:6423/api/health');
   const [synthMethod, setSynthMethod] = useState<'GET' | 'POST' | 'PUT'>('GET');
   const [synthBody, setSynthBody] = useState<string>('{"ping":"test"}');
   const [synthExpectedStatus, setSynthExpectedStatus] = useState<number>(200);
-  const [synthMatchText, setSynthMatchText] = useState<string>('');
+  const [synthMatchText, setSynthMatchText] = useState<string>('"status":"ok"');
   const [synthResult, setSynthResult] = useState<SyntheticTransactionResult | null>(null);
   const [isTestingSynth, setIsTestingSynth] = useState<boolean>(false);
 
@@ -77,34 +78,37 @@ export const RealVpsTestbenchView: React.FC = () => {
   // Edit states for Main & DR
   const [isEditingMain, setIsEditingMain] = useState(false);
   const [mainForm, setMainForm] = useState({
-    name: realVpsConfig?.main.name || 'Main VPS (Primary / PRD)',
-    ip: realVpsConfig?.main.ip || '185.193.125.101',
-    hostname: realVpsConfig?.main.hostname || 'prd-vps1.main-server.net',
-    port: realVpsConfig?.main.port || 80,
-    healthUrl: realVpsConfig?.main.healthUrl || 'http://185.193.125.101/health',
+    name: realVpsConfig?.main.name || 'VPS 1 - MAIN',
+    role: realVpsConfig?.main.role || 'PRIMARY / PRODUCTION',
+    ip: realVpsConfig?.main.ip || '72.61.239.86',
+    hostname: realVpsConfig?.main.hostname || '72.61.239.86',
+    port: realVpsConfig?.main.port || 6423,
+    healthUrl: realVpsConfig?.main.healthUrl || 'http://72.61.239.86:6423/api/health',
     provider: realVpsConfig?.main.provider || 'Hostinger Cloud VPS',
-    region: realVpsConfig?.main.region || 'Singapore (PRD)'
+    region: realVpsConfig?.main.region || 'Primary Region (PRD)'
   });
 
   const [isEditingDr, setIsEditingDr] = useState(false);
   const [drForm, setDrForm] = useState({
-    name: realVpsConfig?.dr.name || 'DR VPS (Disaster Recovery / Standby)',
-    ip: realVpsConfig?.dr.ip || '185.193.125.102',
-    hostname: realVpsConfig?.dr.hostname || 'dr-vps2.standby-server.net',
-    port: realVpsConfig?.dr.port || 80,
-    healthUrl: realVpsConfig?.dr.healthUrl || 'http://185.193.125.102/health',
+    name: realVpsConfig?.dr.name || 'VPS 2 - DR',
+    role: realVpsConfig?.dr.role || 'DISASTER RECOVERY / STANDBY',
+    ip: realVpsConfig?.dr.ip || '187.126.112.188',
+    hostname: realVpsConfig?.dr.hostname || '187.126.112.188',
+    port: realVpsConfig?.dr.port || 6423,
+    healthUrl: realVpsConfig?.dr.healthUrl || 'http://187.126.112.188:6423/api/health',
     provider: realVpsConfig?.dr.provider || 'Hostinger Cloud VPS',
-    region: realVpsConfig?.dr.region || 'Frankfurt (DR Standby)'
+    region: realVpsConfig?.dr.region || 'DR Region (Standby)'
   });
 
   const [isEditingApp, setIsEditingApp] = useState(false);
   const [appForm, setAppForm] = useState({
-    name: realVpsConfig?.testApp.name || 'Production 2-VPS Application',
-    domain: realVpsConfig?.testApp.domain || 'app.scholario.net',
-    healthPath: realVpsConfig?.testApp.healthPath || '/health'
+    name: realVpsConfig?.testApp.name || 'Node.js / Express API',
+    domain: realVpsConfig?.testApp.domain || '72.61.239.86:6423',
+    healthPath: realVpsConfig?.testApp.healthPath || '/api/health'
   });
 
   const [probeResultModal, setProbeResultModal] = useState<RealVpsProbeResult | null>(null);
+  const [dualProbeResult, setDualProbeResult] = useState<{ mainResult: RealVpsProbeResult; drResult: RealVpsProbeResult } | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   // Sync edit forms when realVpsConfig changes
@@ -112,6 +116,7 @@ export const RealVpsTestbenchView: React.FC = () => {
     if (realVpsConfig) {
       setMainForm({
         name: realVpsConfig.main.name,
+        role: realVpsConfig.main.role || 'PRIMARY / PRODUCTION',
         ip: realVpsConfig.main.ip,
         hostname: realVpsConfig.main.hostname,
         port: realVpsConfig.main.port,
@@ -121,6 +126,7 @@ export const RealVpsTestbenchView: React.FC = () => {
       });
       setDrForm({
         name: realVpsConfig.dr.name,
+        role: realVpsConfig.dr.role || 'DISASTER RECOVERY / STANDBY',
         ip: realVpsConfig.dr.ip,
         hostname: realVpsConfig.dr.hostname,
         port: realVpsConfig.dr.port,
@@ -133,8 +139,13 @@ export const RealVpsTestbenchView: React.FC = () => {
         domain: realVpsConfig.testApp.domain,
         healthPath: realVpsConfig.testApp.healthPath
       });
+      if (synthTarget === 'main') {
+        setSynthUrl(realVpsConfig.main.healthUrl);
+      } else if (synthTarget === 'dr') {
+        setSynthUrl(realVpsConfig.dr.healthUrl);
+      }
     }
-  }, [realVpsConfig]);
+  }, [realVpsConfig, synthTarget]);
 
   if (!realVpsConfig) {
     return (
@@ -147,7 +158,7 @@ export const RealVpsTestbenchView: React.FC = () => {
     );
   }
 
-  const { main, dr, routing, autoFailover, testApp } = realVpsConfig;
+  const { main, dr, routing, autoFailover, testApp, lastFailoverReason } = realVpsConfig;
   const isMainActive = routing === 'MAIN';
 
   const handleSaveMain = async () => {
@@ -155,11 +166,11 @@ export const RealVpsTestbenchView: React.FC = () => {
       main: {
         ...main,
         ...mainForm,
-        port: Number(mainForm.port) || 80
+        port: Number(mainForm.port) || 6423
       }
     });
     setIsEditingMain(false);
-    setStatusMessage('Saved Main VPS configuration');
+    setStatusMessage('Saved VPS 1 - MAIN configuration');
     setTimeout(() => setStatusMessage(null), 3000);
   };
 
@@ -168,11 +179,11 @@ export const RealVpsTestbenchView: React.FC = () => {
       dr: {
         ...dr,
         ...drForm,
-        port: Number(drForm.port) || 80
+        port: Number(drForm.port) || 6423
       }
     });
     setIsEditingDr(false);
-    setStatusMessage('Saved DR VPS configuration');
+    setStatusMessage('Saved VPS 2 - DR configuration');
     setTimeout(() => setStatusMessage(null), 3000);
   };
 
@@ -192,8 +203,9 @@ export const RealVpsTestbenchView: React.FC = () => {
     const res = await probeRealVps('main');
     if (res) {
       setProbeResultModal(res);
-      setStatusMessage(`Probed Main VPS: ${res.reachable ? 'REACHABLE' : 'UNREACHABLE'} (${res.latencyMs}ms)`);
-      setTimeout(() => setStatusMessage(null), 4000);
+      const stateLabel = res.probeState || (res.reachable ? 'HEALTHY' : 'UNREACHABLE');
+      setStatusMessage(`Probed VPS 1 MAIN (${main.ip}:${main.port}): ${res.reachable ? 'REACHABLE' : 'UNREACHABLE'} [${stateLabel}] (${res.latencyMs}ms)`);
+      setTimeout(() => setStatusMessage(null), 5000);
     }
   };
 
@@ -201,23 +213,27 @@ export const RealVpsTestbenchView: React.FC = () => {
     const res = await probeRealVps('dr');
     if (res) {
       setProbeResultModal(res);
-      setStatusMessage(`Probed DR VPS: ${res.reachable ? 'REACHABLE' : 'UNREACHABLE'} (${res.latencyMs}ms)`);
-      setTimeout(() => setStatusMessage(null), 4000);
+      const stateLabel = res.probeState || (res.reachable ? 'HEALTHY' : 'UNREACHABLE');
+      setStatusMessage(`Probed VPS 2 DR (${dr.ip}:${dr.port}): ${res.reachable ? 'REACHABLE' : 'UNREACHABLE'} [${stateLabel}] (${res.latencyMs}ms)`);
+      setTimeout(() => setStatusMessage(null), 5000);
     }
   };
 
   const handleProbeBoth = async () => {
     const res = await probeBothRealVps();
     if (res) {
-      setStatusMessage(`Probed Both Nodes: Main (${res.mainResult.latencyMs}ms) | DR (${res.drResult.latencyMs}ms)`);
-      setTimeout(() => setStatusMessage(null), 4000);
+      setDualProbeResult(res);
+      setStatusMessage(
+        `Probed Both VPSs: VPS 1 MAIN [${res.mainResult.reachable ? 'REACHABLE' : 'UNREACHABLE'} · ${res.mainResult.latencyMs}ms] | VPS 2 DR [${res.drResult.reachable ? 'REACHABLE' : 'UNREACHABLE'} · ${res.drResult.latencyMs}ms]`
+      );
+      setTimeout(() => setStatusMessage(null), 6000);
     }
   };
 
   const handleToggleFailover = async () => {
     const target = isMainActive ? 'DR' : 'MAIN';
-    await failoverRealVps(target, `Operator toggled traffic to ${target} via 2-VPS Testbench`);
-    setStatusMessage(`Traffic routed to ${target} node (${target === 'MAIN' ? main.ip : dr.ip})`);
+    await failoverRealVps(target, `Operator manually switched routing to ${target} via 2-VPS Testbench`);
+    setStatusMessage(`Traffic routed to ${target} node (${target === 'MAIN' ? `${main.ip}:${main.port}` : `${dr.ip}:${dr.port}`})`);
     setTimeout(() => setStatusMessage(null), 4000);
   };
 
@@ -228,26 +244,33 @@ export const RealVpsTestbenchView: React.FC = () => {
   };
 
   const commonPorts = [
+    { port: 6423, name: 'Node.js / Express API (6423)' },
     { port: 80, name: 'HTTP Web Ingress' },
     { port: 443, name: 'HTTPS TLS Secure' },
     { port: 22, name: 'SSH Remote Console' },
-    { port: 3000, name: 'Node.js / App Service' },
+    { port: 3000, name: 'Node.js / Alternate App' },
     { port: 8080, name: 'Proxy / Alternate Web' },
     { port: 5432, name: 'PostgreSQL Database' },
-    { port: 3306, name: 'MySQL / MariaDB' },
     { port: 6379, name: 'Redis In-Memory Cache' },
   ];
 
-  const handleScanTcp = async (portToScan: number) => {
+  const handleScanTcpForNode = async (targetNode: 'main' | 'dr', portToScan: number) => {
+    setTcpTarget(targetNode);
     setScanningPort(portToScan);
-    const host = tcpTarget === 'dr' ? dr.ip : main.ip;
-    const res = await tcpProbe({ targetVps: tcpTarget, host, port: portToScan });
+    const host = targetNode === 'dr' ? dr.ip : main.ip;
+    const res = await tcpProbe({ targetVps: targetNode, host, port: portToScan });
     if (res) {
-      setTcpResults(prev => ({ ...prev, [portToScan]: res }));
-      setStatusMessage(`Port ${portToScan} on ${tcpTarget.toUpperCase()} (${host}): ${res.open ? 'OPEN / ACCEPTING' : 'CLOSED / FILTERED'} (${res.latencyMs}ms)`);
-      setTimeout(() => setStatusMessage(null), 4000);
+      setTcpResults(prev => ({ ...prev, [`${targetNode}-${portToScan}`]: res }));
+      setStatusMessage(
+        `${targetNode === 'main' ? 'VPS 1 MAIN' : 'VPS 2 DR'} (${host}) → TCP ${portToScan}: ${res.open ? 'OPEN / ACCEPTING' : `CLOSED / FILTERED${res.error ? ` (${res.error})` : ''}`} (${res.latencyMs}ms)`
+      );
+      setTimeout(() => setStatusMessage(null), 5000);
     }
     setScanningPort(null);
+  };
+
+  const handleScanTcp = async (portToScan: number) => {
+    await handleScanTcpForNode(tcpTarget, portToScan);
   };
 
   const handleScanAllCommonPorts = async () => {
@@ -257,12 +280,12 @@ export const RealVpsTestbenchView: React.FC = () => {
       setScanningPort(p.port);
       const res = await tcpProbe({ targetVps: tcpTarget, host, port: p.port });
       if (res) {
-        setTcpResults(prev => ({ ...prev, [p.port]: res }));
+        setTcpResults(prev => ({ ...prev, [`${tcpTarget}-${p.port}`]: res }));
       }
     }
     setScanningPort(null);
     setIsScanningTcp(false);
-    setStatusMessage(`Completed TCP reachability scan across 8 common ports on ${tcpTarget.toUpperCase()} node (${host})`);
+    setStatusMessage(`Completed TCP reachability scan across ${commonPorts.length} ports on ${tcpTarget === 'main' ? 'VPS 1 MAIN' : 'VPS 2 DR'} (${host})`);
     setTimeout(() => setStatusMessage(null), 4000);
   };
 
@@ -504,10 +527,82 @@ export const RealVpsTestbenchView: React.FC = () => {
             <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${
               isMainActive ? 'bg-blue-600 text-white' : 'bg-amber-600 text-white'
             }`}>
-              CURRENTLY ACTIVE: {isMainActive ? 'MAIN VPS' : 'DR STANDBY'}
+              ACTIVE NODE: {isMainActive ? 'MAIN (VPS 1)' : 'DR (VPS 2)'} · ROUTING: {routing}
             </span>
           </div>
         </div>
+
+        {/* Failover Metadata Bar */}
+        <div className={`mb-4 px-3 py-2 rounded border text-[11px] font-mono flex flex-wrap items-center justify-between gap-2 ${
+          isDark ? 'bg-[#101726]/80 border-[#1E293B] text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'
+        }`}>
+          <div className="flex flex-wrap items-center gap-4">
+            <span><span className="text-slate-400">Active Node:</span> <strong className={isMainActive ? 'text-emerald-400' : 'text-amber-400'}>{routing}</strong></span>
+            <span><span className="text-slate-400">Failover State:</span> <strong>{testApp.failoverState}</strong></span>
+            <span><span className="text-slate-400">Auto-Failover:</span> <strong>{autoFailover ? 'ENABLED' : 'DISABLED'}</strong></span>
+            <span><span className="text-slate-400">Last Failover Time:</span> <strong>{testApp.lastFailoverAt ? new Date(testApp.lastFailoverAt).toLocaleString() : 'Never'}</strong></span>
+          </div>
+          {lastFailoverReason && (
+            <div className="text-amber-400 truncate max-w-xl">
+              <span className="text-slate-400">Last Failover Reason:</span> {lastFailoverReason}
+            </div>
+          )}
+        </div>
+
+        {/* Structured Dual Probe Result Summary (when PROBE BOTH VPSs is clicked) */}
+        {dualProbeResult && (
+          <div className={`mb-4 p-3.5 rounded border text-xs font-mono space-y-2.5 ${
+            isDark ? 'bg-[#0F172A] border-blue-900/70' : 'bg-blue-50/60 border-blue-200'
+          }`}>
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-blue-400 flex items-center gap-1.5">
+                <Activity className="w-3.5 h-3.5" />
+                <span>LATEST DUAL-VPS REAL PROBE SUMMARY</span>
+              </span>
+              <button
+                onClick={() => setDualProbeResult(null)}
+                className="text-[10px] text-slate-400 hover:text-white cursor-pointer"
+              >
+                DISMISS [X]
+              </button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {[
+                { label: 'mainResult (VPS 1 - MAIN)', res: dualProbeResult.mainResult },
+                { label: 'drResult (VPS 2 - DR)', res: dualProbeResult.drResult }
+              ].map(({ label, res }) => (
+                <div
+                  key={label}
+                  className={`p-2.5 rounded border space-y-1 ${
+                    res.reachable && res.probeState === 'HEALTHY'
+                      ? (isDark ? 'bg-emerald-950/30 border-emerald-800/70 text-emerald-200' : 'bg-emerald-50 border-emerald-300 text-emerald-900')
+                      : (isDark ? 'bg-rose-950/30 border-rose-800/70 text-rose-200' : 'bg-rose-50 border-rose-300 text-rose-900')
+                  }`}
+                >
+                  <div className="flex items-center justify-between font-bold">
+                    <span>{label}</span>
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                      res.reachable ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
+                    }`}>
+                      {res.reachable ? 'REACHABLE' : 'UNREACHABLE'} · {res.probeState || (res.reachable ? 'HEALTHY' : 'UNREACHABLE')}
+                    </span>
+                  </div>
+                  <div className="text-[11px] flex flex-wrap gap-3">
+                    <span>Target: <strong>{res.target}</strong></span>
+                    <span>HTTP: <strong>{res.statusCode ?? 'ERR'}</strong></span>
+                    <span>Latency: <strong>{res.latencyMs}ms</strong></span>
+                    <span>Health: <strong>{res.health ?? 'N/A'}</strong></span>
+                  </div>
+                  {res.error && (
+                    <div className="text-[11px] text-rose-300">
+                      Error [{res.errorCategory || 'NETWORK'}]: {res.error}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Visual Pipeline Grid */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
@@ -532,7 +627,7 @@ export const RealVpsTestbenchView: React.FC = () => {
               <div className="flex justify-between">
                 <span className="text-slate-400">Traffic Route:</span>
                 <span className={`font-bold ${isMainActive ? 'text-emerald-400' : 'text-amber-400'}`}>
-                  100% {isMainActive ? '-> Main VPS' : '-> DR Node'}
+                  100% {isMainActive ? `-> ${main.name} (${main.ip}:${main.port})` : `-> ${dr.name} (${dr.ip}:${dr.port})`}
                 </span>
               </div>
             </div>
@@ -547,7 +642,7 @@ export const RealVpsTestbenchView: React.FC = () => {
             <div className="flex items-center justify-between">
               <span className="flex items-center gap-1.5 font-bold">
                 <Server className="w-4 h-4 text-emerald-400" />
-                <span>VPS 1: MAIN (PRD)</span>
+                <span>{main.name}</span>
               </span>
               <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                 isMainActive ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-300'
@@ -557,20 +652,20 @@ export const RealVpsTestbenchView: React.FC = () => {
             </div>
 
             <div className="space-y-1">
-              <div className="font-bold text-sm text-slate-100 truncate">{main.ip}</div>
-              <div className="text-[11px] text-slate-400 truncate">{main.hostname}</div>
+              <div className="font-bold text-sm text-slate-100 truncate">{main.ip}:{main.port}</div>
+              <div className="text-[11px] text-slate-400 truncate">{main.role || 'PRIMARY / PRODUCTION'}</div>
             </div>
 
             <div className="pt-2 border-t text-[11px] space-y-1">
               <div className="flex justify-between">
-                <span className="text-slate-400">Probe Status:</span>
-                <span className={`font-bold ${main.status === 'HEALTHY' ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {main.status} · {main.latencyMs}ms
+                <span className="text-slate-400">Probe State:</span>
+                <span className={`font-bold ${main.probeState === 'HEALTHY' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {main.probeState || main.status} · {main.latencyMs}ms
                 </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">HTTP Status:</span>
-                <span className="font-bold">{main.httpStatus ? `${main.httpStatus} OK` : 'Unknown'}</span>
+                <span className="font-bold">{main.httpStatus ? `${main.httpStatus} OK` : 'Unreachable'}</span>
               </div>
             </div>
           </div>
@@ -584,7 +679,7 @@ export const RealVpsTestbenchView: React.FC = () => {
             <div className="flex items-center justify-between">
               <span className="flex items-center gap-1.5 font-bold">
                 <ShieldCheck className="w-4 h-4 text-amber-400" />
-                <span>VPS 2: DR STANDBY</span>
+                <span>{dr.name}</span>
               </span>
               <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                 !isMainActive ? 'bg-amber-600 text-white' : 'bg-slate-700 text-slate-300'
@@ -594,20 +689,20 @@ export const RealVpsTestbenchView: React.FC = () => {
             </div>
 
             <div className="space-y-1">
-              <div className="font-bold text-sm text-slate-100 truncate">{dr.ip}</div>
-              <div className="text-[11px] text-slate-400 truncate">{dr.hostname}</div>
+              <div className="font-bold text-sm text-slate-100 truncate">{dr.ip}:{dr.port}</div>
+              <div className="text-[11px] text-slate-400 truncate">{dr.role || 'DISASTER RECOVERY / STANDBY'}</div>
             </div>
 
             <div className="pt-2 border-t text-[11px] space-y-1">
               <div className="flex justify-between">
-                <span className="text-slate-400">Probe Status:</span>
-                <span className={`font-bold ${dr.status === 'HEALTHY' ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {dr.status} · {dr.latencyMs}ms
+                <span className="text-slate-400">Probe State:</span>
+                <span className={`font-bold ${dr.probeState === 'HEALTHY' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {dr.probeState || dr.status} · {dr.latencyMs}ms
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-400">Replication:</span>
-                <span className="font-bold text-blue-400">Lag: 2s (Synchronized)</span>
+                <span className="text-slate-400">HTTP Status:</span>
+                <span className="font-bold">{dr.httpStatus ? `${dr.httpStatus} OK` : 'Unreachable'}</span>
               </div>
             </div>
           </div>
@@ -682,22 +777,77 @@ export const RealVpsTestbenchView: React.FC = () => {
           <div className={`p-5 rounded-lg border space-y-4 ${
             isDark ? 'bg-[#0E131F] border-[#1D273B]' : 'bg-white border-slate-200 shadow-sm'
           }`}>
-            <div className="flex items-center justify-between pb-3 border-b">
+            <div className="flex items-center justify-between pb-3 border-b gap-2 flex-wrap">
               <div className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
-                <h2 className="text-sm font-bold font-mono text-slate-100">
-                  VPS 1: {main.name}
-                </h2>
+                <span className={`w-2.5 h-2.5 rounded-full ${main.status === 'HEALTHY' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
+                <div>
+                  <h2 className="text-sm font-bold font-mono text-slate-100 flex items-center gap-2">
+                    <span>{main.name}</span>
+                    {main.isSimulated && (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-600 text-white">SIMULATION MODE</span>
+                    )}
+                  </h2>
+                  <div className="text-[10px] font-mono text-emerald-400 font-semibold">{main.role || 'PRIMARY / PRODUCTION'}</div>
+                </div>
               </div>
-              <button
-                onClick={handleProbeMain}
-                disabled={isRealVpsProbing}
-                className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-mono bg-blue-600/20 text-blue-400 border border-blue-500/30 hover:bg-blue-600 hover:text-white transition-colors cursor-pointer"
-              >
-                <RefreshCw className={`w-3 h-3 ${isRealVpsProbing ? 'animate-spin' : ''}`} />
-                <span>PROBE MAIN</span>
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => setIsEditingMain(!isEditingMain)}
+                  className="px-2 py-1 rounded text-[11px] font-mono border border-slate-700 text-slate-300 hover:bg-slate-800 transition-colors cursor-pointer"
+                >
+                  {isEditingMain ? 'CANCEL' : 'EDIT CONFIG'}
+                </button>
+                <button
+                  onClick={handleProbeMain}
+                  disabled={isRealVpsProbing}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-mono bg-blue-600/20 text-blue-400 border border-blue-500/30 hover:bg-blue-600 hover:text-white transition-colors cursor-pointer"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isRealVpsProbing ? 'animate-spin' : ''}`} />
+                  <span>PROBE MAIN</span>
+                </button>
+              </div>
             </div>
+
+            {isEditingMain ? (
+              <div className="space-y-2.5 text-xs font-mono p-3 rounded border border-blue-800/50 bg-blue-950/10">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Name</label>
+                    <input type="text" value={mainForm.name} onChange={e => setMainForm({ ...mainForm, name: e.target.value })} className="w-full px-2.5 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Role</label>
+                    <input type="text" value={mainForm.role} onChange={e => setMainForm({ ...mainForm, role: e.target.value })} className="w-full px-2.5 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Public IP</label>
+                    <input type="text" value={mainForm.ip} onChange={e => setMainForm({ ...mainForm, ip: e.target.value })} className="w-full px-2.5 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Application Port</label>
+                    <input type="number" value={mainForm.port} onChange={e => setMainForm({ ...mainForm, port: Number(e.target.value) || 6423 })} className="w-full px-2.5 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Hostname</label>
+                    <input type="text" value={mainForm.hostname} onChange={e => setMainForm({ ...mainForm, hostname: e.target.value })} className="w-full px-2.5 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Provider &amp; Region</label>
+                    <div className="flex gap-1.5">
+                      <input type="text" value={mainForm.provider} onChange={e => setMainForm({ ...mainForm, provider: e.target.value })} placeholder="Provider" className="w-1/2 px-2 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                      <input type="text" value={mainForm.region} onChange={e => setMainForm({ ...mainForm, region: e.target.value })} placeholder="Region" className="w-1/2 px-2 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-1">Health URL</label>
+                  <input type="text" value={mainForm.healthUrl} onChange={e => setMainForm({ ...mainForm, healthUrl: e.target.value })} className="w-full px-2.5 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                </div>
+                <div className="flex justify-end gap-2 pt-1">
+                  <button onClick={handleSaveMain} className="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold cursor-pointer">SAVE VPS 1 MAIN</button>
+                </div>
+              </div>
+            ) : null}
 
             {/* IP & Health URL details */}
             <div className="space-y-2 text-xs font-mono">
@@ -705,20 +855,24 @@ export const RealVpsTestbenchView: React.FC = () => {
                 isDark ? 'bg-[#121927] border-[#1E293B]' : 'bg-slate-50 border-slate-200'
               }`}>
                 <div className="flex justify-between">
-                  <span className="text-slate-400">IP Address:</span>
-                  <span className="font-bold text-slate-200">{main.ip}:{main.port}</span>
+                  <span className="text-slate-400">Name &amp; Role:</span>
+                  <span className="font-bold text-slate-200">{main.name} · {main.role || 'PRIMARY / PRODUCTION'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Public IP &amp; Port:</span>
+                  <span className="font-bold text-slate-200">{main.ip} (Port {main.port})</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-400">Hostname:</span>
                   <span className="text-slate-300">{main.hostname}</span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Health Endpoint:</span>
+                  <span className="text-slate-400">Health URL:</span>
                   <span className="text-blue-400 font-bold truncate max-w-xs">{main.healthUrl}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-400">Datacenter Region:</span>
-                  <span className="text-slate-300">{main.region}</span>
+                  <span className="text-slate-400">Provider / Region:</span>
+                  <span className="text-slate-300">{main.provider} · {main.region}</span>
                 </div>
               </div>
 
@@ -728,14 +882,38 @@ export const RealVpsTestbenchView: React.FC = () => {
                   ? (isDark ? 'bg-emerald-950/30 border-emerald-900/60 text-emerald-300' : 'bg-emerald-50 border-emerald-200 text-emerald-900')
                   : (isDark ? 'bg-rose-950/30 border-rose-900/60 text-rose-300' : 'bg-rose-50 border-rose-200 text-rose-900')
               }`}>
-                <div className="flex items-center justify-between font-bold">
-                  <span>LIVE PROBE STATUS:</span>
-                  <span>{main.status} ({main.latencyMs}ms roundtrip)</span>
+                <div className="flex items-center justify-between font-bold flex-wrap gap-1">
+                  <span>CURRENT STATUS: {main.status}</span>
+                  <span className={`px-2 py-0.5 rounded text-[10px] ${
+                    main.httpStatus && main.httpStatus >= 200 && main.httpStatus < 300
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-rose-600 text-white'
+                  }`}>
+                    {main.httpStatus && main.httpStatus >= 200 && main.httpStatus < 300 ? 'REACHABLE' : 'UNREACHABLE'} · {main.probeState || main.status} ({main.latencyMs}ms)
+                  </span>
                 </div>
-                <div className="text-[11px] space-y-0.5 opacity-90">
-                  <div>HTTP Code: <span className="font-bold">{main.httpStatus || 'N/A'}</span> · TLS: <span className="font-bold">{main.tlsStatus || 'None'}</span></div>
-                  <div className="truncate">Response: <span className="italic">{main.responseSnippet || 'Nominal 200 OK'}</span></div>
-                  <div className="text-[10px] opacity-75">Last checked: {new Date(main.lastCheckedAt || Date.now()).toLocaleTimeString()}</div>
+                <div className="text-[11px] space-y-1 opacity-95">
+                  <div>
+                    HTTP Status: <span className="font-bold">{main.httpStatus ?? 'N/A (No HTTP response)'}</span> · Latency: <span className="font-bold">{main.latencyMs}ms</span> · TLS: <span className="font-bold">{main.tlsStatus || 'HTTP Plain'}</span>
+                  </div>
+                  {main.errorReason && (
+                    <div className="text-rose-300 font-semibold">
+                      Diagnostic [{main.errorCategory || 'ERROR'}]: {main.errorReason}
+                    </div>
+                  )}
+                  <div className="truncate">Response: <span className="italic">{main.responseSnippet || 'Awaiting probe...'}</span></div>
+                  {main.healthData && Object.keys(main.healthData).length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      {Object.entries(main.healthData).map(([k, v]) => (
+                        <span key={k} className="px-1.5 py-0.5 rounded text-[10px] bg-black/30 border border-white/10">
+                          {k}: <strong>{String(v)}</strong>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="text-[10px] opacity-75">
+                    Last checked: {main.lastCheckedAt ? new Date(main.lastCheckedAt).toLocaleString() : 'Not yet probed'}
+                  </div>
                 </div>
               </div>
 
@@ -785,22 +963,77 @@ export const RealVpsTestbenchView: React.FC = () => {
           <div className={`p-5 rounded-lg border space-y-4 ${
             isDark ? 'bg-[#0E131F] border-[#1D273B]' : 'bg-white border-slate-200 shadow-sm'
           }`}>
-            <div className="flex items-center justify-between pb-3 border-b">
+            <div className="flex items-center justify-between pb-3 border-b gap-2 flex-wrap">
               <div className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
-                <h2 className="text-sm font-bold font-mono text-slate-100">
-                  VPS 2: {dr.name}
-                </h2>
+                <span className={`w-2.5 h-2.5 rounded-full ${dr.status === 'HEALTHY' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+                <div>
+                  <h2 className="text-sm font-bold font-mono text-slate-100 flex items-center gap-2">
+                    <span>{dr.name}</span>
+                    {dr.isSimulated && (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-600 text-white">SIMULATION MODE</span>
+                    )}
+                  </h2>
+                  <div className="text-[10px] font-mono text-amber-400 font-semibold">{dr.role || 'DISASTER RECOVERY / STANDBY'}</div>
+                </div>
               </div>
-              <button
-                onClick={handleProbeDr}
-                disabled={isRealVpsProbing}
-                className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-mono bg-blue-600/20 text-blue-400 border border-blue-500/30 hover:bg-blue-600 hover:text-white transition-colors cursor-pointer"
-              >
-                <RefreshCw className={`w-3 h-3 ${isRealVpsProbing ? 'animate-spin' : ''}`} />
-                <span>PROBE DR</span>
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => setIsEditingDr(!isEditingDr)}
+                  className="px-2 py-1 rounded text-[11px] font-mono border border-slate-700 text-slate-300 hover:bg-slate-800 transition-colors cursor-pointer"
+                >
+                  {isEditingDr ? 'CANCEL' : 'EDIT CONFIG'}
+                </button>
+                <button
+                  onClick={handleProbeDr}
+                  disabled={isRealVpsProbing}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-mono bg-blue-600/20 text-blue-400 border border-blue-500/30 hover:bg-blue-600 hover:text-white transition-colors cursor-pointer"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isRealVpsProbing ? 'animate-spin' : ''}`} />
+                  <span>PROBE DR</span>
+                </button>
+              </div>
             </div>
+
+            {isEditingDr ? (
+              <div className="space-y-2.5 text-xs font-mono p-3 rounded border border-amber-800/50 bg-amber-950/10">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Name</label>
+                    <input type="text" value={drForm.name} onChange={e => setDrForm({ ...drForm, name: e.target.value })} className="w-full px-2.5 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Role</label>
+                    <input type="text" value={drForm.role} onChange={e => setDrForm({ ...drForm, role: e.target.value })} className="w-full px-2.5 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Public IP</label>
+                    <input type="text" value={drForm.ip} onChange={e => setDrForm({ ...drForm, ip: e.target.value })} className="w-full px-2.5 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Application Port</label>
+                    <input type="number" value={drForm.port} onChange={e => setDrForm({ ...drForm, port: Number(e.target.value) || 6423 })} className="w-full px-2.5 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Hostname</label>
+                    <input type="text" value={drForm.hostname} onChange={e => setDrForm({ ...drForm, hostname: e.target.value })} className="w-full px-2.5 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Provider &amp; Region</label>
+                    <div className="flex gap-1.5">
+                      <input type="text" value={drForm.provider} onChange={e => setDrForm({ ...drForm, provider: e.target.value })} placeholder="Provider" className="w-1/2 px-2 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                      <input type="text" value={drForm.region} onChange={e => setDrForm({ ...drForm, region: e.target.value })} placeholder="Region" className="w-1/2 px-2 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-1">Health URL</label>
+                  <input type="text" value={drForm.healthUrl} onChange={e => setDrForm({ ...drForm, healthUrl: e.target.value })} className="w-full px-2.5 py-1 rounded border bg-[#141B2D] border-[#243552] text-white" />
+                </div>
+                <div className="flex justify-end gap-2 pt-1">
+                  <button onClick={handleSaveDr} className="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold cursor-pointer">SAVE VPS 2 DR</button>
+                </div>
+              </div>
+            ) : null}
 
             {/* IP & Health URL details */}
             <div className="space-y-2 text-xs font-mono">
@@ -808,20 +1041,24 @@ export const RealVpsTestbenchView: React.FC = () => {
                 isDark ? 'bg-[#121927] border-[#1E293B]' : 'bg-slate-50 border-slate-200'
               }`}>
                 <div className="flex justify-between">
-                  <span className="text-slate-400">IP Address:</span>
-                  <span className="font-bold text-slate-200">{dr.ip}:{dr.port}</span>
+                  <span className="text-slate-400">Name &amp; Role:</span>
+                  <span className="font-bold text-slate-200">{dr.name} · {dr.role || 'DISASTER RECOVERY / STANDBY'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Public IP &amp; Port:</span>
+                  <span className="font-bold text-slate-200">{dr.ip} (Port {dr.port})</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-400">Hostname:</span>
                   <span className="text-slate-300">{dr.hostname}</span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-slate-400">Health Endpoint:</span>
+                  <span className="text-slate-400">Health URL:</span>
                   <span className="text-blue-400 font-bold truncate max-w-xs">{dr.healthUrl}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-400">Datacenter Region:</span>
-                  <span className="text-slate-300">{dr.region}</span>
+                  <span className="text-slate-400">Provider / Region:</span>
+                  <span className="text-slate-300">{dr.provider} · {dr.region}</span>
                 </div>
               </div>
 
@@ -831,14 +1068,38 @@ export const RealVpsTestbenchView: React.FC = () => {
                   ? (isDark ? 'bg-emerald-950/30 border-emerald-900/60 text-emerald-300' : 'bg-emerald-50 border-emerald-200 text-emerald-900')
                   : (isDark ? 'bg-rose-950/30 border-rose-900/60 text-rose-300' : 'bg-rose-50 border-rose-200 text-rose-900')
               }`}>
-                <div className="flex items-center justify-between font-bold">
-                  <span>LIVE PROBE STATUS:</span>
-                  <span>{dr.status} ({dr.latencyMs}ms roundtrip)</span>
+                <div className="flex items-center justify-between font-bold flex-wrap gap-1">
+                  <span>CURRENT STATUS: {dr.status}</span>
+                  <span className={`px-2 py-0.5 rounded text-[10px] ${
+                    dr.httpStatus && dr.httpStatus >= 200 && dr.httpStatus < 300
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-rose-600 text-white'
+                  }`}>
+                    {dr.httpStatus && dr.httpStatus >= 200 && dr.httpStatus < 300 ? 'REACHABLE' : 'UNREACHABLE'} · {dr.probeState || dr.status} ({dr.latencyMs}ms)
+                  </span>
                 </div>
-                <div className="text-[11px] space-y-0.5 opacity-90">
-                  <div>HTTP Code: <span className="font-bold">{dr.httpStatus || 'N/A'}</span> · TLS: <span className="font-bold">{dr.tlsStatus || 'None'}</span></div>
-                  <div className="truncate">Response: <span className="italic">{dr.responseSnippet || 'Standby Ready'}</span></div>
-                  <div className="text-[10px] opacity-75">Last checked: {new Date(dr.lastCheckedAt || Date.now()).toLocaleTimeString()}</div>
+                <div className="text-[11px] space-y-1 opacity-95">
+                  <div>
+                    HTTP Status: <span className="font-bold">{dr.httpStatus ?? 'N/A (No HTTP response)'}</span> · Latency: <span className="font-bold">{dr.latencyMs}ms</span> · TLS: <span className="font-bold">{dr.tlsStatus || 'HTTP Plain'}</span>
+                  </div>
+                  {dr.errorReason && (
+                    <div className="text-rose-300 font-semibold">
+                      Diagnostic [{dr.errorCategory || 'ERROR'}]: {dr.errorReason}
+                    </div>
+                  )}
+                  <div className="truncate">Response: <span className="italic">{dr.responseSnippet || 'Awaiting probe...'}</span></div>
+                  {dr.healthData && Object.keys(dr.healthData).length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      {Object.entries(dr.healthData).map(([k, v]) => (
+                        <span key={k} className="px-1.5 py-0.5 rounded text-[10px] bg-black/30 border border-white/10">
+                          {k}: <strong>{String(v)}</strong>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="text-[10px] opacity-75">
+                    Last checked: {dr.lastCheckedAt ? new Date(dr.lastCheckedAt).toLocaleString() : 'Not yet probed'}
+                  </div>
                 </div>
               </div>
 
@@ -891,10 +1152,13 @@ export const RealVpsTestbenchView: React.FC = () => {
             <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b gap-2 text-xs font-mono">
               <div className="flex items-center gap-2">
                 <Flame className="w-4 h-4 text-rose-400" />
-                <span className="font-bold text-sm">RESILIENCE &amp; CHAOS FAILOVER TESTING STATION</span>
+                <span className="font-bold text-sm">RESILIENCE &amp; CHAOS FAILOVER TESTING STATION (SIMULATION MODE)</span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950/90 text-amber-300 border border-amber-700">
+                  SIMULATION MODE CONTROLS
+                </span>
               </div>
               <span className="text-[11px] text-slate-400">
-                Simulate node failures to verify automatic or manual traffic rerouting without waiting for real downtime.
+                Clearly labeled simulation mode: test failover routing logic without altering real VPS firewall or process state.
               </span>
             </div>
 
@@ -906,16 +1170,16 @@ export const RealVpsTestbenchView: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-emerald-400 flex items-center gap-1.5">
                     <Server className="w-3.5 h-3.5" />
-                    VPS 1 (MAIN / PRD) SIMULATOR
+                    SIMULATION MODE: VPS 1 MAIN ({main.ip})
                   </span>
                   <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                     main.status === 'HEALTHY' ? 'bg-emerald-950 text-emerald-300' : 'bg-rose-950 text-rose-300'
                   }`}>
-                    CURRENT: {main.status}
+                    {main.isSimulated ? `SIMULATED: ${main.status}` : `REAL: ${main.status}`}
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-400">
-                  Injects synthetic 504 gateway timeout / connection refused on Main node. If Auto-Failover is ON and traffic is on Main, the system automatically redirects live traffic to DR!
+                  [SIMULATION MODE] Injects synthetic outage state on Main node to test automatic or manual failover to DR. Run &quot;PROBE MAIN&quot; at any time to replace with real live VPS status.
                 </p>
                 <div className="flex gap-2">
                   <button
@@ -927,7 +1191,7 @@ export const RealVpsTestbenchView: React.FC = () => {
                         : 'bg-emerald-600 hover:bg-emerald-500 text-white'
                     }`}
                   >
-                    {main.status === 'HEALTHY' ? '🔥 TRIGGER MAIN OUTAGE (FAIL TO DR)' : '✅ RESTORE MAIN NODE (HEALTHY)'}
+                    {main.status === 'HEALTHY' ? '[SIMULATION MODE] TRIGGER MAIN OUTAGE (FAIL TO DR)' : '[SIMULATION MODE] RESTORE MAIN NODE'}
                   </button>
                 </div>
               </div>
@@ -939,16 +1203,16 @@ export const RealVpsTestbenchView: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-amber-400 flex items-center gap-1.5">
                     <ShieldCheck className="w-3.5 h-3.5" />
-                    VPS 2 (DR STANDBY) SIMULATOR
+                    SIMULATION MODE: VPS 2 DR ({dr.ip})
                   </span>
                   <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                     dr.status === 'HEALTHY' ? 'bg-emerald-950 text-emerald-300' : 'bg-rose-950 text-rose-300'
                   }`}>
-                    CURRENT: {dr.status}
+                    {dr.isSimulated ? `SIMULATED: ${dr.status}` : `REAL: ${dr.status}`}
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-400">
-                  Tests how the system handles degraded standby readiness or alerts operators when the secondary backup site loses connectivity.
+                  [SIMULATION MODE] Tests how the system handles degraded standby readiness. Run &quot;PROBE DR&quot; at any time to replace with real live VPS status.
                 </p>
                 <div className="flex gap-2">
                   <button
@@ -960,7 +1224,7 @@ export const RealVpsTestbenchView: React.FC = () => {
                         : 'bg-emerald-600 hover:bg-emerald-500 text-white'
                     }`}
                   >
-                    {dr.status === 'HEALTHY' ? '🔥 SIMULATE DR STANDBY OUTAGE' : '✅ RESTORE DR STANDBY'}
+                    {dr.status === 'HEALTHY' ? '[SIMULATION MODE] SIMULATE DR STANDBY OUTAGE' : '[SIMULATION MODE] RESTORE DR STANDBY'}
                   </button>
                 </div>
               </div>
@@ -983,7 +1247,7 @@ export const RealVpsTestbenchView: React.FC = () => {
                   <span>REAL TCP SOCKET PORT SCANNER</span>
                 </h3>
                 <p className="text-xs font-mono text-slate-400 mt-1">
-                  Tests live raw socket connection establishment to standard services (SSH, HTTP, HTTPS, DBs) on your VPS.
+                  Tests live raw TCP socket connection establishment to application port 6423 and standard services on your VPS nodes.
                 </p>
               </div>
 
@@ -997,7 +1261,7 @@ export const RealVpsTestbenchView: React.FC = () => {
                       tcpTarget === 'main' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'
                     }`}
                   >
-                    VPS 1: MAIN ({main.ip})
+                    VPS 1 MAIN ({main.ip}:{main.port})
                   </button>
                   <button
                     onClick={() => setTcpTarget('dr')}
@@ -1005,9 +1269,35 @@ export const RealVpsTestbenchView: React.FC = () => {
                       tcpTarget === 'dr' ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-white'
                     }`}
                   >
-                    VPS 2: DR ({dr.ip})
+                    VPS 2 DR ({dr.ip}:{dr.port})
                   </button>
                 </div>
+              </div>
+            </div>
+
+            {/* Dedicated Application Port 6423 Quick Test Bar */}
+            <div className={`p-3 rounded border flex flex-wrap items-center justify-between gap-3 text-xs font-mono ${
+              isDark ? 'bg-[#121927] border-blue-900/50' : 'bg-blue-50/60 border-blue-200'
+            }`}>
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-blue-400">PRODUCTION APPLICATION PORT (TCP 6423):</span>
+                <span className="text-slate-400">Direct TCP socket check for Node.js / Express API</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => handleScanTcpForNode('main', main.port || 6423)}
+                  disabled={scanningPort === (main.port || 6423) && tcpTarget === 'main'}
+                  className="px-3 py-1.5 rounded font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  VPS 1 MAIN → TCP {main.port || 6423}
+                </button>
+                <button
+                  onClick={() => handleScanTcpForNode('dr', dr.port || 6423)}
+                  disabled={scanningPort === (dr.port || 6423) && tcpTarget === 'dr'}
+                  className="px-3 py-1.5 rounded font-bold bg-amber-600 hover:bg-amber-500 text-white transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  VPS 2 DR → TCP {dr.port || 6423}
+                </button>
               </div>
             </div>
 
@@ -1020,19 +1310,21 @@ export const RealVpsTestbenchView: React.FC = () => {
                   className="px-3 py-1.5 rounded font-bold bg-blue-600 hover:bg-blue-500 text-white transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isScanningTcp ? 'animate-spin' : ''}`} />
-                  <span>{isScanningTcp ? 'SCANNING 8 PORTS...' : 'SCAN ALL 8 COMMON PORTS'}</span>
+                  <span>{isScanningTcp ? 'SCANNING COMMON PORTS...' : 'SCAN ALL 8 COMMON PORTS'}</span>
                 </button>
               </div>
 
               {/* Custom port test */}
               <div className="flex items-center gap-2">
-                <span className="text-slate-400">Custom Port:</span>
+                <span className="text-slate-400">
+                  {tcpTarget === 'main' ? 'VPS 1 MAIN' : 'VPS 2 DR'} → TCP Port:
+                </span>
                 <input
                   type="number"
                   min="1"
                   max="65535"
                   value={customPort}
-                  onChange={e => setCustomPort(parseInt(e.target.value, 10) || 80)}
+                  onChange={e => setCustomPort(parseInt(e.target.value, 10) || 6423)}
                   className={`w-24 px-2.5 py-1 rounded border font-mono ${
                     isDark ? 'bg-[#141B2D] border-[#243552] text-white' : 'bg-white border-slate-300'
                   }`}
@@ -1050,8 +1342,9 @@ export const RealVpsTestbenchView: React.FC = () => {
             {/* Ports Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-xs font-mono pt-2">
               {commonPorts.map(p => {
-                const result = tcpResults[p.port];
+                const result = tcpResults[`${tcpTarget}-${p.port}`];
                 const isScanning = scanningPort === p.port;
+                const nodeLabel = tcpTarget === 'main' ? 'VPS 1 MAIN' : 'VPS 2 DR';
                 return (
                   <div
                     key={p.port}
@@ -1064,7 +1357,7 @@ export const RealVpsTestbenchView: React.FC = () => {
                     }`}
                   >
                     <div className="flex items-center justify-between mb-1">
-                      <span className="font-bold text-sm">PORT {p.port}</span>
+                      <span className="font-bold text-sm">{nodeLabel} → TCP {p.port}</span>
                       <button
                         onClick={() => handleScanTcp(p.port)}
                         disabled={isScanning}
@@ -1075,15 +1368,22 @@ export const RealVpsTestbenchView: React.FC = () => {
                     </div>
                     <div className="text-[11px] text-slate-400 mb-2 truncate">{p.name}</div>
                     
-                    <div className="pt-2 border-t border-slate-800/60 flex items-center justify-between">
-                      <span className="text-[10px] text-slate-400">STATE:</span>
-                      {result ? (
-                        <span className={`font-bold flex items-center gap-1 ${result.open ? 'text-emerald-400' : 'text-rose-400'}`}>
-                          {result.open ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                          <span>{result.open ? `OPEN (${result.latencyMs}ms)` : 'CLOSED'}</span>
-                        </span>
-                      ) : (
-                        <span className="text-slate-500 italic">Not tested</span>
+                    <div className="pt-2 border-t border-slate-800/60 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-slate-400">STATE:</span>
+                        {result ? (
+                          <span className={`font-bold flex items-center gap-1 ${result.open ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {result.open ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                            <span>{result.open ? `OPEN (${result.latencyMs}ms)` : 'CLOSED / FILTERED'}</span>
+                          </span>
+                        ) : (
+                          <span className="text-slate-500 italic">Not tested</span>
+                        )}
+                      </div>
+                      {result?.error && (
+                        <div className="text-[10px] text-rose-300 truncate" title={result.error}>
+                          {result.error}
+                        </div>
                       )}
                     </div>
                   </div>

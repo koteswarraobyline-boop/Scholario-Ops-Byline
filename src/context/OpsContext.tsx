@@ -143,31 +143,51 @@ interface OpsContextType {
 
 const OpsContext = createContext<OpsContextType | undefined>(undefined);
 
+function loadNonMockList<T>(key: string, fallback: T[], isLegacyMock: (items: T[]) => boolean): T[] {
+  try {
+    const saved = localStorage.getItem(key);
+    if (!saved) return fallback;
+    const parsed = JSON.parse(saved);
+    if (!Array.isArray(parsed) || isLegacyMock(parsed)) {
+      localStorage.removeItem(key);
+      return fallback;
+    }
+    return parsed;
+  } catch {
+    return fallback;
+  }
+}
+
 export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [applications, setApplications] = useState<Application[]>(() => {
-    const saved = localStorage.getItem('scholario_apps');
-    return saved ? JSON.parse(saved) : INITIAL_APPLICATIONS;
-  });
+  const [applications, setApplications] = useState<Application[]>(() =>
+    loadNonMockList('scholario_apps', INITIAL_APPLICATIONS, (items) =>
+      items.some(a => a.id === 'app-aegis' || a.id === 'app-mosaic' || a.cloudflareZone === 'app.scholario.net')
+    )
+  );
 
-  const [servers, setServers] = useState<VpsServer[]>(() => {
-    const saved = localStorage.getItem('scholario_servers');
-    return saved ? JSON.parse(saved) : INITIAL_SERVERS;
-  });
+  const [servers, setServers] = useState<VpsServer[]>(() =>
+    loadNonMockList('scholario_servers', INITIAL_SERVERS, (items) =>
+      items.some(s => s.ip?.startsWith('185.193.125.') || s.id === 'vps-sg-aegi-prd-01')
+    )
+  );
 
-  const [monitors, setMonitors] = useState<Monitor[]>(() => {
-    const saved = localStorage.getItem('scholario_monitors');
-    return saved ? JSON.parse(saved) : INITIAL_MONITORS;
-  });
+  const [monitors, setMonitors] = useState<Monitor[]>(() =>
+    loadNonMockList('scholario_monitors', INITIAL_MONITORS, (items) =>
+      items.some(m => m.target?.includes('185.193.125.') || m.id === 'mon-aegis-1')
+    )
+  );
 
-  const [incidents, setIncidents] = useState<Incident[]>(() => {
-    const saved = localStorage.getItem('scholario_incidents');
-    return saved ? JSON.parse(saved) : INITIAL_INCIDENTS;
-  });
+  const [incidents, setIncidents] = useState<Incident[]>(() =>
+    loadNonMockList('scholario_incidents', INITIAL_INCIDENTS, (items) =>
+      items.some(i => i.id === 'INC-1042' || i.applicationId === 'app-mosaic')
+    )
+  );
 
-  const [cloudflareZones, setCloudflareZones] = useState<CloudflareZone[]>(() => {
-    const saved = localStorage.getItem('scholario_cf');
-    return saved ? JSON.parse(saved) : INITIAL_CLOUDFLARE_ZONES;
-  });
+  const [cloudflareZones, setCloudflareZones] = useState<CloudflareZone[]>(() =>
+    loadNonMockList('scholario_cf', INITIAL_CLOUDFLARE_ZONES, (items) =>
+      items.some(z => z.domain === 'aegis.scholario.io' || z.domain === 'app.scholario.net')
+    )
+  );
 
   const [backups] = useState<BackupRecord[]>(INITIAL_BACKUPS);
   const [runbooks, setRunbooks] = useState<Runbook[]>(INITIAL_RUNBOOKS);
@@ -257,7 +277,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // Real 2-VPS Testbench State & Actions
   const [realVpsConfig, setRealVpsConfig] = useState<RealVpsConfig | null>(null);
-  const [isRealVpsOnlyMode, setIsRealVpsOnlyMode] = useState<boolean>(false);
+  const [isRealVpsOnlyMode, setIsRealVpsOnlyMode] = useState<boolean>(true);
   const [isRealVpsProbing, setIsRealVpsProbing] = useState<boolean>(false);
 
   const refreshRealVpsConfig = useCallback(async () => {
@@ -265,25 +285,35 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const res = await RealVpsService.getConfig();
       if (res?.data) {
         setRealVpsConfig(res.data);
-        setIsRealVpsOnlyMode(Boolean(res.isRealVpsOnlyMode));
-        if (res.isRealVpsOnlyMode) {
-          const [apps, srvs, mons] = await Promise.all([
-            api.getApplications(),
-            api.getServers(),
-            api.getMonitors()
-          ]);
-          if (apps?.length) {
-            setApplications(apps);
-            localStorage.setItem('scholario_apps', JSON.stringify(apps));
+        setIsRealVpsOnlyMode(Boolean(res.isRealVpsOnlyMode ?? true));
+        // If nodes have not been probed yet, perform an initial live probe
+        if (!res.data.main.lastCheckedAt && !res.data.dr.lastCheckedAt) {
+          setIsRealVpsProbing(true);
+          try {
+            const probeRes = await RealVpsService.probeBoth();
+            if (probeRes?.data) {
+              setRealVpsConfig(probeRes.data);
+            }
+          } catch {} finally {
+            setIsRealVpsProbing(false);
           }
-          if (srvs?.length) {
-            setServers(srvs);
-            localStorage.setItem('scholario_servers', JSON.stringify(srvs));
-          }
-          if (mons?.length) {
-            setMonitors(mons);
-            localStorage.setItem('scholario_monitors', JSON.stringify(mons));
-          }
+        }
+        const [apps, srvs, mons] = await Promise.all([
+          api.getApplications(),
+          api.getServers(),
+          api.getMonitors()
+        ]);
+        if (apps?.length) {
+          setApplications(apps);
+          localStorage.setItem('scholario_apps', JSON.stringify(apps));
+        }
+        if (srvs?.length) {
+          setServers(srvs);
+          localStorage.setItem('scholario_servers', JSON.stringify(srvs));
+        }
+        if (mons?.length) {
+          setMonitors(mons);
+          localStorage.setItem('scholario_monitors', JSON.stringify(mons));
         }
       }
     } catch {}
@@ -925,40 +955,32 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     addAuditEntry('RUNBOOK_STEP_UPDATE', 'RUNBOOK', runbookId, `Step #${stepId} updated.`);
   }, [addAuditEntry]);
 
-  // Run Probe Check on a Monitor
+  // Run Real Probe Check on a Monitor via Backend
   const runProbeCheck = useCallback((monitorId: string) => {
-    setMonitors(prev => prev.map(mon => {
-      if (mon.id === monitorId) {
-        // If it's the failing mosaic monitor and still in failure state
-        const isFailing = mon.status === 'CRITICAL';
-        const simulatedMs = isFailing ? Math.floor(4000 + Math.random() * 1200) : Math.floor(60 + Math.random() * 120);
-        const newHistory = [
-          {
-            timestamp: new Date().toISOString(),
-            status: mon.status,
-            responseTimeMs: simulatedMs,
-            statusCode: isFailing ? 504 : 200,
-            detail: isFailing ? 'Simulated probe check: Upstream timeout' : 'OK'
-          },
-          ...mon.history.slice(0, 19)
-        ];
-
-        return {
-          ...mon,
-          lastCheck: new Date().toISOString(),
-          lastSuccess: isFailing ? mon.lastSuccess : new Date().toISOString(),
-          lastFailure: isFailing ? new Date().toISOString() : mon.lastFailure,
-          responseTimeMs: simulatedMs,
-          history: newHistory
-        };
+    api.probeMonitor(monitorId).then(({ monitor }) => {
+      if (monitor) {
+        setMonitors(prev => prev.map(m => m.id === monitorId ? monitor : m));
       }
-      return mon;
-    }));
+      RealVpsService.getConfig().then(res => {
+        if (res?.data) setRealVpsConfig(res.data);
+      }).catch(() => {});
+    }).catch(err => {
+      console.error('Monitor probe failed:', err);
+    });
   }, []);
 
   const runAllProbes = useCallback(() => {
-    monitors.forEach(m => runProbeCheck(m.id));
-  }, [monitors, runProbeCheck]);
+    api.probeAllMonitors().then(updatedMonitors => {
+      if (updatedMonitors?.length) {
+        setMonitors(updatedMonitors);
+      }
+      RealVpsService.getConfig().then(res => {
+        if (res?.data) setRealVpsConfig(res.data);
+      }).catch(() => {});
+    }).catch(err => {
+      console.error('Probe all monitors failed:', err);
+    });
+  }, []);
 
   const openAddMonitorWithContext = useCallback((context?: { applicationId?: string; serverId?: string; defaultType?: MonitorType }) => {
     setAddMonitorInitialContext(context || null);

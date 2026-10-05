@@ -43,13 +43,11 @@ interface UseWebSocketReturn {
 }
 
 export function useWebSocket(): UseWebSocketReturn {
-  const wsRef           = useRef<WebSocket | null>(null);
+  const esRef           = useRef<EventSource | null>(null);
   const handlersRef     = useRef<Map<string, Set<EventHandler>>>(new Map());
   const reconnectTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pingTimer       = useRef<ReturnType<typeof setInterval> | null>(null);
   const attemptRef      = useRef(0);
   const mountedRef      = useRef(true);
-  const seenEventsRef   = useRef<Set<string>>(new Set());
 
   const [status, setStatus] = useState<WsConnectionStatus>('CONNECTING');
 
@@ -58,71 +56,61 @@ export function useWebSocket(): UseWebSocketReturn {
     if (handlers) handlers.forEach(h => h(data));
   }, []);
 
-  const connect = useCallback(() => {
-    if (!mountedRef.current) return;
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
-    const token = tokenStore.getAccess();
-    const url = token ? `${WS_URL}?token=${encodeURIComponent(token)}` : WS_URL;
-
-    setStatus(attemptRef.current === 0 ? 'CONNECTING' : 'RECONNECTING');
-
-    let ws: WebSocket;
-    try {
-      ws = new WebSocket(url);
-    } catch {
-      scheduleReconnect();
-      return;
-    }
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      if (!mountedRef.current) return;
-      attemptRef.current = 0;
-      setStatus('LIVE');
-
-      // Start ping loop
-      pingTimer.current = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'ping' }));
-        }
-      }, PING_INTERVAL_MS);
-    };
-
-    ws.onmessage = (e) => {
-      if (!mountedRef.current) return;
-      try {
-        const msg = JSON.parse(e.data as string) as RealtimeEvent;
-        if (!msg.event) return;
-
-        // Deduplicate: ignore same event+timestamp seen within 2s
-        const dedupKey = `${msg.event}:${msg.timestamp}`;
-        if (seenEventsRef.current.has(dedupKey)) return;
-        seenEventsRef.current.add(dedupKey);
-        setTimeout(() => seenEventsRef.current.delete(dedupKey), 2000);
-
-        emit(msg.event, msg.data);
-      } catch { /* ignore malformed */ }
-    };
-
-    ws.onclose = () => {
-      if (pingTimer.current) clearInterval(pingTimer.current);
-      if (!mountedRef.current) return;
-      setStatus('OFFLINE');
-      scheduleReconnect();
-    };
-
-    ws.onerror = () => {
-      ws.close();
-    };
-  }, [emit]);
-
-  const scheduleReconnect = useCallback(() => {
+  const scheduleReconnect = useCallback((connectFn: () => void) => {
     if (!mountedRef.current) return;
     const delay = Math.min(RECONNECT_BASE_MS * 2 ** attemptRef.current, RECONNECT_MAX_MS);
     attemptRef.current++;
-    reconnectTimer.current = setTimeout(connect, delay);
-  }, [connect]);
+    reconnectTimer.current = setTimeout(connectFn, delay);
+  }, []);
+
+  const connect = useCallback(() => {
+    if (!mountedRef.current) return;
+    if (typeof window === 'undefined' || !window.EventSource) {
+      setStatus('LIVE');
+      return;
+    }
+
+    esRef.current?.close();
+    setStatus(attemptRef.current === 0 ? 'CONNECTING' : 'RECONNECTING');
+
+    try {
+      const es = new EventSource('/api/v1/realtime/stream');
+      esRef.current = es;
+
+      es.onopen = () => {
+        if (!mountedRef.current) return;
+        attemptRef.current = 0;
+        setStatus('LIVE');
+      };
+
+      es.addEventListener('connected', () => {
+        if (!mountedRef.current) return;
+        attemptRef.current = 0;
+        setStatus('LIVE');
+      });
+
+      es.addEventListener('telemetry_tick', (e) => {
+        try {
+          emit('server.health.changed', JSON.parse((e as MessageEvent).data));
+        } catch {}
+      });
+
+      es.addEventListener('incident_update', (e) => {
+        try {
+          emit('incident.updated', JSON.parse((e as MessageEvent).data));
+        } catch {}
+      });
+
+      es.onerror = () => {
+        es.close();
+        if (!mountedRef.current) return;
+        setStatus('OFFLINE');
+        scheduleReconnect(connect);
+      };
+    } catch {
+      scheduleReconnect(connect);
+    }
+  }, [emit, scheduleReconnect]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -130,8 +118,7 @@ export function useWebSocket(): UseWebSocketReturn {
     return () => {
       mountedRef.current = false;
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      if (pingTimer.current) clearInterval(pingTimer.current);
-      wsRef.current?.close();
+      esRef.current?.close();
     };
   }, [connect]);
 
@@ -145,10 +132,8 @@ export function useWebSocket(): UseWebSocketReturn {
     };
   }, []);
 
-  const send = useCallback((msg: unknown) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(msg));
-    }
+  const send = useCallback((_msg: unknown) => {
+    // No-op over SSE
   }, []);
 
   return { status, on, send };
