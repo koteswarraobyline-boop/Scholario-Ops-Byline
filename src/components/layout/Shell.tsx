@@ -70,6 +70,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     triggerHealthCheck,
     theme,
     toggleTheme,
+    realVpsConfig,
   } = useOps();
 
   const { status: wsStatus } = useWebSocket();
@@ -109,6 +110,12 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
   const displayName = user?.displayName ?? user?.fullName?.split(' ')[0] ?? 'Operator';
 
   const navSections: NavSection[] = [
+    {
+      title: 'Real 2-VPS Testbench',
+      items: [
+        { id: 'real-vps', label: '⚡ 2-VPS Testbench', icon: Zap, badge: 'REAL', badgeColor: 'text-emerald-400 font-bold' }
+      ]
+    },
     {
       title: 'Command Center',
       items: [
@@ -329,6 +336,25 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
           {/* Right Zone: Theme Toggle, Health, Simulator & Profile */}
           <div className="flex items-center gap-2.5">
+            {/* Real 2-VPS Quick Action Pill */}
+            <button
+              onClick={() => navigate('/real-vps')}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-bold transition-all border cursor-pointer ${
+                activeTab === 'real-vps'
+                  ? 'bg-blue-600 text-white border-blue-500 shadow-xs'
+                  : isDark
+                    ? 'bg-[#151E30] hover:bg-[#1A263D] text-emerald-400 border-emerald-900/60'
+                    : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-300'
+              }`}
+              title="Open Real 2-VPS Testbench"
+            >
+              <Zap className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+              <span className="hidden md:inline">2-VPS TESTBENCH</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/30 font-semibold">
+                {realVpsConfig ? `${realVpsConfig.routing === 'MAIN' ? 'MAIN PRD' : 'DR STANDBY'}` : '2-VPS'}
+              </span>
+            </button>
+
             {/* Theme Toggle Button (Light / Dark) */}
             <button
               onClick={toggleTheme}

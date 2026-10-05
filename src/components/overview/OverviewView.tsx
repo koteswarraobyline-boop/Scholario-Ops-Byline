@@ -110,7 +110,8 @@ export const OverviewView: React.FC = () => {
   const {
     applications, servers, deadMan, systemSummary,
     lastUpdatedSecondsAgo, setActiveTab, setSelectedAppId,
-    setSelectedIncidentId, incidents, runAllProbes, theme
+    setSelectedIncidentId, incidents, runAllProbes, theme,
+    realVpsConfig, isRealVpsOnlyMode
   } = useOps();
 
   const isDark = theme === 'dark';
@@ -125,7 +126,7 @@ export const OverviewView: React.FC = () => {
     const check = async () => {
       const start = Date.now();
       try {
-        const res = await fetch('http://localhost:4000/health', { signal: AbortSignal.timeout(3000) });
+        const res = await fetch('/health', { signal: AbortSignal.timeout(3000) });
         if (res.ok) {
           setApiStatus('online');
           setApiLatency(Date.now() - start);
@@ -238,6 +239,42 @@ export const OverviewView: React.FC = () => {
             }
           </button>
         </div>
+      </div>
+
+      {/* ── REAL 2-VPS QUICK STATUS BANNER ─────────────────────────────── */}
+      <div className={`p-3.5 sm:p-4 rounded-lg border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+        isDark ? 'bg-[#0B1322] border-blue-900/40 text-slate-200' : 'bg-blue-50/70 border-blue-200 text-slate-800'
+      }`}>
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-md bg-blue-600/20 text-blue-400 border border-blue-500/30 flex items-center justify-center shrink-0">
+            <Zap className="w-4 h-4 text-blue-400" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-bold text-xs font-mono">REAL 2-VPS CLUSTER:</span>
+              <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                realVpsConfig?.routing === 'MAIN' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-amber-950 text-amber-300 border border-amber-800'
+              }`}>
+                ACTIVE: {realVpsConfig?.routing === 'MAIN' ? 'VPS 1 (MAIN / PRD)' : 'VPS 2 (DR STANDBY)'}
+              </span>
+              {isRealVpsOnlyMode && (
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-950 text-blue-300 border border-blue-800">
+                  REAL MODE ONLY
+                </span>
+              )}
+            </div>
+            <div className="text-[11px] font-mono text-slate-400 mt-0.5">
+              Main VPS ({realVpsConfig?.main.ip || '185.193.125.101'}): <span className="text-emerald-400 font-semibold">{realVpsConfig?.main.status || 'HEALTHY'} ({realVpsConfig?.main.latencyMs}ms)</span> · DR VPS ({realVpsConfig?.dr.ip || '185.193.125.102'}): <span className="text-emerald-400 font-semibold">{realVpsConfig?.dr.status || 'HEALTHY'} ({realVpsConfig?.dr.latencyMs}ms)</span>
+            </div>
+          </div>
+        </div>
+        <button
+          onClick={() => setActiveTab('real-vps')}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-mono font-bold bg-blue-600 hover:bg-blue-500 text-white transition-all shadow-xs cursor-pointer shrink-0 self-start sm:self-auto"
+        >
+          <span>OPEN 2-VPS TESTBENCH</span>
+          <ArrowRight className="w-3.5 h-3.5" />
+        </button>
       </div>
 
       {/* ── 8-Column Metric Cards ────────────────────────────────────────── */}

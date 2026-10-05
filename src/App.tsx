@@ -24,6 +24,7 @@ import { ReportsView }       from './components/analytics/ReportsView';
 import { AuditLogsView }     from './components/admin/AuditLogsView';
 import { UsersView }         from './components/admin/UsersView';
 import { ProjectOverviewView } from './components/overview/ProjectOverviewView';
+import { RealVpsTestbenchView } from './components/resilience/RealVpsTestbenchView';
 
 // ── Protected Route ──────────────────────────────────────────────────────────
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -79,6 +80,8 @@ const DashboardView: React.FC<{ tab: string }> = ({ tab }) => {
     uptime:         <ReportsView />,
     audit:          <AuditLogsView />,
     users:          <UsersView />,
+    'real-vps':     <RealVpsTestbenchView />,
+    'vps-testbench':<RealVpsTestbenchView />,
     'project-overview': <ProjectOverviewView />,
     docs:           <ProjectOverviewView />,
   };
@@ -115,7 +118,9 @@ export default function App() {
 // Inner router that has access to OpsProvider
 const DashboardRoutes: React.FC = () => (
   <Routes>
-    <Route path="/"              element={<Navigate to="/overview" replace />} />
+    <Route path="/"              element={<Navigate to="/real-vps" replace />} />
+    <Route path="/real-vps"      element={<DashboardView tab="real-vps" />} />
+    <Route path="/vps-testbench" element={<DashboardView tab="real-vps" />} />
     <Route path="/overview"      element={<DashboardView tab="overview" />} />
     <Route path="/applications"  element={<DashboardView tab="applications" />} />
     <Route path="/infrastructure"element={<DashboardView tab="infrastructure" />} />
@@ -140,6 +145,6 @@ const DashboardRoutes: React.FC = () => (
     <Route path="/settings"      element={<DashboardView tab="settings" />} />
     <Route path="/project-overview" element={<DashboardView tab="project-overview" />} />
     <Route path="/docs"          element={<DashboardView tab="docs" />} />
-    <Route path="*"              element={<Navigate to="/overview" replace />} />
+    <Route path="*"              element={<Navigate to="/real-vps" replace />} />
   </Routes>
 );

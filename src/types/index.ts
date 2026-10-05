@@ -367,3 +367,84 @@ export interface DrReadinessItem {
   status: 'READY' | 'WARNING' | 'FAILED' | 'UNKNOWN';
   detail: string;
 }
+
+export interface RealVpsNode {
+  id: string;
+  name: string;
+  ip: string;
+  hostname: string;
+  port: number;
+  healthUrl: string;
+  provider: string;
+  region: string;
+  environment: 'PRD' | 'DR';
+  status: OperationalStatus;
+  lastCheckedAt: string | null;
+  latencyMs: number;
+  httpStatus: number | null;
+  tlsStatus: string | null;
+  responseSnippet: string;
+  telemetry: {
+    cpuPercent: number;
+    ramPercent: number;
+    diskPercent: number;
+    loadAvg?: number[];
+    observedAt: string;
+  };
+}
+
+export interface RealVpsConfig {
+  activeMode: 'real_pair' | 'sample_cluster';
+  routing: 'MAIN' | 'DR';
+  autoFailover: boolean;
+  healthCheckIntervalSec: number;
+  main: RealVpsNode;
+  dr: RealVpsNode;
+  testApp: {
+    id: string;
+    name: string;
+    codeName: string;
+    domain: string;
+    healthPath: string;
+    failoverState: 'PRIMARY_ACTIVE' | 'DR_ACTIVE';
+    mainServerId: string;
+    drServerId: string;
+    lastFailoverAt?: string;
+  };
+}
+
+export interface RealVpsProbeResult {
+  target: string;
+  vpsType: 'main' | 'dr' | 'custom';
+  reachable: boolean;
+  statusCode: number | null;
+  latencyMs: number;
+  tlsValid?: boolean;
+  tlsInfo?: string;
+  headers?: Record<string, string>;
+  bodySnippet?: string;
+  error?: string;
+  timestamp: string;
+}
+
+export interface RealVpsTcpProbeResult {
+  host: string;
+  port: number;
+  open: boolean;
+  latencyMs: number;
+  error?: string;
+  testedAt: string;
+}
+
+export interface SyntheticTransactionResult {
+  url: string;
+  method: string;
+  reachable: boolean;
+  statusCode: number | null;
+  latencyMs: number;
+  expectedMatch: boolean;
+  matchText?: string;
+  responseSnippet: string;
+  headers?: Record<string, string>;
+  testedAt: string;
+}

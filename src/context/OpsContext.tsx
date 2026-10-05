@@ -16,9 +16,14 @@ import {
   IncidentStatus,
   IncidentSeverity,
   OperationalStatus,
-  MonitorType
+  MonitorType,
+  RealVpsConfig,
+  RealVpsProbeResult,
+  RealVpsTcpProbeResult,
+  SyntheticTransactionResult
 } from '../types';
 import { api, HealthCheckResponse } from '../services/api';
+import { RealVpsService } from '../services/realVps';
 import { 
   INITIAL_APPLICATIONS, 
   INITIAL_SERVERS, 
@@ -103,6 +108,21 @@ interface OpsContextType {
   theme: 'dark' | 'light';
   setTheme: (theme: 'dark' | 'light') => void;
   toggleTheme: () => void;
+
+  // Real 2-VPS Testbench state & actions
+  realVpsConfig: RealVpsConfig | null;
+  isRealVpsOnlyMode: boolean;
+  isRealVpsProbing: boolean;
+  refreshRealVpsConfig: () => Promise<void>;
+  updateRealVpsConfig: (payload: Partial<RealVpsConfig>) => Promise<void>;
+  probeRealVps: (targetVps: 'main' | 'dr', customUrl?: string) => Promise<RealVpsProbeResult | null>;
+  probeBothRealVps: () => Promise<{ mainResult: RealVpsProbeResult; drResult: RealVpsProbeResult } | null>;
+  failoverRealVps: (target?: 'MAIN' | 'DR', reason?: string) => Promise<void>;
+  purgeMockData: () => Promise<void>;
+  restoreMockData: () => Promise<void>;
+  tcpProbe: (payload: { targetVps?: 'main' | 'dr'; host?: string; port: number }) => Promise<RealVpsTcpProbeResult | null>;
+  testSynthetic: (payload: { url: string; method?: string; body?: string; expectedStatus?: number; matchText?: string }) => Promise<SyntheticTransactionResult | null>;
+  simulateOutage: (targetVps: 'main' | 'dr', simulatedStatus: 'CRITICAL' | 'HEALTHY') => Promise<void>;
 
   // Computed summaries
   systemSummary: {
@@ -235,6 +255,233 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     localStorage.setItem('scholario_audit', JSON.stringify(auditLogs));
   }, [auditLogs]);
 
+  // Real 2-VPS Testbench State & Actions
+  const [realVpsConfig, setRealVpsConfig] = useState<RealVpsConfig | null>(null);
+  const [isRealVpsOnlyMode, setIsRealVpsOnlyMode] = useState<boolean>(false);
+  const [isRealVpsProbing, setIsRealVpsProbing] = useState<boolean>(false);
+
+  const refreshRealVpsConfig = useCallback(async () => {
+    try {
+      const res = await RealVpsService.getConfig();
+      if (res?.data) {
+        setRealVpsConfig(res.data);
+        setIsRealVpsOnlyMode(Boolean(res.isRealVpsOnlyMode));
+        if (res.isRealVpsOnlyMode) {
+          const [apps, srvs, mons] = await Promise.all([
+            api.getApplications(),
+            api.getServers(),
+            api.getMonitors()
+          ]);
+          if (apps?.length) {
+            setApplications(apps);
+            localStorage.setItem('scholario_apps', JSON.stringify(apps));
+          }
+          if (srvs?.length) {
+            setServers(srvs);
+            localStorage.setItem('scholario_servers', JSON.stringify(srvs));
+          }
+          if (mons?.length) {
+            setMonitors(mons);
+            localStorage.setItem('scholario_monitors', JSON.stringify(mons));
+          }
+        }
+      }
+    } catch {}
+  }, []);
+
+  const updateRealVpsConfig = useCallback(async (payload: Partial<RealVpsConfig>) => {
+    try {
+      const res = await RealVpsService.updateConfig(payload);
+      if (res?.data) {
+        setRealVpsConfig(res.data);
+        setIsRealVpsOnlyMode(Boolean(res.isRealVpsOnlyMode));
+      }
+      const [apps, srvs, mons] = await Promise.all([
+        api.getApplications(),
+        api.getServers(),
+        api.getMonitors()
+      ]);
+      if (apps?.length) {
+        setApplications(apps);
+        localStorage.setItem('scholario_apps', JSON.stringify(apps));
+      }
+      if (srvs?.length) {
+        setServers(srvs);
+        localStorage.setItem('scholario_servers', JSON.stringify(srvs));
+      }
+      if (mons?.length) {
+        setMonitors(mons);
+        localStorage.setItem('scholario_monitors', JSON.stringify(mons));
+      }
+    } catch (err) {
+      console.error('Failed to update Real VPS config:', err);
+    }
+  }, []);
+
+  const probeRealVps = useCallback(async (targetVps: 'main' | 'dr', customUrl?: string) => {
+    setIsRealVpsProbing(true);
+    try {
+      const res = await RealVpsService.probe(targetVps, customUrl);
+      if (res?.data) {
+        setRealVpsConfig(res.data);
+      }
+      const [apps, srvs, mons] = await Promise.all([
+        api.getApplications(),
+        api.getServers(),
+        api.getMonitors()
+      ]);
+      if (apps?.length) setApplications(apps);
+      if (srvs?.length) setServers(srvs);
+      if (mons?.length) setMonitors(mons);
+      return res.probeResult;
+    } catch (err) {
+      console.error('Probe failed:', err);
+      return null;
+    } finally {
+      setIsRealVpsProbing(false);
+    }
+  }, []);
+
+  const probeBothRealVps = useCallback(async () => {
+    setIsRealVpsProbing(true);
+    try {
+      const res = await RealVpsService.probeBoth();
+      if (res?.data) {
+        setRealVpsConfig(res.data);
+      }
+      const [apps, srvs, mons] = await Promise.all([
+        api.getApplications(),
+        api.getServers(),
+        api.getMonitors()
+      ]);
+      if (apps?.length) setApplications(apps);
+      if (srvs?.length) setServers(srvs);
+      if (mons?.length) setMonitors(mons);
+      return { mainResult: res.mainResult, drResult: res.drResult };
+    } catch (err) {
+      console.error('Probe both failed:', err);
+      return null;
+    } finally {
+      setIsRealVpsProbing(false);
+    }
+  }, []);
+
+  const failoverRealVps = useCallback(async (target?: 'MAIN' | 'DR', reason?: string) => {
+    try {
+      const res = await RealVpsService.failover(target, reason);
+      if (res?.data) {
+        setRealVpsConfig(res.data);
+      }
+      const [apps, srvs] = await Promise.all([
+        api.getApplications(),
+        api.getServers()
+      ]);
+      if (apps?.length) setApplications(apps);
+      if (srvs?.length) setServers(srvs);
+    } catch (err) {
+      console.error('Failover failed:', err);
+    }
+  }, []);
+
+  const purgeMockData = useCallback(async () => {
+    try {
+      await RealVpsService.purgeMockData();
+      setIsRealVpsOnlyMode(true);
+      const [apps, srvs, mons] = await Promise.all([
+        api.getApplications(),
+        api.getServers(),
+        api.getMonitors()
+      ]);
+      if (apps?.length) {
+        setApplications(apps);
+        localStorage.setItem('scholario_apps', JSON.stringify(apps));
+      }
+      if (srvs?.length) {
+        setServers(srvs);
+        localStorage.setItem('scholario_servers', JSON.stringify(srvs));
+      }
+      if (mons?.length) {
+        setMonitors(mons);
+        localStorage.setItem('scholario_monitors', JSON.stringify(mons));
+      }
+      const res = await RealVpsService.getConfig();
+      if (res?.data) setRealVpsConfig(res.data);
+    } catch (err) {
+      console.error('Failed to purge mock data:', err);
+    }
+  }, []);
+
+  const restoreMockData = useCallback(async () => {
+    try {
+      await RealVpsService.restoreMockData();
+      setIsRealVpsOnlyMode(false);
+      const [apps, srvs, mons] = await Promise.all([
+        api.getApplications(),
+        api.getServers(),
+        api.getMonitors()
+      ]);
+      if (apps?.length) {
+        setApplications(apps);
+        localStorage.setItem('scholario_apps', JSON.stringify(apps));
+      }
+      if (srvs?.length) {
+        setServers(srvs);
+        localStorage.setItem('scholario_servers', JSON.stringify(srvs));
+      }
+      if (mons?.length) {
+        setMonitors(mons);
+        localStorage.setItem('scholario_monitors', JSON.stringify(mons));
+      }
+      const res = await RealVpsService.getConfig();
+      if (res?.data) setRealVpsConfig(res.data);
+    } catch (err) {
+      console.error('Failed to restore mock data:', err);
+    }
+  }, []);
+
+  const tcpProbe = useCallback(async (payload: { targetVps?: 'main' | 'dr'; host?: string; port: number }) => {
+    try {
+      const res = await RealVpsService.tcpProbe(payload);
+      return res.result;
+    } catch (err) {
+      console.error('TCP probe error:', err);
+      return null;
+    }
+  }, []);
+
+  const testSynthetic = useCallback(async (payload: { url: string; method?: string; body?: string; expectedStatus?: number; matchText?: string }) => {
+    try {
+      const res = await RealVpsService.testSynthetic(payload);
+      return res.result;
+    } catch (err) {
+      console.error('Synthetic test error:', err);
+      return null;
+    }
+  }, []);
+
+  const simulateOutage = useCallback(async (targetVps: 'main' | 'dr', simulatedStatus: 'CRITICAL' | 'HEALTHY') => {
+    try {
+      const res = await RealVpsService.simulateOutage(targetVps, simulatedStatus);
+      if (res?.data) {
+        setRealVpsConfig(res.data);
+      }
+      const [apps, srvs, mons] = await Promise.all([
+        api.getApplications(),
+        api.getServers(),
+        api.getMonitors()
+      ]);
+      if (apps?.length) setApplications(apps);
+      if (srvs?.length) setServers(srvs);
+      if (mons?.length) setMonitors(mons);
+    } catch (err) {
+      console.error('Simulate outage error:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshRealVpsConfig();
+  }, [refreshRealVpsConfig]);
+
   // Audit logger
   const addAuditEntry = useCallback((action: string, category: AuditLog['category'], targetId: string, details: string) => {
     const newLog: AuditLog = {
@@ -342,6 +589,22 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setIncidents(prev => prev.map(i => i.id === data.id ? data : i));
       } else if (event === 'application_update' && data?.id) {
         setApplications(prev => prev.map(a => a.id === data.id ? data : a));
+      } else if (event === 'real_vps_update' && data) {
+        setRealVpsConfig(data);
+      } else if (event === 'real_vps_probed' && data?.config) {
+        setRealVpsConfig(data.config);
+      } else if (event === 'real_vps_failover' && data?.config) {
+        setRealVpsConfig(data.config);
+      } else if (event === 'mock_data_purged') {
+        setIsRealVpsOnlyMode(true);
+        api.getApplications().then(apps => { if (apps?.length) setApplications(apps); });
+        api.getServers().then(srvs => { if (srvs?.length) setServers(srvs); });
+        api.getMonitors().then(mons => { if (mons?.length) setMonitors(mons); });
+      } else if (event === 'mock_data_restored') {
+        setIsRealVpsOnlyMode(false);
+        api.getApplications().then(apps => { if (apps?.length) setApplications(apps); });
+        api.getServers().then(srvs => { if (srvs?.length) setServers(srvs); });
+        api.getMonitors().then(mons => { if (mons?.length) setMonitors(mons); });
       }
     });
 
@@ -356,8 +619,13 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const interval = setInterval(() => {
       setLastUpdatedSecondsAgo(0);
 
-      // Jitter telemetry slightly for realism
+      // Jitter telemetry slightly for realism (skip if in Real VPS only mode)
+      if (isRealVpsOnlyMode) return;
+
       setServers(prev => prev.map(srv => {
+        if (srv.id === 'vps-real-main' || srv.id === 'vps-real-dr') {
+          return srv; // Keep real measurements clean
+        }
         if (srv.status === 'CRITICAL') {
           return {
             ...srv,
@@ -1022,6 +1290,19 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         theme,
         setTheme,
         toggleTheme,
+        realVpsConfig,
+        isRealVpsOnlyMode,
+        isRealVpsProbing,
+        refreshRealVpsConfig,
+        updateRealVpsConfig,
+        probeRealVps,
+        probeBothRealVps,
+        failoverRealVps,
+        purgeMockData,
+        restoreMockData,
+        tcpProbe,
+        testSynthetic,
+        simulateOutage,
         systemSummary: {
           totalApps,
           healthyApps,
