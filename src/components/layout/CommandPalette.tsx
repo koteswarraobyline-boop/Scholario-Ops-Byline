@@ -29,7 +29,9 @@ import {
   Cpu,
   Compass,
   CornerDownLeft,
-  BookOpen
+  BookOpen,
+  Plus,
+  BarChart3
 } from 'lucide-react';
 
 export type PaletteCategory = 
@@ -74,6 +76,7 @@ export const CommandPalette: React.FC = () => {
     resolveIncident,
     runProbeCheck,
     runAllProbes,
+    setIsAddMonitorModalOpen,
     sendTestNotification,
     triggerSimulatedScenario,
     deadMan,
@@ -436,6 +439,39 @@ export const CommandPalette: React.FC = () => {
     // =========================================================================
     // 5. COMMON MANAGEMENT ACTIONS
     // =========================================================================
+    items.push({
+      id: 'action-view-latency-metrics',
+      category: 'ACTIONS',
+      categoryLabel: 'Management Action',
+      title: 'Real-Time Endpoint Latency & Uptime Visualizer',
+      subtitle: 'Visualize live latency percentiles (P50/P90/P99), SLA uptime compliance, and synthetic health check distributions',
+      badge: 'VISUALIZE',
+      badgeType: 'action',
+      icon: BarChart3,
+      keywords: 'latency uptime visualizer health check percentiles metrics response time endpoints chart statistics matrix',
+      action: () => {
+        setActiveTab('monitors');
+        setIsCommandPaletteOpen(false);
+      }
+    });
+
+    items.push({
+      id: 'action-create-monitor',
+      category: 'ACTIONS',
+      categoryLabel: 'Management Action',
+      title: 'Create / Add Continuous Monitor Probe',
+      subtitle: 'Configure edge HTTPS, internal TCP sockets, database pool probes, and dead-man heartbeats with real VPS and application data',
+      badge: 'CREATE PROBE',
+      badgeType: 'action',
+      icon: Plus,
+      keywords: 'create monitor add probe new monitor check endpoint vps hostinger tcp https health check synthetic socket',
+      action: () => {
+        setActiveTab('monitors');
+        setIsCommandPaletteOpen(false);
+        setIsAddMonitorModalOpen(true);
+      }
+    });
+
     items.push({
       id: 'action-probe-all',
       category: 'ACTIONS',

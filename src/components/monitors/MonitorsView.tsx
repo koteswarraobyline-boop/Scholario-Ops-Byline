@@ -1,13 +1,24 @@
 import React, { useState } from 'react';
 import { useOps } from '../../context/OpsContext';
-import {
-  Radio, Search, RefreshCw, CheckCircle2, AlertTriangle,
-  Plus, X, Loader2, ChevronDown
+import { 
+  Radio, 
+  Search, 
+  RefreshCw, 
+  CheckCircle2, 
+  AlertTriangle, 
+  Activity,
+  Heart,
+  Plus,
+  Trash2,
+  PauseCircle,
+  PlayCircle,
+  ExternalLink,
+  ShieldCheck,
+  BarChart3,
+  List
 } from 'lucide-react';
 import { HeartbeatPulseChart } from '../visuals/HeartbeatPulseChart';
-import { MonitorsService } from '../../services/monitors';
-import { ApiError } from '../../services/api';
-import { RbacGuard } from '../ui/RbacGuard';
+import { EndpointMetricsVisualizer } from './EndpointMetricsVisualizer';
 
 // ── Monitor type options ──────────────────────────────────────────────────────
 const MONITOR_TYPES = [
@@ -303,13 +314,24 @@ const AddMonitorForm: React.FC<AddMonitorFormProps> = ({ onClose, onCreated, isD
 
 // ── Main MonitorsView ─────────────────────────────────────────────────────────
 export const MonitorsView: React.FC = () => {
-  const { monitors, applications, runProbeCheck, runAllProbes, refreshData, theme } = useOps();
+  const { 
+    monitors, 
+    applications, 
+    runProbeCheck, 
+    runAllProbes, 
+    deleteMonitor,
+    toggleMonitorStatus,
+    setIsAddMonitorModalOpen,
+    openAddMonitorWithContext,
+    theme 
+  } = useOps();
   const isDark = theme === 'dark';
 
   const [filterType, setFilterType] = useState<string>('ALL');
   const [search, setSearch] = useState('');
   const [probingId, setProbingId] = useState<string | null>(null);
-  const [showAddForm, setShowAddForm] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'visualizer' | 'table'>('visualizer');
 
   const handleManualCheck = async (id: string) => {
     setProbingId(id);
@@ -358,7 +380,43 @@ export const MonitorsView: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Segmented View Mode Switcher */}
+          <div className={`p-0.5 rounded-md border flex items-center ${
+            isDark ? 'bg-[#0B0F17] border-[#1E293B]' : 'bg-slate-100 border-slate-300'
+          }`}>
+            <button
+              onClick={() => setViewMode('visualizer')}
+              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono font-medium rounded transition-colors cursor-pointer ${
+                viewMode === 'visualizer'
+                  ? 'bg-blue-600 text-white font-bold shadow-xs'
+                  : isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <BarChart3 className="w-3.5 h-3.5" />
+              <span>LATENCY &amp; UPTIME MATRIX</span>
+            </button>
+            <button
+              onClick={() => setViewMode('table')}
+              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono font-medium rounded transition-colors cursor-pointer ${
+                viewMode === 'table'
+                  ? 'bg-blue-600 text-white font-bold shadow-xs'
+                  : isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <List className="w-3.5 h-3.5" />
+              <span>PROBES TABLE</span>
+            </button>
+          </div>
+
+          <button
+            onClick={() => setIsAddMonitorModalOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-bold rounded transition-all bg-blue-600 hover:bg-blue-500 text-white shadow-sm hover:shadow-blue-500/20 cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>CREATE MONITOR</span>
+          </button>
+
           <button
             onClick={() => runAllProbes()}
             className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-medium rounded transition-colors border cursor-pointer ${
@@ -387,20 +445,53 @@ export const MonitorsView: React.FC = () => {
       {/* Embedded Live Dead-Man Watchdog Heartbeat Waveform */}
       <HeartbeatPulseChart />
 
-      {/* 4 Monitoring Operational Principles */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-2.5 font-mono text-xs">
-        {[
-          { color: 'text-blue-500', title: '1. Consecutive Failures', sub: '3-Failure Threshold', body: 'Automatic retry on blips #1 & #2. Incidents fire exclusively upon confirmed 3/3 failure sequence.' },
-          { color: 'text-emerald-500', title: '2. Consecutive Recovery', sub: '3-Pass Verification', body: 'Flapping prevention. Incidents do not resolve until 3 consecutive successful health probe confirmations.' },
-          { color: 'text-amber-500', title: '3. Incident Deduplication', sub: 'Fingerprint Matching', body: 'Repeated failures update existing incident timeline instead of opening duplicate tickets.' },
-          { color: 'text-indigo-500', title: '4. Watchdog Decoupling', sub: 'Zurich Control Plane', body: 'Independent monitoring outside Hostinger cluster verifies system is alive even if agents crash.' },
-        ].map(p => (
-          <div key={p.title} className={`p-3 rounded border space-y-1 ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
-            <div className={`text-[9px] font-bold uppercase tracking-wider ${p.color}`}>{p.title}</div>
-            <div className="text-xs font-semibold">{p.sub}</div>
-            <p className={`text-[11px] font-sans leading-relaxed ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{p.body}</p>
-          </div>
-        ))}
+      {/* VIEW MODE 1: DEDICATED REAL-TIME LATENCY & UPTIME VISUALIZER */}
+      {viewMode === 'visualizer' ? (
+        <EndpointMetricsVisualizer onAddMonitorClick={() => setIsAddMonitorModalOpen(true)} />
+      ) : (
+        /* VIEW MODE 2: COMPREHENSIVE PROBES TABLE & PRINCIPLES */
+        <>
+          {/* 4 Monitoring Operational Principles */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-2.5 font-mono text-xs">
+        <div className={`p-3 rounded border space-y-1 ${
+          isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
+        }`}>
+          <div className="text-[9px] font-bold text-blue-500 uppercase tracking-wider">1. Consecutive Failures</div>
+          <div className="text-xs font-semibold">3-Failure Threshold</div>
+          <p className={`text-[11px] font-sans leading-relaxed ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            Automatic retry on blips #1 &amp; #2. Incidents fire exclusively upon confirmed 3/3 failure sequence.
+          </p>
+        </div>
+
+        <div className={`p-3 rounded border space-y-1 ${
+          isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
+        }`}>
+          <div className="text-[9px] font-bold text-emerald-500 uppercase tracking-wider">2. Consecutive Recovery</div>
+          <div className="text-xs font-semibold">3-Pass Verification</div>
+          <p className={`text-[11px] font-sans leading-relaxed ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            Flapping prevention. Incidents do not resolve until 3 consecutive successful health probe confirmations.
+          </p>
+        </div>
+
+        <div className={`p-3 rounded border space-y-1 ${
+          isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
+        }`}>
+          <div className="text-[9px] font-bold text-amber-500 uppercase tracking-wider">3. Incident Deduplication</div>
+          <div className="text-xs font-semibold">Fingerprint Matching</div>
+          <p className={`text-[11px] font-sans leading-relaxed ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            Repeated failures update existing incident timeline instead of opening duplicate tickets.
+          </p>
+        </div>
+
+        <div className={`p-3 rounded border space-y-1 ${
+          isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
+        }`}>
+          <div className="text-[9px] font-bold text-indigo-500 uppercase tracking-wider">4. Watchdog Decoupling</div>
+          <div className="text-xs font-semibold">Zurich Control Plane</div>
+          <p className={`text-[11px] font-sans leading-relaxed ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            Independent monitoring outside Hostinger cluster verifies system is alive even if agents crash.
+          </p>
+        </div>
       </div>
 
       {/* Filter and Search Bar */}
@@ -576,37 +667,116 @@ export const MonitorsView: React.FC = () => {
 
                     {/* Health */}
                     <td className="py-2.5 px-3.5">
-                      <span className={`font-semibold text-[11px] ${
-                        m.status === 'HEALTHY' ? 'text-emerald-500' :
-                        m.status === 'WARNING' ? 'text-amber-500' :
-                        m.status === 'CRITICAL' ? 'text-rose-500' : 'text-slate-400'
-                      }`}>
-                        {m.status}
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`font-semibold ${
+                          !m.enabled 
+                            ? 'text-slate-500' 
+                            : m.status === 'HEALTHY' 
+                              ? 'text-emerald-500' 
+                              : 'text-rose-500'
+                        }`}>
+                          {!m.enabled ? 'PAUSED' : m.status}
+                        </span>
+                        {!m.enabled && (
+                          <span className={`text-[9px] px-1 py-0.2 rounded border font-mono ${
+                            isDark ? 'bg-slate-900 border-slate-700 text-slate-400' : 'bg-slate-100 border-slate-300 text-slate-600'
+                          }`}>OFF</span>
+                        )}
+                      </div>
                     </td>
 
                     {/* Probe button */}
                     <td className="py-2.5 px-3.5 text-right font-sans">
-                      <button
-                        onClick={() => handleManualCheck(m.id)}
-                        disabled={isProbing}
-                        className={`px-2 py-0.5 rounded text-[11px] transition-colors inline-flex items-center gap-1 font-mono border cursor-pointer disabled:opacity-50 ${
-                          isDark
-                            ? 'text-slate-300 hover:text-white hover:bg-[#1D2B44] border-[#23334E]'
-                            : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100 border-slate-300'
-                        }`}
-                      >
-                        <RefreshCw className={`w-3 h-3 ${isProbing ? 'animate-spin text-blue-500' : ''}`} />
-                        <span>PROBE</span>
-                      </button>
+                      <div className="flex items-center justify-end gap-1 font-mono">
+                        <button
+                          onClick={() => handleManualCheck(m.id)}
+                          disabled={isProbing || !m.enabled}
+                          className={`px-2 py-0.5 rounded text-[11px] transition-colors inline-flex items-center gap-1 border cursor-pointer ${
+                            isDark 
+                              ? 'text-slate-300 hover:text-white hover:bg-[#1D2B44] border-[#23334E] disabled:opacity-40' 
+                              : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100 border-slate-300 disabled:opacity-40'
+                          }`}
+                          title="Run probe now"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${isProbing ? 'animate-spin text-blue-500' : ''}`} />
+                          <span className="hidden sm:inline">PROBE</span>
+                        </button>
+
+                        <button
+                          onClick={() => toggleMonitorStatus(m.id)}
+                          className={`p-1 rounded text-[11px] transition-colors border cursor-pointer ${
+                            m.enabled
+                              ? (isDark ? 'text-amber-400 hover:bg-amber-950/40 border-amber-900/40' : 'text-amber-600 hover:bg-amber-50 border-amber-200')
+                              : (isDark ? 'text-emerald-400 hover:bg-emerald-950/40 border-emerald-900/40' : 'text-emerald-600 hover:bg-emerald-50 border-emerald-200')
+                          }`}
+                          title={m.enabled ? 'Pause continuous monitoring' : 'Resume continuous monitoring'}
+                        >
+                          {m.enabled ? <PauseCircle className="w-3.5 h-3.5" /> : <PlayCircle className="w-3.5 h-3.5" />}
+                        </button>
+
+                        {confirmDeleteId === m.id ? (
+                          <div className="flex items-center gap-1 animate-in fade-in">
+                            <button
+                              onClick={() => {
+                                deleteMonitor(m.id);
+                                setConfirmDeleteId(null);
+                              }}
+                              className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-600 hover:bg-rose-500 text-white cursor-pointer"
+                              title="Confirm delete"
+                            >
+                              YES
+                            </button>
+                            <button
+                              onClick={() => setConfirmDeleteId(null)}
+                              className="px-1.5 py-0.5 rounded text-[10px] bg-slate-600 hover:bg-slate-500 text-white cursor-pointer"
+                              title="Cancel"
+                            >
+                              NO
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setConfirmDeleteId(m.id)}
+                            className={`p-1 rounded transition-colors border cursor-pointer ${
+                              isDark 
+                                ? 'text-slate-500 hover:text-rose-400 hover:bg-rose-950/30 border-transparent hover:border-rose-900/50' 
+                                : 'text-slate-400 hover:text-rose-600 hover:bg-rose-50 border-transparent hover:border-rose-200'
+                            }`}
+                            title="Delete this monitor probe"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
               })}
+
+              {filteredMonitors.length === 0 && (
+                <tr>
+                  <td colSpan={9} className="py-12 text-center font-mono">
+                    <Activity className="w-8 h-8 text-slate-500 mx-auto mb-2 opacity-40 animate-pulse" />
+                    <div className="text-sm font-semibold">No monitor probes match your filter</div>
+                    <p className={`text-xs mt-1 max-w-sm mx-auto ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                      Create a new continuous health probe using real Hostinger VPS and application data.
+                    </p>
+                    <button
+                      onClick={() => setIsAddMonitorModalOpen(true)}
+                      className="mt-3 px-3 py-1.5 rounded text-xs font-mono font-bold bg-blue-600 hover:bg-blue-500 text-white inline-flex items-center gap-1.5 shadow-sm cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>CREATE NEW MONITOR</span>
+                    </button>
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
       </div>
+      </>
+      )}
 
     </div>
   );

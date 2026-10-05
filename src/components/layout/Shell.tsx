@@ -33,6 +33,7 @@ import {
   LogOut
 } from 'lucide-react';
 import { CommandPalette } from './CommandPalette';
+import { CreateMonitorModal } from '../monitors/CreateMonitorModal';
 
 interface ShellProps {
   children: React.ReactNode;
@@ -64,6 +65,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     deadMan,
     triggerSimulatedScenario,
     runAllProbes,
+    apiHealth,
     theme,
     toggleTheme,
     wsStatus,
@@ -165,6 +167,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       isDark ? 'bg-[#0B0F17] text-slate-100' : 'bg-[#F6F8FC] text-slate-900'
     }`}>
       <CommandPalette />
+      <CreateMonitorModal />
 
       {/* LEFT SIDEBAR - Deep Carbon / Enterprise Navy Shell */}
       <aside 
@@ -493,6 +496,23 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
           </div>
         </header>
+
+        {/* /health SERVICE UNREACHABLE EMERGENCY BANNER */}
+        {(!apiHealth.reachable || apiHealth.status === 'UNREACHABLE') && (
+          <div className="px-3 sm:px-5 py-2 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs shrink-0 font-mono bg-rose-600 text-white font-bold animate-pulse shadow-md z-30">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-white animate-ping shrink-0" />
+              <span>CRITICAL NOTIFICATION: SCHOLARIO OPS API SERVICE (/health) UNREACHABLE!</span>
+              <span className="text-[10px] opacity-90 hidden md:inline font-normal">Automated escalation trigger engaged across CommunicationsView</span>
+            </div>
+            <button
+              onClick={() => setActiveTab('communications')}
+              className="px-2.5 py-0.5 rounded text-[11px] font-mono bg-white text-rose-700 hover:bg-rose-50 transition-colors cursor-pointer self-start sm:self-auto shrink-0 shadow-xs"
+            >
+              VIEW COMMUNICATIONS TRIGGER
+            </button>
+          </div>
+        )}
 
         {/* ACTIVE CRITICAL INCIDENT BANNER - Crisp Industrial Severity Strip */}
         {activeCriticalIncident && (

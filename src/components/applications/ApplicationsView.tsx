@@ -13,7 +13,8 @@ import {
   GitBranch, 
   FileText, 
   CheckCircle2, 
-  ArrowRight
+  ArrowRight,
+  Plus
 } from 'lucide-react';
 import { TrafficFlowChart } from '../visuals/TrafficFlowChart';
 
@@ -33,6 +34,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
     triggerFailover, 
     setSelectedIncidentId,
     setActiveTab,
+    openAddMonitorWithContext,
     theme
   } = useOps();
 
@@ -220,7 +222,18 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
           {/* TAB: MONITORS */}
           {activeTab === 'monitors' && (
             <div className="space-y-3 font-mono">
-              <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Attached Monitor Probes</div>
+              <div className="flex items-center justify-between">
+                <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+                  Attached Monitor Probes ({appMonitors.length})
+                </div>
+                <button
+                  onClick={() => openAddMonitorWithContext({ applicationId: application.id })}
+                  className="px-2.5 py-1 rounded text-xs font-mono font-bold bg-blue-600 hover:bg-blue-500 text-white flex items-center gap-1 cursor-pointer shadow-xs"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add Probe</span>
+                </button>
+              </div>
               <div className="space-y-2">
                 {appMonitors.map(m => (
                   <div key={m.id} className={`p-3 rounded border flex items-center justify-between ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
