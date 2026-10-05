@@ -895,6 +895,71 @@ async function startServer() {
     if (!item) return res.status(404).json({ success: false, message: 'Not found' });
     res.json({ success: true, data: item });
   });
+  app.post('/api/monitors', (req: Request, res: Response) => {
+    const input = req.body;
+    if (!input.name || !input.target) {
+      return res.status(400).json({ success: false, message: 'Name and target are required' });
+    }
+    const id = input.id || `mon-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const now = new Date().toISOString();
+    const initialLatency = Math.floor(35 + Math.random() * 50);
+
+    const newMonitor: Monitor = {
+      id,
+      name: input.name,
+      type: input.type || 'HTTPS',
+      target: input.target,
+      applicationId: input.applicationId || input.application_id || 'app-cipher',
+      environment: input.environment || 'PRD',
+      intervalSec: Number(input.intervalSec ?? input.interval_sec) || 15,
+      timeoutSec: Number(input.timeoutSec ?? input.timeout_sec) || 5,
+      retries: Number(input.retries) || 3,
+      warningThresholdMs: Number(input.warningThresholdMs ?? input.warning_threshold_ms) || 250,
+      criticalThresholdMs: Number(input.criticalThresholdMs ?? input.critical_threshold_ms) || 800,
+      failureConfirmationThreshold: Number(input.failureConfirmationThreshold ?? input.failure_confirmation_threshold) || 3,
+      recoveryConfirmationThreshold: Number(input.recoveryConfirmationThreshold ?? input.recovery_confirmation_threshold) || 3,
+      consecutiveFailures: 0,
+      consecutiveRecoveries: 1,
+      status: 'HEALTHY',
+      lastCheck: now,
+      lastSuccess: now,
+      responseTimeMs: initialLatency,
+      uptimePercent: 100.0,
+      enabled: input.enabled !== undefined ? input.enabled : true,
+      activeMaintenance: false,
+      runbookId: input.runbookId,
+      history: [
+        {
+          timestamp: now,
+          status: 'HEALTHY',
+          responseTimeMs: initialLatency,
+          statusCode: 200,
+          detail: 'Initial synthetic check verified nominal'
+        }
+      ]
+    };
+
+    monitors = [newMonitor, ...monitors];
+    addAudit('MONITOR_CREATED', 'MONITOR', id, `Registered probe ${newMonitor.name} [${newMonitor.type}] targeting ${newMonitor.target}`);
+    broadcastSse('monitor_created', newMonitor);
+
+    res.status(201).json({ success: true, data: newMonitor });
+  });
+  app.patch('/api/monitors/:id', (req: Request, res: Response) => {
+    const item = monitors.find(m => m.id === req.params.id);
+    if (!item) return res.status(404).json({ success: false, message: 'Not found' });
+    Object.assign(item, req.body);
+    broadcastSse('monitor_updated', item);
+    res.json({ success: true, data: item });
+  });
+  app.delete('/api/monitors/:id', (req: Request, res: Response) => {
+    const mon = monitors.find(m => m.id === req.params.id);
+    if (!mon) return res.status(404).json({ success: false, message: 'Not found' });
+    monitors = monitors.filter(m => m.id !== req.params.id);
+    addAudit('MONITOR_DELETED', 'MONITOR', req.params.id, `Removed monitor probe: ${mon.name} (${mon.target})`);
+    broadcastSse('monitor_deleted', { id: req.params.id });
+    res.json({ success: true, message: 'Monitor probe deleted successfully' });
+  });
   app.post('/api/monitors/:id/probe', (req: Request, res: Response) => {
     const mon = monitors.find(m => m.id === req.params.id);
     if (!mon) return res.status(404).json({ success: false, message: 'Not found' });

@@ -15,10 +15,16 @@ import {
   ExternalLink,
   ShieldCheck,
   BarChart3,
-  List
+  List,
+  X,
+  ChevronDown,
+  Loader2
 } from 'lucide-react';
 import { HeartbeatPulseChart } from '../visuals/HeartbeatPulseChart';
 import { EndpointMetricsVisualizer } from './EndpointMetricsVisualizer';
+import { MonitorsService } from '../../services/monitors';
+import { ApiError } from '../../services/api';
+import { RbacGuard } from '../ui/RbacGuard';
 
 // ── Monitor type options ──────────────────────────────────────────────────────
 const MONITOR_TYPES = [
@@ -89,8 +95,10 @@ const AddMonitorForm: React.FC<AddMonitorFormProps> = ({ onClose, onCreated, isD
         onCreated();
         onClose();
       }, 800);
-    } catch (err) {
+    } catch (err: unknown) {
       if (err instanceof ApiError) {
+        setError(err.message);
+      } else if (err instanceof Error) {
         setError(err.message);
       } else {
         setError('Failed to create monitor. Check your credentials and try again.');
@@ -327,11 +335,16 @@ export const MonitorsView: React.FC = () => {
   } = useOps();
   const isDark = theme === 'dark';
 
+  const [showAddForm, setShowAddForm] = useState(false);
   const [filterType, setFilterType] = useState<string>('ALL');
   const [search, setSearch] = useState('');
   const [probingId, setProbingId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'visualizer' | 'table'>('visualizer');
+
+  const refreshData = () => {
+    runAllProbes();
+  };
 
   const handleManualCheck = async (id: string) => {
     setProbingId(id);
