@@ -47,7 +47,122 @@ export interface SyntheticProbeResult {
   testedAt: string;
 }
 
+export interface SafeUser {
+  id: string;
+  email: string;
+  fullName: string;
+  displayName?: string;
+  roleName: 'viewer' | 'operator' | 'it_administrator' | 'super_admin' | string;
+  isActive: boolean;
+  isOnCall: boolean;
+}
+
+export interface ApiResponse<T> {
+  success: boolean;
+  data: T;
+  message?: string;
+}
+
+export interface PaginatedApiResponse<T> {
+  success: boolean;
+  data: T[];
+  pagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+  };
+}
+
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+  constructor(message: string, status = 500, code?: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+let logoutHandler: (() => void) | null = null;
+export function setLogoutHandler(handler: () => void) {
+  logoutHandler = handler;
+}
+
+export const tokenStore = {
+  getAccess(): string | null {
+    try {
+      return localStorage.getItem('scholario_access_token');
+    } catch {
+      return null;
+    }
+  },
+  getRefresh(): string | null {
+    try {
+      return localStorage.getItem('scholario_refresh_token');
+    } catch {
+      return null;
+    }
+  },
+  getUser(): SafeUser | null {
+    try {
+      const raw = localStorage.getItem('scholario_user');
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  },
+  setTokens(access: string, refresh: string, user: SafeUser) {
+    try {
+      localStorage.setItem('scholario_access_token', access);
+      localStorage.setItem('scholario_refresh_token', refresh);
+      localStorage.setItem('scholario_user', JSON.stringify(user));
+    } catch {}
+  },
+  clear() {
+    try {
+      localStorage.removeItem('scholario_access_token');
+      localStorage.removeItem('scholario_refresh_token');
+      localStorage.removeItem('scholario_user');
+    } catch {}
+  }
+};
+
 const API_BASE = '';
+
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = tokenStore.getAccess();
+  const headers = new Headers(options.headers || {});
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  if (!headers.has('Accept')) {
+    headers.set('Accept', 'application/json');
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+  });
+
+  if (!res.ok) {
+    let errBody: any = null;
+    try {
+      errBody = await res.json();
+    } catch {
+      const text = await res.text().catch(() => '');
+      throw new ApiError(text || `HTTP ${res.status}`, res.status);
+    }
+    const message = errBody?.message || errBody?.error || `HTTP ${res.status}`;
+    if (res.status === 401) {
+      logoutHandler?.();
+    }
+    throw new ApiError(message, res.status, errBody?.code);
+  }
+
+  return res.json() as Promise<T>;
+}
 
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -58,6 +173,38 @@ async function handleResponse<T>(res: Response): Promise<T> {
 }
 
 export const api = {
+  // ── Generic REST Client Methods ─────────────────────────────────────────────
+  get<T>(path: string, options?: RequestInit): Promise<T> {
+    return request<T>(path, { ...options, method: 'GET' });
+  },
+
+  post<T>(path: string, body?: unknown, options?: RequestInit): Promise<T> {
+    return request<T>(path, {
+      ...options,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options?.headers || {})
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined
+    });
+  },
+
+  patch<T>(path: string, body?: unknown, options?: RequestInit): Promise<T> {
+    return request<T>(path, {
+      ...options,
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options?.headers || {})
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined
+    });
+  },
+
+  delete<T>(path: string, options?: RequestInit): Promise<T> {
+    return request<T>(path, { ...options, method: 'DELETE' });
+  },
   // ── Health Check (no auth required) ─────────────────────────────────────────
   async checkHealth(): Promise<HealthCheckResponse> {
     const res = await fetch(`${API_BASE}/health`, {

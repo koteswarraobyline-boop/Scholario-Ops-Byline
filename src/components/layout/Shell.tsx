@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
+import { useWebSocket } from '../../hooks/useWebSocket';
 import { WsStatusBadge } from '../ui/WsStatusBadge';
 import { 
   Activity, 
@@ -66,11 +67,15 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     triggerSimulatedScenario,
     runAllProbes,
     apiHealth,
+    triggerHealthCheck,
     theme,
     toggleTheme,
-    wsStatus,
-    refreshData,
   } = useOps();
+
+  const { status: wsStatus } = useWebSocket();
+  const refreshData = () => {
+    triggerHealthCheck();
+  };
 
   const { user, logout } = useAuth();
   const navigate = useNavigate();

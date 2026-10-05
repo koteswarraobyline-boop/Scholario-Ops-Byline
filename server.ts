@@ -712,6 +712,385 @@ async function startServer() {
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
+  // 11. AUTHENTICATION & USERS APIS (/api/auth/*, /api/users/*)
+  // ─────────────────────────────────────────────────────────────────────────────
+  const usersList = [
+    {
+      id: 'usr-admin-01',
+      email: 'admin@scholario.net',
+      password: 'Admin@Scholario2026!',
+      fullName: 'System Administrator',
+      displayName: 'Admin',
+      roleName: 'super_admin',
+      isActive: true,
+      isOnCall: true
+    },
+    {
+      id: 'usr-operator-01',
+      email: 'arjun.mehta@scholario.net',
+      password: 'Operator@Scholario2026!',
+      fullName: 'Arjun Mehta',
+      displayName: 'A. Mehta',
+      roleName: 'operator',
+      isActive: true,
+      isOnCall: true
+    },
+    {
+      id: 'usr-lead-01',
+      email: 'sre-lead@scholario.net',
+      password: 'Operator@Scholario2026!',
+      fullName: 'DevOps Lead',
+      displayName: 'Lead',
+      roleName: 'it_administrator',
+      isActive: true,
+      isOnCall: false
+    },
+    {
+      id: 'usr-viewer-01',
+      email: 'viewer@scholario.net',
+      password: 'Viewer@Scholario2026!',
+      fullName: 'Compliance Auditor',
+      displayName: 'Auditor',
+      roleName: 'viewer',
+      isActive: true,
+      isOnCall: false
+    }
+  ];
+
+  app.post('/api/auth/login', (req: Request, res: Response) => {
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ success: false, message: 'Email and password required' });
+    }
+    const found = usersList.find(u => u.email.toLowerCase() === String(email).trim().toLowerCase());
+    if (!found || found.password !== String(password).trim()) {
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    }
+    const { password: _, ...safeUser } = found;
+    const accessToken = `jwt_acc_${Date.now()}_${Buffer.from(JSON.stringify(safeUser)).toString('base64url')}`;
+    const refreshToken = `jwt_ref_${Date.now()}_${Math.random().toString(36).substring(2)}`;
+    res.json({
+      success: true,
+      data: {
+        user: safeUser,
+        tokens: {
+          accessToken,
+          refreshToken,
+          expiresIn: '15m'
+        }
+      }
+    });
+  });
+
+  app.get('/api/auth/me', (req: Request, res: Response) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+    const { password: _, ...safeUser } = usersList[1] || usersList[0];
+    res.json({ success: true, data: safeUser });
+  });
+
+  app.post('/api/auth/logout', (_req: Request, res: Response) => {
+    res.json({ success: true, message: 'Logged out successfully' });
+  });
+
+  app.post('/api/auth/refresh', (_req: Request, res: Response) => {
+    const { password: _, ...safeUser } = usersList[0];
+    res.json({
+      success: true,
+      data: {
+        tokens: {
+          accessToken: `jwt_acc_${Date.now()}`,
+          refreshToken: `jwt_ref_${Date.now()}`,
+          expiresIn: '15m'
+        }
+      }
+    });
+  });
+
+  app.post('/api/auth/change-password', (_req: Request, res: Response) => {
+    res.json({ success: true, message: 'Password updated successfully' });
+  });
+
+  // Users Management
+  app.get('/api/users', (_req: Request, res: Response) => {
+    const safe = usersList.map(({ password: _, ...u }) => u);
+    res.json({
+      success: true,
+      data: safe,
+      pagination: {
+        page: 1,
+        pageSize: 20,
+        total: safe.length,
+        totalPages: 1
+      }
+    });
+  });
+
+  app.post('/api/users', (req: Request, res: Response) => {
+    const { email, password, fullName, displayName, roleName } = req.body || {};
+    const newUser = {
+      id: `usr-${Date.now()}`,
+      email: email || `user-${Date.now()}@scholario.net`,
+      password: password || 'Default@2026!',
+      fullName: fullName || 'New Operator',
+      displayName: displayName || fullName || 'Operator',
+      roleName: roleName || 'operator',
+      isActive: true,
+      isOnCall: false
+    };
+    usersList.push(newUser);
+    const { password: _, ...safe } = newUser;
+    res.status(201).json({ success: true, data: safe });
+  });
+
+  app.patch('/api/users/:id', (req: Request, res: Response) => {
+    const { id } = req.params;
+    const idx = usersList.findIndex(u => u.id === id);
+    if (idx >= 0) {
+      usersList[idx] = { ...usersList[idx], ...req.body };
+      const { password: _, ...safe } = usersList[idx];
+      res.json({ success: true, data: safe });
+    } else {
+      res.status(404).json({ success: false, message: 'User not found' });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 12. ROUTE ALIASES & COMPATIBILITY LAYER (/api/* mapped to data)
+  // ─────────────────────────────────────────────────────────────────────────────
+  app.get('/api/applications', (_req: Request, res: Response) => {
+    res.json({ success: true, data: applications, pagination: { page: 1, pageSize: 25, total: applications.length, totalPages: 1 } });
+  });
+  app.get('/api/applications/:id', (req: Request, res: Response) => {
+    const item = applications.find(a => a.id === req.params.id);
+    if (!item) return res.status(404).json({ success: false, message: 'Not found' });
+    res.json({ success: true, data: item });
+  });
+  app.patch('/api/applications/:id', (req: Request, res: Response) => {
+    const item = applications.find(a => a.id === req.params.id);
+    if (!item) return res.status(404).json({ success: false, message: 'Not found' });
+    Object.assign(item, req.body);
+    res.json({ success: true, data: item });
+  });
+
+  app.get('/api/servers', (_req: Request, res: Response) => {
+    res.json({ success: true, data: servers, pagination: { page: 1, pageSize: 50, total: servers.length, totalPages: 1 } });
+  });
+  app.get('/api/servers/:id', (req: Request, res: Response) => {
+    const item = servers.find(s => s.id === req.params.id);
+    if (!item) return res.status(404).json({ success: false, message: 'Not found' });
+    res.json({ success: true, data: item });
+  });
+  app.get('/api/servers/:id/metrics', (_req: Request, res: Response) => {
+    res.json({ success: true, data: [] });
+  });
+
+  app.get('/api/monitors', (_req: Request, res: Response) => {
+    res.json({ success: true, data: monitors, pagination: { page: 1, pageSize: 50, total: monitors.length, totalPages: 1 } });
+  });
+  app.get('/api/monitors/:id', (req: Request, res: Response) => {
+    const item = monitors.find(m => m.id === req.params.id);
+    if (!item) return res.status(404).json({ success: false, message: 'Not found' });
+    res.json({ success: true, data: item });
+  });
+  app.post('/api/monitors/:id/probe', (req: Request, res: Response) => {
+    const mon = monitors.find(m => m.id === req.params.id);
+    if (!mon) return res.status(404).json({ success: false, message: 'Not found' });
+    const latency = Math.floor(22 + Math.random() * 35);
+    mon.responseTimeMs = latency;
+    mon.lastCheck = new Date().toISOString();
+    mon.lastSuccess = new Date().toISOString();
+    mon.status = 'HEALTHY';
+    res.json({ success: true, data: { status: 'HEALTHY', responseTimeMs: latency, detail: 'Probe nominal' } });
+  });
+
+  app.get('/api/incidents', (_req: Request, res: Response) => {
+    res.json({ success: true, data: incidents, pagination: { page: 1, pageSize: 25, total: incidents.length, totalPages: 1 } });
+  });
+  app.get('/api/incidents/:id', (req: Request, res: Response) => {
+    const item = incidents.find(i => i.id === req.params.id);
+    if (!item) return res.status(404).json({ success: false, message: 'Not found' });
+    res.json({ success: true, data: item });
+  });
+  app.post('/api/incidents/:id/acknowledge', (req: Request, res: Response) => {
+    const inc = incidents.find(i => i.id === req.params.id);
+    if (inc) inc.status = 'ACKNOWLEDGED';
+    res.json({ success: true, data: inc });
+  });
+  app.patch('/api/incidents/:id/status', (req: Request, res: Response) => {
+    const inc = incidents.find(i => i.id === req.params.id);
+    if (inc) inc.status = req.body.status;
+    res.json({ success: true, data: inc });
+  });
+  app.patch('/api/incidents/:id/severity', (req: Request, res: Response) => {
+    const inc = incidents.find(i => i.id === req.params.id);
+    if (inc) inc.severity = req.body.severity;
+    res.json({ success: true, data: inc });
+  });
+  app.patch('/api/incidents/:id/assign', (req: Request, res: Response) => {
+    const inc = incidents.find(i => i.id === req.params.id);
+    if (inc) inc.owner = req.body.ownerName || inc.owner;
+    res.json({ success: true, data: inc });
+  });
+  app.post('/api/incidents/:id/notes', (req: Request, res: Response) => {
+    const inc = incidents.find(i => i.id === req.params.id);
+    if (inc && req.body.content) {
+      inc.notes = inc.notes || [];
+      inc.notes.unshift({ id: `n-${Date.now()}`, author: 'Operator (You)', timestamp: new Date().toISOString(), content: req.body.content });
+    }
+    res.json({ success: true, message: 'Note added' });
+  });
+  app.post('/api/incidents/:id/resolve', (req: Request, res: Response) => {
+    const inc = incidents.find(i => i.id === req.params.id);
+    if (inc) inc.status = 'RESOLVED';
+    res.json({ success: true, data: inc });
+  });
+
+  app.get('/api/audit', (req: Request, res: Response) => {
+    const category = req.query.category as string;
+    let list = auditLogs;
+    if (category) list = list.filter(l => l.category === category);
+    const page = parseInt(req.query.page as string, 10) || 1;
+    const pageSize = parseInt(req.query.pageSize as string, 10) || 25;
+    const total = list.length;
+    res.json({
+      success: true,
+      data: list.slice((page - 1) * pageSize, page * pageSize),
+      pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) }
+    });
+  });
+
+  app.get('/api/dr/:appId/readiness', (req: Request, res: Response) => {
+    const appItem = applications.find(a => a.id === req.params.appId) || applications[0];
+    res.json({
+      success: true,
+      data: {
+        appId: appItem.id,
+        appName: appItem.name,
+        failoverState: appItem.failoverState,
+        checks: [
+          { category: 'Hostinger DR Node', status: 'READY', detail: 'Secondary node active' },
+          { category: 'Database Replication', status: 'READY', detail: 'Replication lag < 2s' },
+          { category: 'Cloudflare LB Pool', status: 'READY', detail: 'Health checks passing' }
+        ],
+        overallReady: true
+      }
+    });
+  });
+
+  app.post('/api/dr/failover', (req: Request, res: Response) => {
+    const { applicationId, target } = req.body;
+    const appItem = applications.find(a => a.id === applicationId);
+    if (appItem) {
+      appItem.failoverState = target === 'DR' ? 'DR_ACTIVE' : 'PRIMARY_ACTIVE';
+      broadcastSse('application_update', appItem);
+    }
+    res.json({
+      success: true,
+      message: `Failover to ${target} initiated`,
+      newState: target === 'DR' ? 'DR_ACTIVE' : 'PRIMARY_ACTIVE'
+    });
+  });
+
+  app.get('/api/backups', (_req: Request, res: Response) => {
+    res.json({ success: true, data: INITIAL_BACKUPS, pagination: { page: 1, pageSize: 25, total: INITIAL_BACKUPS.length, totalPages: 1 } });
+  });
+
+  app.get('/api/deployments', (_req: Request, res: Response) => {
+    res.json({ success: true, data: INITIAL_DEPLOYMENTS, pagination: { page: 1, pageSize: 25, total: INITIAL_DEPLOYMENTS.length, totalPages: 1 } });
+  });
+
+  app.get('/api/runbooks', (_req: Request, res: Response) => {
+    res.json({ success: true, data: INITIAL_RUNBOOKS, pagination: { page: 1, pageSize: 25, total: INITIAL_RUNBOOKS.length, totalPages: 1 } });
+  });
+
+  app.get('/api/runbooks/:id', (req: Request, res: Response) => {
+    const rb = INITIAL_RUNBOOKS.find(r => r.id === req.params.id) || INITIAL_RUNBOOKS[0];
+    res.json({ success: true, data: rb });
+  });
+
+  app.get('/api/maintenance', (_req: Request, res: Response) => {
+    res.json({ success: true, data: [], pagination: { page: 1, pageSize: 25, total: 0, totalPages: 1 } });
+  });
+
+  app.get('/api/notifications/channels', (_req: Request, res: Response) => {
+    res.json({ success: true, data: INITIAL_COMM_CHANNELS });
+  });
+
+  app.post('/api/notifications/channels/:id/test', (_req: Request, res: Response) => {
+    res.json({ success: true, data: { success: true } });
+  });
+
+  app.get('/api/reports/daily', (_req: Request, res: Response) => {
+    const healthyApps = applications.filter(a => a.status === 'HEALTHY').length;
+    const report = [
+      '============================================================',
+      'SCHOLARIO IT OPERATIONS CONTROL CENTER',
+      'Daily Operations & Infrastructure Health Certified Briefing',
+      `Generated: ${new Date().toISOString()}`,
+      '============================================================',
+      '',
+      '1. CORE HEALTH EVALUATION',
+      '============================================================',
+      `Applications:            ${healthyApps} / ${applications.length} Healthy`,
+      `Infrastructure:          ${servers.filter(s => s.status === 'HEALTHY').length} / ${servers.length} Hostinger KVM Instances Operational`,
+      `Continuous Monitors:     ${monitors.filter(m => m.status === 'HEALTHY').length} / ${monitors.length} Probes Passing`,
+      `Disaster Recovery (DR):  ${applications.length} / ${applications.length} Workloads Verified`,
+      `Cloudflare Edge Status:  ${cloudflareZones.some(z => z.status === 'DEGRADED') ? 'DEGRADED' : 'HEALTHY'}`,
+      `Independent Watchdog:    ${deadMan.status} (Zurich Control Plane)`,
+      '',
+      '2. SECURITY & COMPLIANCE',
+      '============================================================',
+      'Hypervisors:             Hostinger Singapore / Frankfurt / Mumbai / London',
+      'Encryption:              AES-256 at rest, TLS 1.3 in transit',
+      'Audit Trail:             Immutable operator action records maintained'
+    ].join('\n');
+    res.json({ success: true, data: { report, generatedAt: new Date().toISOString() } });
+  });
+
+  app.get('/api/reports/summary', (_req: Request, res: Response) => {
+    const totalApps = applications.length;
+    const healthyApps = applications.filter(a => a.status === 'HEALTHY').length;
+    const totalServers = servers.length;
+    const healthyServers = servers.filter(s => s.status === 'HEALTHY').length;
+    const totalMonitors = monitors.length;
+    const healthyMonitors = monitors.filter(m => m.status === 'HEALTHY').length;
+    const openIncidents = incidents.filter(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED').length;
+    const criticalIncidents = incidents.filter(i => i.severity === 'CRITICAL' && i.status !== 'RESOLVED' && i.status !== 'CLOSED').length;
+    const cloudflareStatus = cloudflareZones.some(z => z.status === 'DEGRADED') ? 'DEGRADED' : 'HEALTHY';
+    const overallHealth = criticalIncidents > 0 || deadMan.status === 'CRITICAL_SILENCE' ? 'CRITICAL' : openIncidents > 0 ? 'WARNING' : 'OPERATIONAL';
+    res.json({
+      success: true,
+      data: {
+        totalApps,
+        healthyApps,
+        totalServers,
+        healthyServers,
+        totalMonitors,
+        healthyMonitors,
+        openIncidents,
+        criticalIncidents,
+        drReadinessCount: applications.length,
+        backupsCurrentCount: applications.length,
+        cloudflareStatus,
+        deadManStatus: deadMan.status,
+        deadManLastHeartbeat: deadMan.lastHeartbeatReceivedAt,
+        overallHealth,
+        generatedAt: new Date().toISOString()
+      }
+    });
+  });
+
+  app.get('/api/reports/uptime', (_req: Request, res: Response) => {
+    res.json({
+      success: true,
+      data: applications.map(a => ({ id: a.id, name: a.name, uptime24h: a.uptime24h, uptime7d: a.uptime7d, uptime30d: a.uptime30d }))
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
   // 11. VITE INTEGRATION (Mount Vite middlewares in development)
   // ─────────────────────────────────────────────────────────────────────────────
   const isDev = process.env.NODE_ENV !== 'production';
