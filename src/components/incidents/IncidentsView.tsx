@@ -352,6 +352,39 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
                 )}
               </div>
 
+              {incident.context && (() => {
+                const c = incident.context;
+                const cfc = c.cloudflare;
+                const tri = (v: boolean | null | undefined, y: string, n: string) => (v === true ? y : v === false ? n : 'Unknown');
+                const rows: Array<[string, React.ReactNode]> = [
+                  ['Application', `${c.application} · ${c.environment}`],
+                  ['VPS / IP', `${c.vps ?? '—'} · ${c.ip ?? '—'}`],
+                  ['Monitor', `${c.monitor ?? '—'}${c.target ? ` (${c.target})` : ''}`],
+                  ['First detected', fmtDateTime(c.firstDetectedAt)],
+                  ['Latest detected', fmtDateTime(c.latestDetectedAt)],
+                  ['Failure reason', c.failureReason],
+                  ['Probe result', c.probeStatus ?? '—'],
+                  ['Response code', c.responseCode ?? 'No response'],
+                  ['Latency', c.latencyMs === null ? '—' : `${c.latencyMs} ms`],
+                  ['Cloudflare pool', cfc ? `${cfc.poolName} · enabled ${tri(cfc.poolEnabled, 'yes', 'no')} · ${tri(cfc.poolHealthy, 'healthy', 'unhealthy')}` : 'Not load-balanced'],
+                  ['Cloudflare origin', cfc ? `${cfc.originAddress ?? '—'} · ${tri(cfc.originHealthy, 'healthy', 'unhealthy')}${cfc.originFailureReason ? ` · ${cfc.originFailureReason}` : ''}${cfc.checkedAt ? ` (read ${fmtDateTime(cfc.checkedAt)})` : ''}` : '—'],
+                  ['Recovered', c.recoveredAt ? `${fmtDateTime(c.recoveredAt)} · duration ${c.durationMinutes ?? 0} min` : 'Not yet'],
+                ];
+                return (
+                  <div className={panelCls}>
+                    <div className={`text-xs font-bold uppercase ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Monitoring facts</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
+                      {rows.map(([k, v]) => (
+                        <div key={k} className="flex gap-2">
+                          <span className={`shrink-0 w-32 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{k}</span>
+                          <span className={`break-words ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{v}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
               <div className={panelCls}>
                 <div className={`text-xs font-bold uppercase ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Mitigation</div>
                 <p className={`font-sans text-xs ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>

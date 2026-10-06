@@ -137,14 +137,14 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       title: 'Resilience',
       items: [
         { id: 'resilience', label: 'PRD / DR Readiness', icon: Cloud, badge: `${systemSummary.drReadinessCount}/${systemSummary.totalApps}` },
-        { id: 'backups', label: 'Backups', icon: Database, badge: `${systemSummary.backupsCurrentCount}/${systemSummary.totalApps}` }
+        { id: 'backups', label: 'Backups', icon: Database, badge: systemSummary.backupsCurrentCount > 0 ? `${systemSummary.backupsCurrentCount}` : undefined }
       ]
     },
     {
       title: 'Providers',
       items: [
         { id: 'hostinger', label: 'Hostinger VPS', icon: Server },
-        { id: 'cloudflare', label: 'Cloudflare Edge', icon: ShieldCheck, badge: !integrations?.cloudflare.configured ? 'Off' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'Degraded' : 'Active', badgeColor: !integrations?.cloudflare.configured ? 'text-slate-500' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'text-amber-400' : 'text-emerald-400' }
+        { id: 'cloudflare', label: 'Cloudflare Edge', icon: ShieldCheck, badge: !integrations?.cloudflare.configured ? 'Off' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'Degraded' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'Active' : 'Unknown', badgeColor: !integrations?.cloudflare.configured ? 'text-slate-500' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'text-amber-400' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'text-emerald-400' : 'text-slate-400' }
       ]
     },
     {
@@ -383,24 +383,29 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
             {/* Health Status Indicator */}
             <button
               onClick={() => navigate('/incidents')}
+              title={systemSummary.visibilityGaps.length ? `Partial data: ${systemSummary.visibilityGaps.join(' · ')}` : undefined}
               className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded text-xs font-mono transition-colors border cursor-pointer ${
                 systemSummary.overallHealth === 'CRITICAL'
                   ? (isDark ? 'border-rose-900/80 bg-rose-950/40 text-rose-300' : 'border-rose-300 bg-rose-50 text-rose-800')
                   : systemSummary.overallHealth === 'WARNING'
                     ? (isDark ? 'border-amber-900/80 bg-amber-950/40 text-amber-300' : 'border-amber-300 bg-amber-50 text-amber-800')
-                    : (isDark ? 'border-emerald-900/80 bg-emerald-950/40 text-emerald-300' : 'border-emerald-300 bg-emerald-50 text-emerald-800')
+                    : systemSummary.overallHealth === 'UNKNOWN'
+                      ? (isDark ? 'border-slate-700 bg-slate-900/40 text-slate-300' : 'border-slate-300 bg-slate-50 text-slate-700')
+                      : (isDark ? 'border-emerald-900/80 bg-emerald-950/40 text-emerald-300' : 'border-emerald-300 bg-emerald-50 text-emerald-800')
               }`}
             >
               <span className={`w-1.5 h-1.5 rounded-full ${
                 systemSummary.overallHealth === 'CRITICAL' ? 'bg-rose-500 animate-pulse' :
-                systemSummary.overallHealth === 'WARNING' ? 'bg-amber-500' : 'bg-emerald-500'
+                systemSummary.overallHealth === 'WARNING' ? 'bg-amber-500' : systemSummary.overallHealth === 'UNKNOWN' ? 'bg-slate-500' : 'bg-emerald-500'
               }`} />
               <span className="text-[11px] font-semibold">
                 {systemSummary.criticalIncidents > 0 
                   ? `${systemSummary.criticalIncidents} CRITICAL INCIDENT` 
                   : systemSummary.openIncidents > 0 
                     ? `${systemSummary.openIncidents} INCIDENT OPEN`
-                    : 'ALL SYSTEMS OPERATIONAL'}
+                    : systemSummary.overallHealth === 'OPERATIONAL'
+                      ? (systemSummary.visibilityGaps.length ? 'OPERATIONAL · PARTIAL DATA' : 'ALL SYSTEMS OPERATIONAL')
+                      : systemSummary.overallHealth === 'WARNING' ? 'DEGRADED' : systemSummary.overallHealth === 'CRITICAL' ? 'CRITICAL' : 'STATUS UNKNOWN'}
               </span>
             </button>
 
@@ -478,7 +483,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                 {activeCriticalIncident.title}
               </span>
               <span className={`text-[10px] hidden md:inline ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
-                Opened {activeCriticalIncident.durationMinutes}m ago · Owner: {activeCriticalIncident.owner.split('(')[0]}
+                Opened {activeCriticalIncident.durationMinutes}m ago · Owner: {(activeCriticalIncident.owner ?? 'Unassigned').split('(')[0]}
               </span>
             </div>
             <button

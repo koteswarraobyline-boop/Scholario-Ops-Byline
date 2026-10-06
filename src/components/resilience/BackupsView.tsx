@@ -1,6 +1,8 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useOps } from '../../context/OpsContext';
-import { BackupRecord } from '../../types';
+import { BackupRecord, BackupStatus } from '../../types';
+import { api } from '../../services/api';
+import { Ago, verdictColor } from '../ui/Freshness';
 import { Archive } from 'lucide-react';
 
 const validDate = (s?: string | null) => Boolean(s) && !Number.isNaN(Date.parse(s as string));
@@ -24,6 +26,38 @@ curl -fsS -X POST "${baseUrl}/api/v1/backups/report" \\
   -H "Authorization: Bearer $AGENT_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{"type":"MYSQL_DUMP","status":"SUCCESS","sizeGb":1.4,"destination":"s3://bucket/db/","application":"${exampleApp}","integrityHash":"'"$(sha256sum dump.sql.gz | cut -d' ' -f1)"'","encrypted":true,"retentionDays":30}'`;
+
+  // Per-application status evaluated by the server against the configured age threshold
+  const [statuses, setStatuses] = useState<BackupStatus[] | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api.getBackupStatus().then(r => { if (alive) { setStatuses(r); setStatusError(null); } }).catch(e => { if (alive) setStatusError((e as Error).message); });
+    return () => { alive = false; };
+  }, [backups, applications]);
+
+  const statusPanel = (
+    <div className={`rounded-lg border p-4 space-y-2 font-mono text-xs ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
+      <div className="font-bold uppercase tracking-wider text-[11px]">Backup status per application</div>
+      {statusError ? <div className="text-rose-500">Could not load backup status: {statusError}</div>
+        : !statuses ? <div className={`${muted} animate-pulse`}>Evaluating…</div>
+          : statuses.length === 0 ? <div className={muted}>No applications registered.</div>
+            : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {statuses.map(st => (
+                  <div key={st.applicationId} className={`p-2.5 rounded border ${isDark ? 'bg-[#0B0F17] border-[#1A2436]' : 'bg-slate-50 border-slate-200'}`}>
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold">{st.applicationName}</span>
+                      <span className={`font-bold ${verdictColor(st.status)}`}>{st.status}</span>
+                    </div>
+                    <div className={`text-[11px] font-sans ${muted}`}>{st.detail}</div>
+                    <div className={`text-[10px] ${muted}`}>Threshold {st.thresholdHours} h · last backup <Ago iso={st.lastBackupAt} missing="never" /></div>
+                  </div>
+                ))}
+              </div>
+            )}
+    </div>
+  );
 
   const now = Date.now();
   const succeeded = backups.filter(b => b.status === 'SUCCESS');
@@ -70,6 +104,8 @@ curl -fsS -X POST "${baseUrl}/api/v1/backups/report" \\
         </div>
       </div>
 
+      {statusPanel}
+
       {backups.length === 0 ? (
         <>
           <div className={`flex flex-col items-center justify-center py-10 px-6 text-center rounded-lg border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200'}`}>
@@ -88,7 +124,7 @@ curl -fsS -X POST "${baseUrl}/api/v1/backups/report" \\
           {/* Summary Stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono text-xs">
             <div className={card}>
-              <div className={`text-[10px] uppercase ${muted}`}>Fresh (&lt; 26h)</div>
+              <div className={`text-[10px] uppercase ${muted}`}>Fresh (&lt; {statuses?.[0]?.thresholdHours ?? FRESH_MS / 3600000}h)</div>
               <div className="text-base font-bold tabular-nums">{fresh.length} successful</div>
               <div className={`text-[10px] font-sans mt-0.5 ${appsWithoutFresh.length ? 'text-amber-500' : 'text-emerald-500'}`}>
                 {applications.length === 0 ? 'No applications registered'

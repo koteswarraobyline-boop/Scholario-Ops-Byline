@@ -424,6 +424,11 @@ export const EndpointMetricsVisualizer: React.FC = () => {
                     <span className={`text-[10px] font-mono font-semibold ${!mon.enabled ? 'text-slate-500' : mon.status === 'HEALTHY' ? 'text-emerald-400' : isFailing ? 'text-rose-400' : isDegraded ? 'text-amber-400' : 'text-slate-400'}`}>
                       {!mon.enabled ? 'PAUSED' : mon.status}
                     </span>
+                    {mon.enabled && mon.lastProbeStatus && (
+                      <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${mon.lastProbeStatus === 'UP' ? 'text-emerald-400 border-emerald-800/60' : mon.lastProbeStatus === 'DEGRADED' ? 'text-amber-400 border-amber-800/60' : 'text-rose-400 border-rose-800/60'}`}>
+                        {mon.lastProbeStatus}{mon.lastStatusCode ? ` · HTTP ${mon.lastStatusCode}` : ''}
+                      </span>
+                    )}
                     {app && (
                       <span className="text-[10px] font-mono text-blue-400 font-semibold">
                         [{app.name} · {mon.environment}]

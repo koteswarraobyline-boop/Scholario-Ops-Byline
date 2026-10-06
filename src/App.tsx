@@ -79,7 +79,7 @@ const DashboardView: React.FC<{ tab: string }> = ({ tab }) => {
 // ── App root ─────────────────────────────────────────────────────────────────
 export default function App() {
   return (
-    <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+    <BrowserRouter>
       <AuthProvider>
         <Routes>
           {/* Public */}

@@ -372,6 +372,7 @@ export const MonitorsView: React.FC = () => {
                           <div className="flex items-center gap-2">
                             <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${m.enabled ? statusDot(m.status) : 'bg-slate-500'}`} />
                             <span className="font-semibold truncate max-w-[180px]" title={m.name}>{m.name}</span>
+                            {m.managedBy && <span className="text-[9px] px-1 rounded border border-blue-500/40 text-blue-400" title="Created from the application PRD/DR URL — edit the URL in Setup → Applications">app URL</span>}
                           </div>
                           {!(isPush && (m.target === 'push' || !m.target)) && (
                             <div className={`text-[10px] font-mono mt-0.5 truncate max-w-[220px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`} title={m.target}>
@@ -427,6 +428,11 @@ export const MonitorsView: React.FC = () => {
 
                         <td className={`py-2.5 px-3.5 tabular-nums text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                           {lastCheckStr}
+                          {m.lastProbeStatus && (
+                            <div className={m.lastProbeStatus === 'UP' ? 'text-emerald-500' : m.lastProbeStatus === 'DEGRADED' ? 'text-amber-500' : 'text-rose-500'}>
+                              {m.lastProbeStatus}{m.lastStatusCode ? ` · ${m.lastStatusCode}` : ''}
+                            </div>
+                          )}
                         </td>
 
                         <td className="py-2.5 px-3.5 tabular-nums">

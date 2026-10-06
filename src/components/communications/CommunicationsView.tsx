@@ -235,6 +235,13 @@ export const CommunicationsView: React.FC = () => {
             OPS API: {hasChecked ? `${apiHealth.status} (${apiHealth.latencyMs}ms)` : 'CHECKING…'}
           </span>
         </div>
+        <div className={`flex items-center gap-2 px-2.5 py-1 rounded text-xs font-mono border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200'}`}
+          title="Alerts (application down/recovered, database, backup, DR readiness, Cloudflare origin, agent offline, SSL expiry) are sent to enabled channels, deduplicated with a cooldown">
+          <span className={`w-2 h-2 rounded-full ${integrations?.notifications.status === 'CONFIGURED' ? 'bg-emerald-500' : 'bg-slate-500'}`} />
+          <span className={integrations?.notifications.status === 'CONFIGURED' ? 'text-emerald-500' : 'text-slate-400'}>
+            NOTIFICATIONS: {integrations?.notifications.status === 'CONFIGURED' ? `${integrations.notifications.enabledChannels} channel(s)` : 'NOT CONFIGURED'}
+          </span>
+        </div>
       </div>
 
       {isOutage && (

@@ -16,7 +16,7 @@ import {
   Loader2,
 } from 'lucide-react';
 
-// ── Monitor type groups (mirror backend/engine.ts) ────────────────────────────
+// ── Monitor type groups (mirror server/engine.ts) ────────────────────────────
 export const HTTP_MONITOR_TYPES: MonitorType[] = ['HTTP', 'HTTPS', 'APP_HEALTH', 'APP_READINESS', 'API_BUSINESS'];
 export const TCP_MONITOR_TYPES: MonitorType[] = ['TCP', 'DB_CONN'];
 export const INFRA_MONITOR_TYPES: MonitorType[] = ['INFRA_CPU', 'INFRA_RAM', 'INFRA_DISK'];

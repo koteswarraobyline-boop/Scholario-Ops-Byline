@@ -2,6 +2,7 @@ import {
   Application, VpsServer, Monitor, Incident, CloudflareZone, AuditLog, DeadManControlPlane,
   CommunicationChannel, EscalationPolicy, MaintenanceWindow, Runbook, Deployment, BackupRecord,
   IntegrationStatus, HttpProbeResult, TcpProbeResult, ServerMetricPoint, DrReadinessItem, OpsUser,
+  LoadBalancerState, FailoverPreflight, DrOverall, CheckRecord, BackupStatus, DatabaseHealth, DatabaseReport, HostingerInfo,
 } from '../types';
 
 export interface HealthCheckResponse {
@@ -19,6 +20,7 @@ export interface HealthCheckResponse {
     edge_ingress: string;
     deadman_watchdog: string;
     cloudflare_sync: string;
+    cloudflare_load_balancing?: string;
     vps_telemetry_stream: string;
     continuous_probes: string;
   };
@@ -51,9 +53,11 @@ export interface SystemSummary {
   totalMonitors: number; healthyMonitors: number;
   openIncidents: number; criticalIncidents: number;
   drReadinessCount: number; backupsCurrentCount: number;
-  cloudflareStatus: 'HEALTHY' | 'DEGRADED';
+  cloudflareStatus: 'HEALTHY' | 'DEGRADED' | 'NOT_CONFIGURED' | 'UNKNOWN';
   deadManStatus: string; deadManLastHeartbeat: string | null;
-  overallHealth: 'OPERATIONAL' | 'WARNING' | 'CRITICAL';
+  overallHealth: 'OPERATIONAL' | 'WARNING' | 'CRITICAL' | 'UNKNOWN';
+  /** Data sources not reporting — overall health is based on partial data when non-empty */
+  visibilityGaps?: string[];
   generatedAt: string;
 }
 
@@ -70,6 +74,7 @@ export interface BootstrapData {
   backups: BackupRecord[];
   auditLogs: AuditLog[];
   cloudflareZones: CloudflareZone[];
+  loadBalancer: LoadBalancerState;
   deadMan: DeadManControlPlane;
   integrations: IntegrationStatus;
   summary: SystemSummary;
@@ -80,8 +85,49 @@ export interface DrReadiness {
   appName: string;
   failoverState: string;
   checks: DrReadinessItem[];
+  overall: DrOverall;
   overallReady: boolean;
+  /** PASS count of the 13 core checks */
+  passed: number;
+  total: number;
+  evaluatedAt: string;
 }
+
+export interface DatabaseHealthRow {
+  applicationId: string; applicationName: string; environment: 'PRD' | 'DR';
+  status: DatabaseHealth; detail: string; report: DatabaseReport | null; observedAt: string | null;
+}
+
+export interface AgentHealthRow {
+  serverId: string; hostname: string; ip: string; environment: 'PRD' | 'DR';
+  state: 'ONLINE' | 'STALE' | 'OFFLINE' | 'NOT_CONNECTED'; version: string | null; lastSeen: string | null;
+  startedAt: string | null; restartCount: number; errors: string[];
+}
+
+export interface AvailabilityStats {
+  total: number; ok: number; availabilityPercent: number | null;
+  avgLatencyMs: number | null; p95LatencyMs: number | null;
+  firstCheckAt: string | null; lastCheckAt: string | null; lastSuccessAt: string | null; lastFailureAt: string | null;
+  byStatus: Record<string, number>;
+}
+
+export interface ApplicationAvailability {
+  range: string;
+  since: string;
+  environments: Array<{
+    environment: 'PRD' | 'DR';
+    application: AvailabilityStats & { monitors: string[] };
+    monitoring: AvailabilityStats;
+    cloudflareOrigin: AvailabilityStats | null;
+  }>;
+}
+
+export interface CloudflarePoolOption {
+  id: string; name: string; description: string; enabled: boolean | null; healthy: boolean | null;
+  origins: Array<{ name: string; address: string; enabled: boolean | null; weight: number | null }>;
+}
+
+export type HistoryPoint = CheckRecord & { samples?: number; okSamples?: number };
 
 export interface AgentInstallInfo {
   installCommand: string;
@@ -232,6 +278,12 @@ export const api = {
   triggerFailover: (id: string, target: 'DR' | 'PRIMARY', reason?: string) =>
     unwrap(api.post<ApiResponse<{ app: Application; changed: Array<{ from: string; to: string }> }>>(`/api/v1/applications/${encodeURIComponent(id)}/failover`, { target, reason })),
   getDrReadiness: (id: string) => unwrap(api.get<ApiResponse<DrReadiness>>(`/api/v1/applications/${encodeURIComponent(id)}/dr-readiness`)),
+  getAvailability: (id: string, range: '24h' | '7d' | '30d' | '90d' = '24h') =>
+    unwrap(api.get<ApiResponse<ApplicationAvailability>>(`/api/v1/applications/${encodeURIComponent(id)}/availability?range=${range}`)),
+  getFailoverPreflight: (id: string, target: 'DR' | 'PRIMARY') =>
+    unwrap(api.get<ApiResponse<FailoverPreflight>>(`/api/v1/applications/${encodeURIComponent(id)}/failover/preflight?target=${target}`)),
+  recordFailoverDecision: (id: string, target: 'DR' | 'PRIMARY', decision: 'APPROVED' | 'REJECTED', reason: string) =>
+    unwrap(api.post<ApiResponse<{ recorded: boolean }>>(`/api/v1/applications/${encodeURIComponent(id)}/failover/decision`, { target, decision, reason })),
 
   // ── Monitors ────────────────────────────────────────────────────────────────
   getMonitors: () => unwrap(api.get<ApiResponse<Monitor[]>>('/api/v1/monitors')),
@@ -241,6 +293,8 @@ export const api = {
   toggleMonitor: (id: string) => unwrap(api.post<ApiResponse<Monitor>>(`/api/v1/monitors/${encodeURIComponent(id)}/toggle`)),
   probeMonitor: (id: string) => unwrap(api.post<ApiResponse<Monitor>>(`/api/v1/monitors/${encodeURIComponent(id)}/probe`)),
   probeAllMonitors: () => unwrap(api.post<ApiResponse<Monitor[]>>('/api/v1/monitors/probe-all')),
+  getMonitorHistory: (id: string, range: '1h' | '6h' | '24h' | '7d' | '30d' = '24h') =>
+    unwrap(api.get<ApiResponse<{ range: string; bucketSec: number; points: HistoryPoint[] }>>(`/api/v1/monitors/${encodeURIComponent(id)}/history?range=${range}`)),
 
   // ── Live diagnostic tools ───────────────────────────────────────────────────
   httpTest: (payload: { url: string; method?: string; body?: string; expectedStatus?: number; matchText?: string; timeoutSec?: number }) =>
@@ -282,12 +336,20 @@ export const api = {
   resetRunbook: (id: string) => unwrap(api.post<ApiResponse<Runbook>>(`/api/v1/runbooks/${encodeURIComponent(id)}/reset`)),
   getDeployments: () => api.get<PaginatedApiResponse<Deployment>>('/api/v1/deployments?pageSize=200').then(r => r.data),
   getBackups: () => api.get<PaginatedApiResponse<BackupRecord>>('/api/v1/backups?pageSize=200').then(r => r.data),
+  getBackupStatus: () => unwrap(api.get<ApiResponse<BackupStatus[]>>('/api/v1/backups/status')),
+  getDatabaseHealth: () => unwrap(api.get<ApiResponse<DatabaseHealthRow[]>>('/api/v1/health/databases')),
+  getAgentHealth: () => unwrap(api.get<ApiResponse<AgentHealthRow[]>>('/api/v1/health/agents')),
 
   // ── Providers ───────────────────────────────────────────────────────────────
   getCloudflareZones: () => api.get<{ success: boolean; configured: boolean; lastSyncAt: string | null; lastError: string | null; data: CloudflareZone[] }>('/api/v1/cloudflare/zones'),
   syncCloudflare: () => unwrap(api.post<ApiResponse<CloudflareZone[]>>('/api/v1/cloudflare/sync')),
-  getHostingerVms: () => api.get<{ success: boolean; configured: boolean; lastSyncAt: string | null; lastError: string | null; data: Array<Record<string, unknown>> }>('/api/v1/hostinger/vms'),
+  getHostingerVms: () => api.get<{ success: boolean; configured: boolean; status: string; lastSyncAt: string | null; lastSuccessAt: string | null; lastError: string | null; data: HostingerInfo[] }>('/api/v1/hostinger/vms'),
   syncHostinger: () => unwrap(api.post<ApiResponse<Array<Record<string, unknown>>>>('/api/v1/hostinger/sync')),
+  getLoadBalancers: () => unwrap(api.get<ApiResponse<LoadBalancerState>>('/api/v1/loadbalancers')),
+  /** Cloudflare lookups for the configuration forms — the API token stays on the server */
+  getCloudflareAccounts: () => unwrap(api.get<ApiResponse<Array<{ id: string; name: string }>>>('/api/v1/cloudflare/accounts')),
+  getCloudflarePools: (accountId: string) => unwrap(api.get<ApiResponse<CloudflarePoolOption[]>>(`/api/v1/cloudflare/lb-pools?accountId=${encodeURIComponent(accountId)}`)),
+  syncLoadBalancers: () => unwrap(api.post<ApiResponse<LoadBalancerState>>('/api/v1/loadbalancers/sync')),
 
   // ── Audit / reports ─────────────────────────────────────────────────────────
   getAuditLogs: (params: { page?: number; pageSize?: number; category?: string; q?: string } = {}) => {
@@ -308,18 +370,28 @@ export const api = {
       'connected', 'telemetry_tick', 'server_update', 'servers_changed', 'applications_changed', 'application_update',
       'monitor_update', 'monitor_deleted', 'monitors_changed', 'incident_created', 'incident_update', 'audit',
       'channel_update', 'channels_changed', 'maintenance_update', 'maintenance_deleted', 'runbooks_changed',
-      'deployments_changed', 'backups_changed', 'cloudflare_update', 'deadman_update',
+      'deployments_changed', 'backups_changed', 'cloudflare_update', 'deadman_update', 'loadbalancer_update',
     ];
     let source: EventSource | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let closed = false;
     let attempt = 0;
 
-    const connect = () => {
+    const connect = async () => {
       if (closed) return;
-      const token = tokenStore.getAccess();
-      if (!token) return;
-      source = new EventSource(`/api/v1/realtime/stream?token=${encodeURIComponent(token)}`);
+      if (!tokenStore.getAccess()) return;
+      // One-time ticket (60 s) instead of the access token in the URL; request() refreshes an expired session
+      let ticket: string;
+      try {
+        ticket = (await request<ApiResponse<{ ticket: string }>>('/api/v1/realtime/ticket', { method: 'POST', body: '{}' })).data.ticket;
+      } catch {
+        onStatus?.(false);
+        attempt += 1;
+        retryTimer = setTimeout(() => { void connect(); }, Math.min(30_000, 2000 * attempt));
+        return;
+      }
+      if (closed) return;
+      source = new EventSource(`/api/v1/realtime/stream?ticket=${encodeURIComponent(ticket)}`);
       for (const name of EVENTS) {
         source.addEventListener(name, (e) => {
           try { onEvent(name, JSON.parse((e as MessageEvent).data)); } catch { /* ignore malformed event */ }
@@ -330,13 +402,12 @@ export const api = {
         source?.close();
         onStatus?.(false);
         if (closed) return;
-        // The token may have expired: refresh it before reconnecting
+        // Each reconnect fetches a new ticket (refreshing the session if needed)
         attempt += 1;
-        if (attempt > 1) await refreshSession();
-        retryTimer = setTimeout(connect, Math.min(30_000, 2000 * attempt));
+        retryTimer = setTimeout(() => { void connect(); }, Math.min(30_000, 2000 * attempt));
       };
     };
-    connect();
+    void connect();
 
     return () => {
       closed = true;

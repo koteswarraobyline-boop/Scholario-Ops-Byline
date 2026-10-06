@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
-import { api, AgentInstallInfo } from '../../services/api';
+import { api, AgentInstallInfo, CloudflarePoolOption } from '../../services/api';
 import { Application, VpsServer } from '../../types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -172,7 +172,7 @@ const Checklist: React.FC = () => {
     { done: servers.length > 0, label: 'Register your PRD and DR VPS servers', where: 'below' },
     { done: servers.some(s => s.lastSeen), label: 'Install the telemetry agent on each server', where: 'below' },
     { done: applications.length > 0, label: 'Create an application linking PRD + DR servers', where: 'below' },
-    { done: Boolean(integrations?.cloudflare.configured) && applications.some(a => a.dnsRecordName), label: 'Connect Cloudflare and set the failover DNS record', where: 'below' },
+    { done: Boolean(integrations?.cloudflare.configured) && applications.some(a => a.dnsRecordName || a.loadBalancer), label: 'Connect Cloudflare and set the Load Balancer pools or failover DNS record', where: 'below' },
     { done: monitors.length > 0, label: 'Add health monitors (HTTP / TCP / SSL)', where: '/monitors' },
     { done: communicationChannels.length > 0, label: 'Add a notification channel (Teams / Email / Webhook)', where: '/communications' },
   ];
@@ -201,14 +201,22 @@ const Checklist: React.FC = () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Servers
 // ─────────────────────────────────────────────────────────────────────────────
-type ServerForm = { hostname: string; ip: string; environment: 'PRD' | 'DR'; provider: string; region: string; plan: string; notes: string };
-const EMPTY_SERVER: ServerForm = { hostname: '', ip: '', environment: 'PRD', provider: 'Hostinger', region: '', plan: '', notes: '' };
+type ServerForm = {
+  hostname: string; ip: string; environment: 'PRD' | 'DR'; provider: string; region: string; plan: string; notes: string;
+  /** Purchased plan capacity (strings while editing; empty = not set) */
+  planCpuCores: string; planRamGb: string; planDiskGb: string;
+};
+const EMPTY_SERVER: ServerForm = { hostname: '', ip: '', environment: 'PRD', provider: '', region: '', plan: '', notes: '', planCpuCores: '', planRamGb: '', planDiskGb: '' };
 
 const ServerEditor: React.FC<{ initial?: VpsServer; onDone: () => void }> = ({ initial, onDone }) => {
   const st = useStyles();
   const { createServer, updateServer } = useOps();
   const [form, setForm] = useState<ServerForm>(initial
-    ? { hostname: initial.hostname, ip: initial.ip, environment: initial.environment, provider: initial.provider, region: initial.region === 'Unknown' ? '' : initial.region, plan: initial.plan, notes: initial.notes ?? '' }
+    ? {
+      hostname: initial.hostname, ip: initial.ip, environment: initial.environment, provider: initial.provider, region: initial.region === 'Unknown' ? '' : initial.region,
+      plan: initial.plan, notes: initial.notes ?? '',
+      planCpuCores: initial.planSpec ? String(initial.planSpec.cpuCores) : '', planRamGb: initial.planSpec ? String(initial.planSpec.ramGb) : '', planDiskGb: initial.planSpec ? String(initial.planSpec.diskGb) : '',
+    }
     : EMPTY_SERVER);
   const [saving, setSaving] = useState(false);
   const set = <K extends keyof ServerForm>(k: K, v: ServerForm[K]) => setForm(f => ({ ...f, [k]: v }));
@@ -216,7 +224,10 @@ const ServerEditor: React.FC<{ initial?: VpsServer; onDone: () => void }> = ({ i
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
-    const payload = { ...form, hostname: form.hostname.trim(), ip: form.ip.trim() };
+    const payload = {
+      ...form, hostname: form.hostname.trim(), ip: form.ip.trim(),
+      planCpuCores: form.planCpuCores.trim() || null, planRamGb: form.planRamGb.trim() || null, planDiskGb: form.planDiskGb.trim() || null,
+    } as unknown as Partial<VpsServer>;
     const res = initial ? await updateServer(initial.id, payload) : await createServer(payload);
     setSaving(false);
     if (res) onDone();
@@ -239,10 +250,18 @@ const ServerEditor: React.FC<{ initial?: VpsServer; onDone: () => void }> = ({ i
         </Label>
         <Label text="Provider"><input className={st.input} value={form.provider} onChange={e => set('provider', e.target.value)} /></Label>
         <Label text="Region / data center"><input className={st.input} value={form.region} onChange={e => set('region', e.target.value)} placeholder="e.g. Mumbai" /></Label>
-        <Label text="Plan"><input className={st.input} value={form.plan} onChange={e => set('plan', e.target.value)} placeholder="e.g. KVM 4" /></Label>
+        <Label text="Plan name"><input className={st.input} value={form.plan} onChange={e => set('plan', e.target.value)} placeholder="e.g. KVM 8" /></Label>
+      </div>
+      <div className={`rounded border p-3 space-y-2 ${st.isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+        <div className="text-[10px] uppercase tracking-wider font-mono font-bold">Plan capacity</div>
+        <div className="grid grid-cols-3 gap-3">
+          <Label text="CPU cores"><input type="number" min={1} step={1} className={st.input} value={form.planCpuCores} onChange={e => set('planCpuCores', e.target.value)} placeholder="8" /></Label>
+          <Label text="RAM (GB)"><input type="number" min={0.5} step="any" className={st.input} value={form.planRamGb} onChange={e => set('planRamGb', e.target.value)} placeholder="32" /></Label>
+          <Label text="Disk (GB)"><input type="number" min={1} step="any" className={st.input} value={form.planDiskGb} onChange={e => set('planDiskGb', e.target.value)} placeholder="400" /></Label>
+        </div>
+        <p className={`text-[10px] ${st.faint}`}>The purchased capacity. Live CPU / RAM / disk usage comes only from the telemetry agent on the VPS.</p>
       </div>
       <Label text="Notes"><textarea className={st.input} rows={2} value={form.notes} onChange={e => set('notes', e.target.value)} /></Label>
-      <p className={`text-[10px] ${st.faint}`}>CPU, RAM, disk, OS and uptime are filled in automatically by the telemetry agent (and the Hostinger API if configured).</p>
       <div className="flex gap-2">
         <button type="submit" disabled={saving} className={`${st.btn} ${st.primary}`}>{saving ? 'Saving…' : initial ? 'Save changes' : 'Register server'}</button>
         <button type="button" onClick={onDone} className={`${st.btn} ${st.ghost}`}>Cancel</button>
@@ -400,7 +419,8 @@ const ServersSection: React.FC = () => {
                 <tr key={s.id}>
                   <td className="py-2 px-3">
                     <div className="font-semibold">{s.hostname}</div>
-                    <div className={st.faint}>{s.ip} · {s.provider}{s.region && s.region !== 'Unknown' ? ` · ${s.region}` : ''}</div>
+                    <div className={st.faint}>{s.ip}{s.provider ? ` · ${s.provider}` : ''}{s.region && s.region !== 'Unknown' ? ` · ${s.region}` : ''}</div>
+                    {s.planSpec && <div className={st.faint}>{s.planSpec.name || 'Plan'}: {s.planSpec.cpuCores} CPU · {s.planSpec.ramGb} GB · {s.planSpec.diskGb} GB</div>}
                   </td>
                   <td className="py-2 px-3"><span className={s.environment === 'PRD' ? 'text-blue-400 font-bold' : 'text-purple-400 font-bold'}>{s.environment}</span></td>
                   <td className={`py-2 px-3 font-bold ${statusColor(s.status)}`}>{s.status}</td>
@@ -436,6 +456,33 @@ type AppForm = {
   name: string; codeName: string; description: string; tier: Application['tier'];
   rtoTargetMin: number; rpoTargetMin: number; prdServerId: string; drServerId: string;
   cloudflareZone: string; dnsRecordName: string; autoFailover: boolean;
+  prdUrl: string; drUrl: string;
+  lbEnabled: boolean; lbAccountId: string; lbHostname: string; lbPrdPoolId: string; lbDrPoolId: string;
+  hcExpectedStatus: string; hcIntervalSec: number; hcTimeoutSec: number; hcSsl: boolean;
+};
+
+type EnvForm = { appPort: string; healthPath: string; webServer: string; processManager: string; routing: string; dbEngine: string; dbName: string; dbPort: string; replicationMaxLagSec: string; backupMaxAgeHours: string };
+const ENV_FIELDS: Array<{ key: keyof EnvForm; label: string; placeholder: string; type?: 'number' | 'engine' }> = [
+  { key: 'appPort', label: 'Application port', placeholder: 'e.g. 443', type: 'number' },
+  { key: 'healthPath', label: 'Health endpoint', placeholder: '/login/index.php' },
+  { key: 'webServer', label: 'Web server / proxy', placeholder: 'e.g. nginx' },
+  { key: 'processManager', label: 'Process manager', placeholder: 'e.g. php-fpm' },
+  { key: 'routing', label: 'Application routing', placeholder: 'e.g. Cloudflare LB → nginx → php-fpm' },
+  { key: 'dbEngine', label: 'Database type', placeholder: '', type: 'engine' },
+  { key: 'dbName', label: 'Database name', placeholder: 'confirmed name' },
+  { key: 'dbPort', label: 'Database port', placeholder: 'e.g. 3306', type: 'number' },
+  { key: 'replicationMaxLagSec', label: 'Max replication lag (s)', placeholder: 'default', type: 'number' },
+  { key: 'backupMaxAgeHours', label: 'Max backup age (h)', placeholder: 'default', type: 'number' },
+];
+const toEnvForm = (e?: import('../../types').EnvironmentInventory): EnvForm => ({
+  appPort: e?.appPort != null ? String(e.appPort) : '', healthPath: e?.healthPath ?? '', webServer: e?.webServer ?? '', processManager: e?.processManager ?? '',
+  routing: e?.routing ?? '', dbEngine: e?.dbEngine ?? '', dbName: e?.dbName ?? '', dbPort: e?.dbPort != null ? String(e.dbPort) : '',
+  replicationMaxLagSec: e?.replicationMaxLagSec != null ? String(e.replicationMaxLagSec) : '', backupMaxAgeHours: e?.backupMaxAgeHours != null ? String(e.backupMaxAgeHours) : '',
+});
+const fromEnvForm = (f: EnvForm) => {
+  const t = (v: string) => v.trim() || null;
+  const n = (v: string) => (v.trim() ? Number(v) : null);
+  return { appPort: n(f.appPort), healthPath: t(f.healthPath), webServer: t(f.webServer), processManager: t(f.processManager), routing: t(f.routing), dbEngine: t(f.dbEngine), dbName: t(f.dbName), dbPort: n(f.dbPort), replicationMaxLagSec: n(f.replicationMaxLagSec), backupMaxAgeHours: n(f.backupMaxAgeHours) };
 };
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
@@ -447,11 +494,34 @@ const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> = ({ in
     name: initial.name, codeName: initial.codeName, description: initial.description, tier: initial.tier,
     rtoTargetMin: initial.rtoTargetMin, rpoTargetMin: initial.rpoTargetMin, prdServerId: initial.prdServerId, drServerId: initial.drServerId,
     cloudflareZone: initial.cloudflareZone, dnsRecordName: initial.dnsRecordName ?? '', autoFailover: Boolean(initial.autoFailover),
+    prdUrl: initial.prdUrl ?? '', drUrl: initial.drUrl ?? '',
+    lbEnabled: Boolean(initial.loadBalancer), lbAccountId: initial.loadBalancer?.accountId ?? '', lbHostname: initial.loadBalancer?.hostname ?? '',
+    lbPrdPoolId: initial.loadBalancer?.prdPoolId ?? '', lbDrPoolId: initial.loadBalancer?.drPoolId ?? '',
+    hcExpectedStatus: initial.healthCheck?.expectedStatus ? String(initial.healthCheck.expectedStatus) : '',
+    hcIntervalSec: initial.healthCheck?.intervalSec ?? 30, hcTimeoutSec: initial.healthCheck?.timeoutSec ?? 15, hcSsl: initial.healthCheck?.sslMonitoring ?? true,
   } : {
     name: '', codeName: '', description: '', tier: 'TIER_1', rtoTargetMin: 30, rpoTargetMin: 15,
     prdServerId: servers.find(s => s.environment === 'PRD')?.id ?? '', drServerId: servers.find(s => s.environment === 'DR')?.id ?? '',
     cloudflareZone: '', dnsRecordName: '', autoFailover: false,
+    prdUrl: '', drUrl: '',
+    lbEnabled: false, lbAccountId: '', lbHostname: '', lbPrdPoolId: '', lbDrPoolId: '',
+    hcExpectedStatus: '', hcIntervalSec: 30, hcTimeoutSec: 15, hcSsl: true,
   });
+  const [envs, setEnvs] = useState<Record<'PRD' | 'DR', EnvForm>>({ PRD: toEnvForm(initial?.environments?.PRD), DR: toEnvForm(initial?.environments?.DR) });
+  const setEnv = (env: 'PRD' | 'DR', k: keyof EnvForm, v: string) => setEnvs(e => ({ ...e, [env]: { ...e[env], [k]: v } }));
+  const [pools, setPools] = useState<CloudflarePoolOption[] | null>(null);
+  const [poolsBusy, setPoolsBusy] = useState(false);
+  const [poolsError, setPoolsError] = useState<string | null>(null);
+  const [accounts, setAccounts] = useState<Array<{ id: string; name: string }> | null>(null);
+  const loadAccounts = async () => {
+    setPoolsError(null);
+    try { setAccounts(await api.getCloudflareAccounts()); } catch (err) { setPoolsError((err as Error).message); }
+  };
+  const loadPools = async () => {
+    setPoolsBusy(true);
+    setPoolsError(null);
+    try { setPools(await api.getCloudflarePools(form.lbAccountId.trim())); } catch (err) { setPools(null); setPoolsError((err as Error).message); } finally { setPoolsBusy(false); }
+  };
   const [codeTouched, setCodeTouched] = useState(Boolean(initial));
   const [healthPath, setHealthPath] = useState('/health');
   const [mk, setMk] = useState({ prd: true, dr: true, pub: true, ssl: true });
@@ -465,15 +535,25 @@ const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> = ({ in
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
-    const payload: Partial<Application> = { ...form, codeName: form.codeName || slug(form.name), dnsRecordName: form.dnsRecordName.trim() || undefined };
+    const payload = {
+      name: form.name, codeName: form.codeName || slug(form.name), description: form.description, tier: form.tier,
+      rtoTargetMin: form.rtoTargetMin, rpoTargetMin: form.rpoTargetMin, prdServerId: form.prdServerId, drServerId: form.drServerId,
+      cloudflareZone: form.cloudflareZone, dnsRecordName: form.dnsRecordName.trim(), autoFailover: form.lbEnabled ? false : form.autoFailover,
+      prdUrl: form.prdUrl.trim(), drUrl: form.drUrl.trim(),
+      loadBalancer: form.lbEnabled
+        ? { accountId: form.lbAccountId.trim(), hostname: form.lbHostname.trim(), prdPoolId: form.lbPrdPoolId.trim(), drPoolId: form.lbDrPoolId.trim() }
+        : null,
+      healthCheck: { expectedStatus: form.hcExpectedStatus.trim() ? Number(form.hcExpectedStatus) : null, intervalSec: form.hcIntervalSec, timeoutSec: form.hcTimeoutSec, sslMonitoring: form.hcSsl },
+      environments: { PRD: fromEnvForm(envs.PRD), DR: fromEnvForm(envs.DR) },
+    } as unknown as Partial<Application>;
     const app = initial ? await updateApplication(initial.id, payload) : await createApplication(payload);
     if (app && !initial) {
       // Optional starter monitors that probe each server directly and the public hostname
       const base = { applicationId: app.id, intervalSec: 30, timeoutSec: 10, retries: 2, failureConfirmationThreshold: 3, recoveryConfirmationThreshold: 2, warningThresholdMs: 1500, criticalThresholdMs: 8000 };
       if (mk.prd && prd) await addMonitor({ ...base, name: `${app.name} · PRD origin`, type: 'HTTP', target: `http://${prd.ip.includes(':') ? `[${prd.ip}]` : prd.ip}${path}`, environment: 'PRD', serverId: prd.id });
       if (mk.dr && dr) await addMonitor({ ...base, name: `${app.name} · DR origin`, type: 'HTTP', target: `http://${dr.ip.includes(':') ? `[${dr.ip}]` : dr.ip}${path}`, environment: 'DR', serverId: dr.id });
-      if (mk.pub && app.dnsRecordName) await addMonitor({ ...base, name: `${app.name} · public ${app.dnsRecordName}`, type: 'HTTPS', target: `https://${app.dnsRecordName}${path}`, environment: 'PRD' });
-      if (mk.ssl && app.dnsRecordName) await addMonitor({ ...base, name: `${app.name} · SSL certificate`, type: 'SSL', target: app.dnsRecordName, environment: 'PRD', intervalSec: 3600, timeoutSec: 15 });
+      if (mk.pub && app.dnsRecordName && !app.prdUrl) await addMonitor({ ...base, name: `${app.name} · public ${app.dnsRecordName}`, type: 'HTTPS', target: `https://${app.dnsRecordName}${path}`, environment: 'PRD' });
+      if (mk.ssl && app.dnsRecordName && !app.prdUrl) await addMonitor({ ...base, name: `${app.name} · SSL certificate`, type: 'SSL', target: app.dnsRecordName, environment: 'PRD', intervalSec: 3600, timeoutSec: 15 });
     }
     setSaving(false);
     if (app) onDone();
@@ -516,15 +596,100 @@ const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> = ({ in
         <Label text="Failover DNS record (A/AAAA)" hint="The record switched between PRD and DR IPs, e.g. app.example.com">
           <input className={st.input} value={form.dnsRecordName} onChange={e => set('dnsRecordName', e.target.value.trim().toLowerCase())} placeholder={form.cloudflareZone ? `app.${form.cloudflareZone}` : 'app.example.com'} />
         </Label>
-        <label className="flex items-start gap-2 text-xs mt-5">
-          <input type="checkbox" checked={form.autoFailover} onChange={e => set('autoFailover', e.target.checked)} className="mt-0.5" />
+        <label className={`flex items-start gap-2 text-xs mt-5 ${form.lbEnabled ? 'opacity-50' : ''}`}>
+          <input type="checkbox" checked={form.autoFailover && !form.lbEnabled} disabled={form.lbEnabled} onChange={e => set('autoFailover', e.target.checked)} className="mt-0.5" />
           <span>
             <b>Automatic failover</b>
-            <span className={`block text-[10px] ${st.faint}`}>Switch DNS to DR when a PRD HTTP/TCP monitor is confirmed DOWN and all DR monitors are healthy (10 min cooldown). Failback is always manual.</span>
+            <span className={`block text-[10px] ${st.faint}`}>{form.lbEnabled ? 'Not available when traffic is routed by a Cloudflare Load Balancer.' : 'Off by default. Switch DNS to DR when a PRD HTTP/TCP monitor is confirmed DOWN and all DR monitors are healthy (10 min cooldown). Failback is always manual.'}</span>
           </span>
         </label>
       </div>
       <Label text="Description"><textarea className={st.input} rows={2} value={form.description} onChange={e => set('description', e.target.value)} /></Label>
+
+      <div className={`rounded border p-3 space-y-2 ${st.isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+        <div className="text-[10px] uppercase tracking-wider font-mono font-bold">Origin / application URLs</div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <Label text="PRD URL" hint="Checked by the monitoring engine, e.g. https://app.example.com/login/index.php"><input className={st.input} value={form.prdUrl} onChange={e => set('prdUrl', e.target.value)} placeholder="https://app.example.com/" /></Label>
+          <Label text="DR URL" hint="URL of the DR copy, e.g. https://dr-app.example.com/login/index.php"><input className={st.input} value={form.drUrl} onChange={e => set('drUrl', e.target.value)} placeholder="https://dr-app.example.com/" /></Label>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <Label text="Expected status" hint="empty = any 2xx/3xx"><input type="number" min={100} max={599} className={st.input} value={form.hcExpectedStatus} onChange={e => set('hcExpectedStatus', e.target.value)} placeholder="200" /></Label>
+          <Label text="Interval (s)"><input type="number" min={10} className={st.input} value={form.hcIntervalSec} onChange={e => set('hcIntervalSec', Number(e.target.value))} /></Label>
+          <Label text="Timeout (s)"><input type="number" min={1} max={60} className={st.input} value={form.hcTimeoutSec} onChange={e => set('hcTimeoutSec', Number(e.target.value))} /></Label>
+          <label className="flex items-center gap-2 text-xs mt-5"><input type="checkbox" checked={form.hcSsl} onChange={e => set('hcSsl', e.target.checked)} /> Monitor TLS certificate</label>
+        </div>
+        <p className={`text-[10px] ${st.faint}`}>Saving creates or updates one URL monitor (and a TLS monitor) per environment. Changing a URL here changes what the next monitoring cycle checks.</p>
+      </div>
+
+      <details className={`rounded border p-3 ${st.isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+        <summary className="text-[10px] uppercase tracking-wider font-mono font-bold cursor-pointer">Environment details (optional — leave empty until confirmed)</summary>
+        <div className="mt-2 overflow-x-auto">
+          <table className="w-full text-xs font-mono min-w-[560px]">
+            <thead><tr className={st.muted}><th className="text-left py-1 pr-2 font-normal w-48"></th><th className="text-left py-1 px-1">PRD</th><th className="text-left py-1 px-1">DR</th></tr></thead>
+            <tbody>
+              {ENV_FIELDS.map(f => (
+                <tr key={f.key}>
+                  <td className={`py-1 pr-2 ${st.muted}`}>{f.label}</td>
+                  {(['PRD', 'DR'] as const).map(env => (
+                    <td key={env} className="py-1 px-1">
+                      {f.type === 'engine' ? (
+                        <select className={st.input} value={envs[env][f.key]} onChange={e => setEnv(env, f.key, e.target.value)}>
+                          <option value="">Unknown / not monitored</option><option value="mysql">MySQL</option><option value="mariadb">MariaDB</option><option value="postgresql">PostgreSQL</option>
+                        </select>
+                      ) : (
+                        <input className={st.input} type={f.type === 'number' ? 'number' : 'text'} value={envs[env][f.key]} placeholder={f.placeholder} onChange={e => setEnv(env, f.key, e.target.value)} />
+                      )}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className={`text-[10px] mt-2 ${st.faint}`}>Empty fields are shown as PENDING. Setting the database type tells Scholario Ops to expect a database probe from the agent on that server (DB_ENGINE in the agent config); database passwords are never entered here.</p>
+      </details>
+
+      <div className={`rounded border p-3 space-y-2 ${st.isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+        <label className="flex items-center gap-2 text-[10px] uppercase tracking-wider font-mono font-bold">
+          <input type="checkbox" checked={form.lbEnabled} onChange={e => { set('lbEnabled', e.target.checked); if (e.target.checked) set('autoFailover', false); }} /> Cloudflare Load Balancer
+        </label>
+        {form.lbEnabled && (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Label text="Cloudflare Account ID *" hint="32-character hex ID (Cloudflare dashboard → account home)">
+                <div className="flex gap-1.5">
+                  <input className={st.input} value={form.lbAccountId} list="cf-accounts" onChange={e => set('lbAccountId', e.target.value.trim().toLowerCase())} placeholder="32-character account ID" />
+                  <button type="button" onClick={loadAccounts} className={`${st.btn} ${st.ghost} !px-2 shrink-0`} title="List accounts the server token can access">List</button>
+                </div>
+                <datalist id="cf-accounts">{(accounts ?? []).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</datalist>
+              </Label>
+              <Label text="Load Balancer hostname *" hint="The public hostname the Cloudflare LB serves"><input className={st.input} value={form.lbHostname} onChange={e => set('lbHostname', e.target.value.trim().toLowerCase())} placeholder="app.example.com" /></Label>
+              <Label text="PRD pool ID *">
+                <select className={st.input} value={form.lbPrdPoolId} onChange={e => set('lbPrdPoolId', e.target.value)}>
+                  <option value="">{pools ? '— select pool —' : form.lbPrdPoolId ? form.lbPrdPoolId : '— load pools first —'}</option>
+                  {form.lbPrdPoolId && !pools?.some(p => p.id === form.lbPrdPoolId) && <option value={form.lbPrdPoolId}>{form.lbPrdPoolId} (saved)</option>}
+                  {(pools ?? []).map(p => <option key={p.id} value={p.id}>{p.name || p.id} · {p.origins.map(o => o.address).join(', ') || 'no origins'}</option>)}
+                </select>
+              </Label>
+              <Label text="DR pool ID *">
+                <select className={st.input} value={form.lbDrPoolId} onChange={e => set('lbDrPoolId', e.target.value)}>
+                  <option value="">{pools ? '— select pool —' : form.lbDrPoolId ? form.lbDrPoolId : '— load pools first —'}</option>
+                  {form.lbDrPoolId && !pools?.some(p => p.id === form.lbDrPoolId) && <option value={form.lbDrPoolId}>{form.lbDrPoolId} (saved)</option>}
+                  {(pools ?? []).map(p => <option key={p.id} value={p.id}>{p.name || p.id} · {p.origins.map(o => o.address).join(', ') || 'no origins'}</option>)}
+                </select>
+              </Label>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button type="button" onClick={loadPools} disabled={poolsBusy || !/^[0-9a-f]{32}$/.test(form.lbAccountId.trim())} className={`${st.btn} ${st.ghost}`}>
+                <RefreshCw className={`w-3 h-3 ${poolsBusy ? 'animate-spin' : ''}`} /> {poolsBusy ? 'Loading…' : 'Load pools'}
+              </button>
+              {pools && <span className={`text-[10px] ${st.faint}`}>{pools.length} pool(s) read from Cloudflare</span>}
+              {poolsError && <span className="text-[10px] text-rose-500 break-words">{poolsError}</span>}
+            </div>
+            <p className={`text-[10px] ${st.faint}`}>The pool list is read by the Scholario Ops server with its own Cloudflare token — the token is never sent to the browser. Only the selected pool IDs are saved. Scholario Ops reads pool health; it never changes pools or routing.</p>
+          </>
+        )}
+      </div>
 
       {!initial && (
         <div className={`rounded border p-3 space-y-2 ${st.isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
@@ -535,8 +700,8 @@ const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> = ({ in
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-xs font-mono">
             <label className="flex items-center gap-2"><input type="checkbox" checked={mk.prd} disabled={!prd} onChange={e => setMk(m => ({ ...m, prd: e.target.checked }))} /> PRD origin {prd ? `http://${prd.ip}${path}` : '(select PRD server)'}</label>
             <label className="flex items-center gap-2"><input type="checkbox" checked={mk.dr} disabled={!dr} onChange={e => setMk(m => ({ ...m, dr: e.target.checked }))} /> DR origin {dr ? `http://${dr.ip}${path}` : '(select DR server)'}</label>
-            <label className="flex items-center gap-2"><input type="checkbox" checked={mk.pub} disabled={!form.dnsRecordName} onChange={e => setMk(m => ({ ...m, pub: e.target.checked }))} /> Public {form.dnsRecordName ? `https://${form.dnsRecordName}${path}` : '(set DNS record)'}</label>
-            <label className="flex items-center gap-2"><input type="checkbox" checked={mk.ssl} disabled={!form.dnsRecordName} onChange={e => setMk(m => ({ ...m, ssl: e.target.checked }))} /> SSL certificate expiry</label>
+            <label className="flex items-center gap-2"><input type="checkbox" checked={mk.pub && !form.prdUrl} disabled={!form.dnsRecordName || Boolean(form.prdUrl)} onChange={e => setMk(m => ({ ...m, pub: e.target.checked }))} /> Public {form.prdUrl ? '(covered by PRD URL)' : form.dnsRecordName ? `https://${form.dnsRecordName}${path}` : '(set DNS record)'}</label>
+            <label className="flex items-center gap-2"><input type="checkbox" checked={mk.ssl && !form.prdUrl} disabled={!form.dnsRecordName || Boolean(form.prdUrl)} onChange={e => setMk(m => ({ ...m, ssl: e.target.checked }))} /> SSL certificate expiry {form.prdUrl ? '(covered by URL monitors)' : ''}</label>
           </div>
         </div>
       )}
@@ -605,12 +770,20 @@ const ApplicationsSection: React.FC = () => {
                 <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
                   <div><span className={st.faint}>PRD:</span> {prd ? `${prd.hostname} (${prd.ip})` : <span className="text-amber-500">not set</span>}</div>
                   <div><span className={st.faint}>DR:</span> {dr ? `${dr.hostname} (${dr.ip})` : <span className="text-amber-500">not set</span>}</div>
-                  <div className="col-span-2">
-                    <span className={st.faint}>DNS failover:</span>{' '}
-                    {a.dnsRecordName
-                      ? <>{a.dnsRecordName} → {record ? <b>{record.target}</b> : <span className={st.faint}>{zone ? 'record not found' : 'zone not synced'}</span>} {a.autoFailover ? <span className="text-emerald-500">(auto)</span> : <span className={st.faint}>(manual)</span>}</>
-                      : <span className="text-amber-500">not configured</span>}
-                  </div>
+                  <div className="col-span-2 break-all"><span className={st.faint}>PRD URL:</span> {a.prdUrl || <span className={st.faint}>not set</span>}</div>
+                  <div className="col-span-2 break-all"><span className={st.faint}>DR URL:</span> {a.drUrl || <span className={st.faint}>not set</span>}</div>
+                  {a.loadBalancer ? (
+                    <div className="col-span-2 break-all">
+                      <span className={st.faint}>Cloudflare LB:</span> {a.loadBalancer.hostname} · account {a.loadBalancer.accountId.slice(0, 8)}… · PRD pool {a.loadBalancer.prdPoolId.slice(0, 8)}… · DR pool {a.loadBalancer.drPoolId.slice(0, 8)}…
+                    </div>
+                  ) : (
+                    <div className="col-span-2">
+                      <span className={st.faint}>DNS failover:</span>{' '}
+                      {a.dnsRecordName
+                        ? <>{a.dnsRecordName} → {record ? <b>{record.target}</b> : <span className={st.faint}>{zone ? 'record not found' : 'zone not synced'}</span>} {a.autoFailover ? <span className="text-emerald-500">(auto)</span> : <span className={st.faint}>(manual)</span>}</>
+                        : <span className="text-amber-500">not configured</span>}
+                    </div>
+                  )}
                   <div className="col-span-2"><span className={st.faint}>Monitors:</span> {appMonitors.length} ({appMonitors.filter(m => m.status === 'HEALTHY').length} healthy)
                     {' '}<button onClick={() => navigate('/monitors')} className="text-blue-500 hover:underline cursor-pointer">manage</button>
                   </div>

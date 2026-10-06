@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
+import { LbFailoverConsole } from '../resilience/LbFailoverConsole';
 import { useAuth } from '../../context/AuthContext';
 import { Application, OperationalStatus, VpsServer } from '../../types';
 import { X, AlertTriangle, ArrowRight, Plus, Layers, Loader2 } from 'lucide-react';
@@ -221,13 +222,13 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                     <div className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{application.cloudflareZone || 'Not configured'}</div>
                   </div>
                   <div>
-                    <span className={label}>DNS Record (switched on failover):</span>
-                    <div className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{application.dnsRecordName || 'Not configured'}</div>
+                    <span className={label}>{application.loadBalancer ? 'Cloudflare Load Balancer:' : 'DNS Record (switched on failover):'}</span>
+                    <div className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{application.loadBalancer ? `${application.loadBalancer.hostname} (read-only)` : application.dnsRecordName || 'Not configured'}</div>
                   </div>
                   <div>
                     <span className={label}>Active Routing Target:</span>
-                    <div className={`font-semibold ${isFailingOver ? 'text-amber-500' : isDrActive ? 'text-rose-500' : 'text-emerald-500'}`}>
-                      {isFailingOver ? 'Failover in progress' : isDrActive ? 'DR server' : 'Primary (PRD) server'}
+                    <div className={`font-semibold ${application.loadBalancer ? 'text-slate-400' : isFailingOver ? 'text-amber-500' : isDrActive ? 'text-rose-500' : 'text-emerald-500'}`}>
+                      {application.loadBalancer ? 'Decided by Cloudflare pool order — see PRD / DR Readiness' : isFailingOver ? 'Failover in progress' : isDrActive ? 'DR server' : 'Primary (PRD) server'}
                     </div>
                   </div>
                   <div>
@@ -457,7 +458,9 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                 </div>
 
                 <div className={`pt-2 border-t space-y-2 ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
-                  {!canFailover ? (
+                  {application.loadBalancer ? (
+                    <LbFailoverConsole app={application} />
+                  ) : !canFailover ? (
                     <div className={`text-[11px] font-sans ${muted}`}>Only super administrators can switch traffic between PRD and DR.</div>
                   ) : failoverBlockers.length > 0 ? (
                     <div className="space-y-1.5">

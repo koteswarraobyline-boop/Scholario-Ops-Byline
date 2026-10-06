@@ -3,21 +3,24 @@ import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
 import { api } from '../../services/api';
-import { DrReadinessItem, VpsServer } from '../../types';
+import { DrReadinessItem, DrOverall, VpsServer } from '../../types';
 import { Users, Globe, AlertTriangle, RefreshCw, ShieldCheck, Loader2 } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
+import { Ago, verdictColor } from '../ui/Freshness';
+import { LbFailoverConsole } from './LbFailoverConsole';
+import { routeState } from '../ui/routing';
+import { LbPoolCard } from '../providers/LoadBalancerPanel';
 
 const validDate = (s?: string | null) => Boolean(s) && !Number.isNaN(Date.parse(s as string));
 const fmtDateTime = (s?: string | null, fallback = '—') => (validDate(s) ? new Date(s as string).toLocaleString() : fallback);
 
-const readinessColor = (s: DrReadinessItem['status']) =>
-  s === 'READY' ? 'text-emerald-500' : s === 'WARNING' ? 'text-amber-500' : s === 'FAILED' ? 'text-rose-500' : 'text-slate-400';
+const readinessColor = (s: DrReadinessItem['status']) => verdictColor(s);
 
 const statusColor = (s?: string) =>
   s === 'HEALTHY' ? 'text-emerald-500' : s === 'WARNING' || s === 'STALE' ? 'text-amber-500' : s === 'CRITICAL' ? 'text-rose-500' : 'text-slate-400';
 
 export const DrDashboardView: React.FC = () => {
-  const { applications, servers, monitors, cloudflareZones, triggerFailover, theme, isLoading } = useOps();
+  const { applications, servers, monitors, cloudflareZones, triggerFailover, theme, isLoading, loadBalancer } = useOps();
   const { hasRole } = useAuth();
   const navigate = useNavigate();
   const isDark = theme === 'dark';
@@ -29,7 +32,8 @@ export const DrDashboardView: React.FC = () => {
   const [failoverBusy, setFailoverBusy] = useState(false);
 
   const [checks, setChecks] = useState<DrReadinessItem[]>([]);
-  const [overallReady, setOverallReady] = useState<boolean | null>(null);
+  const [overall, setOverall] = useState<DrOverall | null>(null);
+  const [score, setScore] = useState<{ passed: number; total: number } | null>(null);
   const [readinessLoading, setReadinessLoading] = useState(false);
   const [readinessError, setReadinessError] = useState<string | null>(null);
   const [readinessAt, setReadinessAt] = useState<string>('');
@@ -43,9 +47,10 @@ export const DrDashboardView: React.FC = () => {
     try {
       const r = await api.getDrReadiness(appId);
       setChecks(r.checks ?? []);
-      setOverallReady(Boolean(r.overallReady));
+      setOverall(r.overall ?? null);
+      setScore(typeof r.passed === 'number' ? { passed: r.passed, total: r.total } : null);
       setReadinessError(null);
-      setReadinessAt(new Date().toISOString());
+      setReadinessAt(r.evaluatedAt ?? '');
     } catch (err) {
       setReadinessError(err instanceof Error ? err.message : 'Failed to load DR readiness');
     } finally {
@@ -55,7 +60,7 @@ export const DrDashboardView: React.FC = () => {
 
   useEffect(() => {
     setChecks([]);
-    setOverallReady(null);
+    setOverall(null);
     setReadinessError(null);
     if (!appId) return;
     void loadReadiness();
@@ -90,7 +95,16 @@ export const DrDashboardView: React.FC = () => {
   const prdMonitors = monitors.filter(m => m.applicationId === selectedApp.id && m.environment === 'PRD' && m.enabled);
   const drMonitors = monitors.filter(m => m.applicationId === selectedApp.id && m.environment === 'DR' && m.enabled);
 
-  const isDrActive = selectedApp.failoverState === 'DR_ACTIVE';
+  const lbMapped = Boolean(selectedApp.loadBalancer);
+  const routing = lbMapped ? loadBalancer?.routing.find(r => r.hostname === selectedApp.loadBalancer!.hostname) : undefined;
+  const lbPools = lbMapped ? (loadBalancer?.pools ?? []).filter(p => p.applicationId === selectedApp.id) : [];
+  // For LB apps, "receiving traffic" comes from Cloudflare routing; null = unknown
+  const lbServing = (env: 'PRD' | 'DR'): boolean | null => {
+    if (!routing?.found || !routing.activePoolId) return null;
+    const poolId = env === 'PRD' ? selectedApp.loadBalancer!.prdPoolId : selectedApp.loadBalancer!.drPoolId;
+    return routing.activePoolId === poolId;
+  };
+  const isDrActive = lbMapped ? lbServing('DR') === true : selectedApp.failoverState === 'DR_ACTIVE';
   const isFailingOver = selectedApp.failoverState === 'FAILING_OVER';
   const target: 'DR' | 'PRIMARY' = isDrActive ? 'PRIMARY' : 'DR';
   const targetServer = target === 'DR' ? drServer : prdServer;
@@ -117,7 +131,7 @@ export const DrDashboardView: React.FC = () => {
 
   const muted = isDark ? 'text-slate-400' : 'text-slate-500';
 
-  const originRow = (srv: VpsServer | undefined, env: 'PRD' | 'DR', active: boolean, envMonitors: typeof monitors) => {
+  const originRow = (srv: VpsServer | undefined, env: 'PRD' | 'DR', active: boolean | null, envMonitors: typeof monitors) => {
     const healthy = envMonitors.length > 0 && envMonitors.every(m => m.status === 'HEALTHY');
     return (
       <div className={`p-2.5 rounded border flex items-center justify-between gap-2 ${
@@ -139,7 +153,7 @@ export const DrDashboardView: React.FC = () => {
             </div>
           </div>
         </div>
-        <span className="font-bold text-[11px] shrink-0">{active ? 'RECEIVING TRAFFIC' : 'STANDBY'}</span>
+        <span className="font-bold text-[11px] shrink-0">{active === null ? 'ROUTING UNKNOWN' : active ? 'RECEIVING TRAFFIC' : 'STANDBY'}</span>
       </div>
     );
   };
@@ -156,7 +170,7 @@ export const DrDashboardView: React.FC = () => {
             DISASTER RECOVERY &amp; TRAFFIC FAILOVER
           </h1>
           <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            DR readiness checks and Cloudflare DNS failover between PRD and DR servers
+            DR readiness from live checks, and failover between PRD and DR (Cloudflare Load Balancer or DNS)
           </p>
         </div>
 
@@ -176,7 +190,7 @@ export const DrDashboardView: React.FC = () => {
           >
             {applications.map(app => (
               <option key={app.id} value={app.id}>
-                {app.name} ({app.failoverState === 'DR_ACTIVE' ? 'DR active' : app.failoverState === 'FAILING_OVER' ? 'switching' : 'Primary active'})
+                {app.name} ({({ PRD: 'Primary active', DR: 'DR active', MOVING: 'switching', UNKNOWN: 'routing unknown' } as const)[routeState(app, loadBalancer)]})
               </option>
             ))}
           </select>
@@ -192,8 +206,8 @@ export const DrDashboardView: React.FC = () => {
             <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />
             <h2 className="text-xs font-bold uppercase tracking-wider">Routing: {selectedApp.name}</h2>
           </div>
-          <span className={`text-xs font-bold ${isFailingOver ? 'text-amber-500' : isDrActive ? 'text-amber-500' : 'text-emerald-500'}`}>
-            {isFailingOver ? 'FAILOVER IN PROGRESS' : isDrActive ? 'ROUTED TO DR' : 'ROUTED TO PRIMARY'}
+          <span className={`text-xs font-bold ${lbMapped && lbServing('PRD') === null ? 'text-slate-400' : isFailingOver || isDrActive ? 'text-amber-500' : 'text-emerald-500'}`}>
+            {lbMapped && lbServing('PRD') === null ? 'ROUTING UNKNOWN' : isFailingOver ? 'FAILOVER IN PROGRESS' : isDrActive ? 'ROUTED TO DR' : 'ROUTED TO PRIMARY'}
           </span>
         </div>
 
@@ -201,23 +215,39 @@ export const DrDashboardView: React.FC = () => {
           <div className={`p-3 rounded border text-center space-y-1 ${isDark ? 'bg-[#0B0F17] border-[#1A2436]' : 'bg-slate-50 border-slate-200'}`}>
             <Users className="w-4 h-4 mx-auto text-blue-500" />
             <div className="font-bold">Public traffic</div>
-            <div className={`text-[10px] truncate ${muted}`}>{selectedApp.dnsRecordName || 'DNS record not configured'}</div>
+            <div className={`text-[10px] truncate ${muted}`}>{selectedApp.loadBalancer?.hostname || selectedApp.dnsRecordName || 'DNS record not configured'}</div>
           </div>
 
           <div className={`p-3 rounded border text-center space-y-1 ${isDark ? 'bg-[#0B0F17] border-[#1A2436]' : 'bg-slate-50 border-slate-200'}`}>
             <Globe className="w-4 h-4 mx-auto text-amber-500" />
-            <div className="font-bold">Cloudflare DNS</div>
+            <div className="font-bold">{lbMapped ? 'Cloudflare Load Balancer' : 'Cloudflare DNS'}</div>
             <div className={`text-[10px] truncate ${muted}`}>{selectedApp.cloudflareZone || 'Zone not configured'}</div>
-            <div className={`text-[10px] font-semibold truncate ${dnsRecord ? 'text-emerald-500' : muted}`}>
-              {dnsRecord ? `${dnsRecord.name} → ${dnsRecord.target}` : cfZone ? 'Record not found in synced zone' : 'Zone not synced'}
-            </div>
+            {lbMapped ? (
+              <div className={`text-[10px] font-semibold ${routing?.found ? 'text-emerald-500' : muted}`}>
+                {routing?.found
+                  ? `order: ${routing.defaultPools.map(id => lbPools.find(p => p.id === id)?.name || id).join(' → ')}`
+                  : routing?.error ? 'Routing: ' + routing.error.slice(0, 80) : loadBalancer?.status === 'OK' ? 'Routing not read' : (loadBalancer?.status ?? 'Not loaded').replace('_', ' ')}
+              </div>
+            ) : (
+              <div className={`text-[10px] font-semibold truncate ${dnsRecord ? 'text-emerald-500' : muted}`}>
+                {dnsRecord ? `${dnsRecord.name} → ${dnsRecord.target}` : cfZone ? 'Record not found in synced zone' : 'Zone not synced'}
+              </div>
+            )}
           </div>
 
           <div className="md:col-span-2 space-y-2">
-            {originRow(prdServer, 'PRD', !isDrActive && !isFailingOver, prdMonitors)}
-            {originRow(drServer, 'DR', isDrActive, drMonitors)}
+            {originRow(prdServer, 'PRD', lbMapped ? lbServing('PRD') : !isDrActive && !isFailingOver, prdMonitors)}
+            {originRow(drServer, 'DR', lbMapped ? lbServing('DR') : isDrActive, drMonitors)}
           </div>
         </div>
+
+        {lbMapped && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            {lbPools.length === 0
+              ? <div className={`text-[11px] ${muted}`}>Cloudflare pool state not loaded</div>
+              : lbPools.map(p => <LbPoolCard key={p.id} pool={p} isDark={isDark} compact active={routing?.found ? (routing.activePoolId ? routing.activePoolId === p.id : null) : undefined} />)}
+          </div>
+        )}
 
         <div className={`grid grid-cols-2 sm:grid-cols-4 gap-3 text-[11px] pt-3 border-t ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
           <div>
@@ -240,7 +270,9 @@ export const DrDashboardView: React.FC = () => {
 
         {/* Failover Controls */}
         <div className={`pt-3 border-t space-y-2 text-xs ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
-          {!canFailover ? (
+          {lbMapped ? (
+            <LbFailoverConsole app={selectedApp} />
+          ) : !canFailover ? (
             <div className={`font-sans ${muted}`}>Only super administrators can switch traffic between PRD and DR.</div>
           ) : blockers.length > 0 ? (
             <div className="flex flex-wrap items-center gap-2 font-sans">
@@ -275,7 +307,7 @@ export const DrDashboardView: React.FC = () => {
                 <strong className="font-mono">{selectedApp.dnsRecordName}</strong> (zone <span className="font-mono">{selectedApp.cloudflareZone}</span>)
                 {dnsRecord ? <> currently → <span className="font-mono">{dnsRecord.target}</span></> : null} will be pointed to the{' '}
                 {target === 'DR' ? 'DR' : 'PRD'} server <strong className="font-mono">{targetServer?.hostname}</strong> (<strong className="font-mono">{targetServer?.ip}</strong>).
-                {target === 'DR' && overallReady === false && <span className="text-rose-500 font-semibold"> DR readiness checks are not all passing.</span>}
+                {target === 'DR' && overall !== null && overall !== 'READY' && <span className="text-rose-500 font-semibold"> DR readiness is {overall.replace('_', ' ')}.</span>}
               </p>
               <input
                 type="text"
@@ -318,13 +350,13 @@ export const DrDashboardView: React.FC = () => {
           <div>
             <h2 className="text-xs font-bold uppercase tracking-wider">DR Readiness: {selectedApp.name}</h2>
             <p className={`text-[11px] font-sans ${muted}`}>
-              Evaluated by the server from live monitors, agents, Cloudflare and backups{readinessAt ? ` · updated ${new Date(readinessAt).toLocaleTimeString()}` : ''}
+              Evaluated by the server from live monitors, agent telemetry and Cloudflare pool health{readinessAt ? <> · evaluated <Ago iso={readinessAt} /></> : ''}
             </p>
           </div>
           <div className="flex items-center gap-3">
-            {overallReady !== null && (
-              <span className={`text-xs font-bold ${overallReady ? 'text-emerald-500' : 'text-rose-500'}`}>
-                {overallReady ? 'READY FOR FAILOVER' : 'NOT READY'}
+            {overall !== null && (
+              <span className={`text-xs font-bold ${verdictColor(overall)}`}>
+                OVERALL: {overall.replace('_', ' ')}{score ? ` · ${score.passed}/${score.total} checks pass` : ''}
               </span>
             )}
             <button
@@ -345,16 +377,30 @@ export const DrDashboardView: React.FC = () => {
             {readinessLoading ? 'Evaluating readiness…' : 'No readiness checks returned.'}
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
-            {checks.map(chk => (
-              <div key={chk.key} className={`p-3 rounded border space-y-1 ${isDark ? 'bg-[#0B0F17] border-[#1A2436]' : 'bg-slate-50 border-slate-200'}`}>
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold">{chk.label}</span>
-                  <span className={`text-[10px] font-bold ${readinessColor(chk.status)}`}>{chk.status}</span>
+          <div className="space-y-4">
+            {(['core', 'capacity'] as const).map(group => {
+              const list = checks.filter(c => (c.group ?? 'core') === group);
+              if (!list.length) return null;
+              return (
+                <div key={group} className="space-y-2">
+                  <div className={`text-[10px] uppercase tracking-wider font-bold ${muted}`}>
+                    {group === 'core' ? 'DR readiness checks (count toward READY)' : 'DR server capacity (telemetry agent — informational)'}
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                    {list.map((chk, i) => (
+                      <div key={chk.key} className={`p-3 rounded border space-y-1 ${isDark ? 'bg-[#0B0F17] border-[#1A2436]' : 'bg-slate-50 border-slate-200'}`}>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold">{group === 'core' ? `${i + 1}. ` : ''}{chk.label}</span>
+                          <span className={`text-[10px] font-bold ${readinessColor(chk.status)}`}>{chk.status.replace('_', ' ')}</span>
+                        </div>
+                        <p className={`text-[11px] font-sans break-words ${muted}`}>{chk.detail}</p>
+                        <p className={`text-[10px] ${muted}`}>Data: <Ago iso={chk.observedAt} /></p>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <p className={`text-[11px] font-sans break-words ${muted}`}>{chk.detail}</p>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

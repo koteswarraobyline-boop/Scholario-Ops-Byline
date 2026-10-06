@@ -4,6 +4,7 @@ import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
 import { AlertTriangle, Globe, RefreshCw, KeyRound, ArrowRightLeft } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
+import { LoadBalancerPanel } from './LoadBalancerPanel';
 
 const fmtDateTime = (iso: string | null | undefined) => {
   if (!iso) return '—';
@@ -47,9 +48,9 @@ export const CloudflareView: React.FC = () => {
   const header = (
     <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
       <div>
-        <h1 className="text-lg font-bold font-mono tracking-tight">CLOUDFLARE DNS &amp; FAILOVER</h1>
+        <h1 className="text-lg font-bold font-mono tracking-tight">CLOUDFLARE LOAD BALANCING, DNS &amp; FAILOVER</h1>
         <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-          Zones, DNS records, SSL settings and DNS failover state from the Cloudflare API · last sync {fmtDateTime(cf?.lastSyncAt)}
+          Load Balancer pools / origin health, zones, DNS records and SSL from the Cloudflare API · zone sync {fmtDateTime(cf?.lastSyncAt)}
         </p>
       </div>
       <div className="flex items-center gap-2">
@@ -93,18 +94,20 @@ export const CloudflareView: React.FC = () => {
     return (
       <div className="space-y-6">
         {header}
+        <LoadBalancerPanel />
         <div className={`p-5 rounded-lg border font-mono text-xs space-y-3 ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
           <div className="flex items-center gap-2 font-bold text-sm">
             <KeyRound className="w-4 h-4 text-amber-500" />
             <span>Cloudflare not configured</span>
           </div>
           <p className={isDark ? 'text-slate-300' : 'text-slate-700'}>
-            Scholario Ops reads your zones and DNS records and switches the application DNS record between the PRD and DR servers during failover. It needs a Cloudflare API token.
+            Scholario Ops reads Load Balancer pools, pool health, zones and DNS records. It needs a Cloudflare API token (kept on the server only).
           </p>
           <ol className={`list-decimal pl-5 space-y-1.5 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
             <li>Open <span className="font-semibold">dash.cloudflare.com → My Profile → API Tokens</span> and create a custom token.</li>
             <li>
-              Permissions — required: <span className="font-semibold">Zone : Zone : Read</span> and <span className="font-semibold">Zone : DNS : Edit</span>.
+              Read-only monitoring: <span className="font-semibold">Account : Load Balancing: Monitors and Pools : Read</span>, <span className="font-semibold">Zone : Load Balancers : Read</span> and <span className="font-semibold">Zone : Zone : Read</span>.
+              Only DNS-record failover for other applications needs <span className="font-semibold">Zone : DNS : Edit</span>.
               Optional: <span className="font-semibold">Zone : SSL and Certificates : Read</span> (SSL mode / certificate expiry) and <span className="font-semibold">Zone : Analytics : Read</span> (firewall events).
             </li>
             <li>Add it to the server <span className="font-semibold">.env</span> file as <code className={`px-1 rounded ${isDark ? 'bg-[#0B0F17]' : 'bg-slate-100'}`}>CLOUDFLARE_API_TOKEN=&lt;token&gt;</code>.</li>
@@ -119,6 +122,8 @@ export const CloudflareView: React.FC = () => {
   return (
     <div className="space-y-6">
       {header}
+
+      <LoadBalancerPanel />
 
       {cf?.lastError && (
         <div className={`p-3.5 rounded border text-xs font-mono flex items-start gap-2 ${isDark ? 'bg-[#1F1710] border-amber-900/80 text-amber-300' : 'bg-amber-50 border-amber-300 text-amber-800'}`}>
@@ -234,8 +239,8 @@ export const CloudflareView: React.FC = () => {
                 <div>
                   <div className={label}>Active origin</div>
                   <div className={`font-bold mt-0.5 break-all ${strong}`}>{selectedZone.loadBalancer.activeOrigin || '—'}</div>
-                  <div className={`text-[10px] mt-0.5 ${selectedZone.loadBalancer.healthCheckStatus === 'HEALTHY' ? 'text-emerald-500' : 'text-rose-500'}`}>
-                    {selectedZone.loadBalancer.healthCheckStatus === 'HEALTHY' ? 'Active server healthy' : 'Active server unhealthy'}
+                  <div className={`text-[10px] mt-0.5 ${selectedZone.loadBalancer.healthCheckStatus === 'HEALTHY' ? 'text-emerald-500' : selectedZone.loadBalancer.healthCheckStatus === 'UNKNOWN' ? 'text-slate-400' : 'text-rose-500'}`}>
+                    {selectedZone.loadBalancer.healthCheckStatus === 'HEALTHY' ? 'Active server healthy' : selectedZone.loadBalancer.healthCheckStatus === 'UNKNOWN' ? 'No data' : 'Active server unhealthy'}
                   </div>
                 </div>
                 <div>

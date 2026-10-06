@@ -2,10 +2,10 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import {
   Application, VpsServer, Monitor, Incident, CloudflareZone, BackupRecord, Runbook, Deployment, MaintenanceWindow,
   CommunicationChannel, EscalationPolicy, AuditLog, DeadManControlPlane, IncidentStatus, IncidentSeverity, MonitorType,
-  IntegrationStatus,
+  IntegrationStatus, LoadBalancerState,
 } from '../types';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { api, ApiError, HealthCheckResponse, BootstrapData } from '../services/api';
+import { api, ApiError, HealthCheckResponse, BootstrapData, SystemSummary } from '../services/api';
 
 export type RealtimeStatus = 'LIVE' | 'RECONNECTING' | 'OFFLINE';
 
@@ -30,6 +30,9 @@ interface OpsContextType {
   auditLogs: AuditLog[];
   deadMan: DeadManControlPlane;
   integrations: IntegrationStatus | null;
+  /** Cloudflare Load Balancer pools / health / routing (read-only); null until loaded */
+  loadBalancer: LoadBalancerState | null;
+  syncLoadBalancers: () => Promise<boolean>;
 
   isLoading: boolean;
   loadError: string | null;
@@ -107,7 +110,7 @@ interface OpsContextType {
   // API reachability
   apiHealth: {
     reachable: boolean;
-    status: 'HEALTHY' | 'DEGRADED' | 'UNREACHABLE';
+    status: 'CHECKING' | 'HEALTHY' | 'DEGRADED' | 'UNREACHABLE';
     lastChecked: string;
     latencyMs: number;
     endpoint: string;
@@ -136,8 +139,11 @@ interface OpsContextType {
     criticalIncidents: number;
     drReadinessCount: number;
     backupsCurrentCount: number;
-    cloudflareStatus: 'HEALTHY' | 'DEGRADED';
-    overallHealth: 'OPERATIONAL' | 'CRITICAL' | 'WARNING';
+    cloudflareStatus: SystemSummary['cloudflareStatus'];
+    overallHealth: SystemSummary['overallHealth'];
+    /** When the backend computed the health / DR / Cloudflare figures (null until loaded) */
+    generatedAt: string | null;
+    visibilityGaps: string[];
   };
 }
 
@@ -175,6 +181,8 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [deadMan, setDeadMan] = useState<DeadManControlPlane>(EMPTY_DEADMAN);
   const [integrations, setIntegrations] = useState<IntegrationStatus | null>(null);
+  const [loadBalancer, setLoadBalancer] = useState<LoadBalancerState | null>(null);
+  const [serverSummary, setServerSummary] = useState<SystemSummary | null>(null);
 
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -199,7 +207,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const lastEventAt = useRef(Date.now());
 
   const [apiHealth, setApiHealth] = useState<OpsContextType['apiHealth']>({
-    reachable: true, status: 'HEALTHY', lastChecked: '', latencyMs: 0, endpoint: '/api/health', details: null,
+    reachable: true, status: 'CHECKING', lastChecked: '', latencyMs: 0, endpoint: '/api/health', details: null,
   });
 
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
@@ -256,6 +264,8 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setCloudflareZones(d.cloudflareZones);
     setDeadMan(d.deadMan);
     setIntegrations(d.integrations);
+    setLoadBalancer(d.loadBalancer ?? null);
+    setServerSummary(d.summary);
     lastEventAt.current = Date.now();
   }, []);
 
@@ -294,10 +304,16 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   }, []);
 
+  // Health / DR readiness / Cloudflare status are computed by the backend from real checks
+  const refreshSummary = useCallback(async () => {
+    try { setServerSummary(await api.getSummary()); } catch { /* keep last; generatedAt shows its age */ }
+  }, []);
+
   useEffect(() => {
     void refreshAll();
     void triggerHealthCheck();
     const healthTimer = setInterval(triggerHealthCheck, 15_000);
+    const summaryTimer = setInterval(refreshSummary, 15_000);
     let firstConnect = true;
 
     const unsubscribe = api.connectRealtimeStream((event, raw) => {
@@ -339,16 +355,31 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         case 'backups_changed': refetch('backups', async () => setBackups(await api.getBackups())); break;
         case 'cloudflare_update': setCloudflareZones(raw as CloudflareZone[]); refetch('integrations', async () => setIntegrations(await api.integrations())); break;
         case 'deadman_update': setDeadMan(raw as DeadManControlPlane); break;
+        case 'loadbalancer_update':
+          setLoadBalancer(raw as LoadBalancerState);
+          refetch('integrations', async () => setIntegrations(await api.integrations()));
+          break;
         default: break;
+      }
+      if (event === 'monitor_update' || event === 'incident_created' || event === 'incident_update' || event === 'loadbalancer_update' || event === 'servers_changed') {
+        refetch('summary', refreshSummary);
       }
     }, connected => setRealtimeStatus(connected ? 'LIVE' : 'RECONNECTING'));
 
     return () => {
       clearInterval(healthTimer);
+      clearInterval(summaryTimer);
       unsubscribe();
       Object.values(pending.current).forEach(clearTimeout);
     };
-  }, [refreshAll, triggerHealthCheck, refetch]);
+  }, [refreshAll, triggerHealthCheck, refetch, refreshSummary]);
+
+  // Fallback: while the live stream is not connected, poll the API so the dashboard never freezes
+  useEffect(() => {
+    if (realtimeStatus === 'LIVE') return;
+    const t = setInterval(() => { void refreshAll(); }, 30_000);
+    return () => clearInterval(t);
+  }, [realtimeStatus, refreshAll]);
 
   // Mark realtime OFFLINE when the API itself is unreachable
   useEffect(() => {
@@ -553,6 +584,14 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setIntegrations(await api.integrations().catch(() => null));
     return Boolean(zones);
   }, [run]);
+  const syncLoadBalancers = useCallback(async () => {
+    const state = await run(() => api.syncLoadBalancers());
+    if (state) {
+      setLoadBalancer(state);
+      notify(state.status === 'OK' ? 'success' : 'error', state.status === 'OK' ? 'Cloudflare load balancer state refreshed' : `Cloudflare load balancing: ${state.status}${state.lastError ? ` — ${state.lastError}` : ''}`);
+    }
+    return state?.status === 'OK';
+  }, [run, notify]);
   const syncHostinger = useCallback(async () => {
     const vms = await run(() => api.syncHostinger(), 'Hostinger synced');
     setIntegrations(await api.integrations().catch(() => null));
@@ -564,23 +603,12 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const openIncidentList = incidents.filter(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED');
   const criticalIncidents = openIncidentList.filter(i => i.severity === 'CRITICAL' || i.severity === 'EMERGENCY').length;
   const healthyApps = applications.filter(a => a.status === 'HEALTHY').length;
-  const dayAgo = Date.now() - 26 * 3600 * 1000;
-  const drReadinessCount = applications.filter(a => {
-    const dr = servers.find(s => s.id === a.drServerId);
-    const drMonitors = monitors.filter(m => m.applicationId === a.id && m.environment === 'DR' && m.enabled);
-    return Boolean(dr && dr.status !== 'CRITICAL' && a.dnsRecordName && drMonitors.length > 0 && drMonitors.every(m => m.status === 'HEALTHY'));
-  }).length;
-  const cloudflareStatus: 'HEALTHY' | 'DEGRADED' = cloudflareZones.some(z => z.status !== 'ACTIVE') || Boolean(integrations?.cloudflare.lastError) ? 'DEGRADED' : 'HEALTHY';
-  const overallHealth: 'OPERATIONAL' | 'CRITICAL' | 'WARNING' =
-    criticalIncidents > 0 || deadMan.status === 'CRITICAL_SILENCE' ? 'CRITICAL'
-      : openIncidentList.length > 0 || applications.some(a => a.status === 'CRITICAL' || a.status === 'WARNING') ? 'WARNING'
-        : 'OPERATIONAL';
-
   return (
     <OpsContext.Provider
       value={{
         applications, servers, monitors, incidents, cloudflareZones, backups, runbooks, deployments,
         maintenanceWindows, communicationChannels, escalationPolicies, auditLogs, deadMan, integrations,
+        loadBalancer, syncLoadBalancers,
         isLoading, loadError, realtimeStatus, refreshAll,
         activeTab, setActiveTab, selectedAppId, setSelectedAppId, selectedServerId, setSelectedServerId,
         selectedIncidentId, setSelectedIncidentId, selectedRunbookId, setSelectedRunbookId,
@@ -606,10 +634,13 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           healthyMonitors: monitors.filter(m => m.status === 'HEALTHY').length,
           openIncidents: openIncidentList.length,
           criticalIncidents,
-          drReadinessCount,
-          backupsCurrentCount: backups.filter(b => b.status === 'SUCCESS' && Date.parse(b.completedAt) > dayAgo).length,
-          cloudflareStatus,
-          overallHealth,
+          drReadinessCount: serverSummary?.drReadinessCount ?? 0,
+          backupsCurrentCount: serverSummary?.backupsCurrentCount ?? 0,
+          cloudflareStatus: serverSummary?.cloudflareStatus ?? 'UNKNOWN',
+          // Never "OPERATIONAL" without the backend's evaluation
+          overallHealth: criticalIncidents > 0 ? 'CRITICAL' : serverSummary?.overallHealth ?? 'UNKNOWN',
+          generatedAt: serverSummary?.generatedAt ?? null,
+          visibilityGaps: serverSummary?.visibilityGaps ?? [],
         },
       }}
     >

@@ -14,6 +14,8 @@ import { TrafficFlowChart } from '../visuals/TrafficFlowChart';
 import { IncidentFlowChart } from '../visuals/IncidentFlowChart';
 import { TelemetryAreaGraph } from '../visuals/TelemetryAreaGraph';
 import { EmptyState } from '../ui/EmptyState';
+import { IctStatusPanel } from './IctStatusPanel';
+import { routeState } from '../ui/routing';
 
 // ── Formatting helpers (null-safe) ───────────────────────────────────────────
 const fmtPct = (v: number | null | undefined, digits = 2) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : `${v.toFixed(digits)}%`);
@@ -101,7 +103,7 @@ export const OverviewView: React.FC = () => {
   const {
     applications, servers, monitors, runbooks, cloudflareZones, deadMan, integrations, systemSummary,
     lastUpdatedSecondsAgo, setSelectedAppId, setSelectedIncidentId, incidents, runAllProbes, theme,
-    apiHealth, isLoading, loadError, refreshAll, realtimeStatus,
+    apiHealth, isLoading, loadError, refreshAll, realtimeStatus, loadBalancer,
   } = useOps();
   const { canDo } = useAuth();
   const navigate = useNavigate();
@@ -126,8 +128,9 @@ export const OverviewView: React.FC = () => {
   // ── Live telemetry derived from agent reports ──────────────────────────────
   const reporting = servers.filter(s => s.lastSeen !== '');
   const avgOf = (vals: number[]) => (vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null);
-  const avgCpu = avgOf(reporting.map(s => s.telemetry?.cpuPercent ?? 0));
-  const avgRam = avgOf(reporting.map(s => s.telemetry?.ramPercent ?? 0));
+  const live = servers.filter(s => s.agentStatus === 'CONNECTED' && s.telemetry);
+  const avgCpu = avgOf(live.map(s => s.telemetry.cpuPercent));
+  const avgRam = avgOf(live.map(s => s.telemetry.ramPercent));
   const criticalServers = servers.filter(s => s.status === 'CRITICAL');
 
   // ── 60-minute history from the metrics API (per-minute buckets) ────────────
@@ -235,13 +238,15 @@ export const OverviewView: React.FC = () => {
                 ? 'text-rose-400 bg-rose-950/60 border border-rose-800/60'
                 : systemSummary.overallHealth === 'WARNING'
                   ? 'text-amber-400 bg-amber-950/60 border border-amber-800/60'
-                  : 'text-emerald-400 bg-emerald-950/60 border border-emerald-800/60'
+                  : systemSummary.overallHealth === 'UNKNOWN'
+                    ? 'text-slate-400 bg-slate-900/60 border border-slate-700/60'
+                    : 'text-emerald-400 bg-emerald-950/60 border border-emerald-800/60'
             }`}>
               <StatusDot
-                status={systemSummary.overallHealth === 'CRITICAL' ? 'crit' : systemSummary.overallHealth === 'WARNING' ? 'warn' : 'ok'}
+                status={systemSummary.overallHealth === 'CRITICAL' ? 'crit' : systemSummary.overallHealth === 'WARNING' ? 'warn' : systemSummary.overallHealth === 'UNKNOWN' ? 'unknown' : 'ok'}
                 pulse={systemSummary.overallHealth !== 'OPERATIONAL'}
               />
-              {systemSummary.overallHealth}
+              {systemSummary.overallHealth}{systemSummary.overallHealth === 'OPERATIONAL' && systemSummary.visibilityGaps.length ? ' · PARTIAL DATA' : ''}
             </span>
           )}
           {/* API backend badge (from the context's periodic /api/health check) */}
@@ -272,6 +277,12 @@ export const OverviewView: React.FC = () => {
         <p className={`text-[11px] mt-1 flex items-center gap-2 font-mono flex-wrap ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
           <Clock className="w-3 h-3" />
           <span>Last update {lastUpdatedSecondsAgo}s ago</span>
+          {systemSummary.visibilityGaps.length > 0 && (
+            <>
+              <span className={isDark ? 'text-slate-700' : 'text-slate-300'}>·</span>
+              <span className="text-amber-500">Partial data: {systemSummary.visibilityGaps.join(' · ')}</span>
+            </>
+          )}
           <span className={isDark ? 'text-slate-700' : 'text-slate-300'}>·</span>
           <span className={overallUptime === null ? '' : overallUptime >= 99.9 ? 'text-emerald-500 font-semibold' : 'text-amber-500 font-semibold'}>
             {overallUptime === null ? 'No uptime data yet' : `${overallUptime.toFixed(2)}% avg uptime (30d, ${uptimeVals.length} app${uptimeVals.length === 1 ? '' : 's'})`}
@@ -432,6 +443,9 @@ export const OverviewView: React.FC = () => {
       {header}
       {loadErrorBanner}
 
+      {/* ── Load-Balancer-managed applications (ICT): live PRD / DR answer ── */}
+      <IctStatusPanel />
+
       {/* ── Active route per application ─────────────────────────────────── */}
       <div className={`p-3.5 sm:p-4 rounded-lg border flex flex-col sm:flex-row sm:items-start justify-between gap-3 ${
         isDark ? 'bg-[#0B1322] border-blue-900/40 text-slate-200' : 'bg-blue-50/70 border-blue-200 text-slate-800'
@@ -449,26 +463,29 @@ export const OverviewView: React.FC = () => {
             ) : applications.map(app => {
               const prd = servers.find(s => s.id === app.prdServerId);
               const dr = servers.find(s => s.id === app.drServerId);
-              const onDr = app.failoverState === 'DR_ACTIVE';
-              const moving = app.failoverState === 'FAILING_OVER';
+              const route = routeState(app, loadBalancer);
+              const onDr = route === 'DR';
+              const moving = route === 'MOVING';
+              const unknown = route === 'UNKNOWN';
               return (
                 <div key={app.id} className="flex items-center gap-2 flex-wrap text-[11px] font-mono">
                   <span className="font-semibold">{app.name}</span>
                   <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                    moving ? 'bg-blue-950 text-blue-300 border border-blue-800'
+                    unknown ? 'bg-slate-900 text-slate-300 border border-slate-700'
+                      : moving ? 'bg-blue-950 text-blue-300 border border-blue-800'
                       : onDr ? 'bg-amber-950 text-amber-300 border border-amber-800'
                         : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
                   }`}>
-                    {moving ? 'FAILING OVER' : onDr ? 'ON DR' : 'ON PRD'}
+                    {unknown ? 'ROUTING UNKNOWN' : moving ? 'FAILING OVER' : onDr ? 'ON DR' : 'ON PRD'}
                   </span>
-                  <span className={!onDr ? 'text-emerald-400 font-semibold' : 'text-slate-400'}>
+                  <span className={route === 'PRD' ? 'text-emerald-400 font-semibold' : 'text-slate-400'}>
                     PRD {prd ? (prd.ip || prd.hostname) : 'not linked'}
                   </span>
                   <span className="text-slate-500">/</span>
                   <span className={onDr ? 'text-amber-400 font-semibold' : 'text-slate-400'}>
                     DR {dr ? (dr.ip || dr.hostname) : 'not linked'}
                   </span>
-                  {app.dnsRecordName && <span className="text-slate-500">· {app.dnsRecordName}</span>}
+                  {(app.loadBalancer?.hostname || app.dnsRecordName) && <span className="text-slate-500">· {app.loadBalancer ? `Cloudflare LB ${app.loadBalancer.hostname}` : app.dnsRecordName}</span>}
                 </div>
               );
             })}
@@ -526,7 +543,7 @@ export const OverviewView: React.FC = () => {
         <MetricCard
           label="DR Ready"
           value={`${systemSummary.drReadinessCount}/${systemSummary.totalApps}`}
-          sub="DR linked, DNS set, DR checks OK"
+          sub="Server-evaluated DR readiness = READY"
           icon={Cloud}
           status={systemSummary.totalApps === 0 ? 'unknown' : systemSummary.drReadinessCount < systemSummary.totalApps ? 'warn' : 'ok'}
           onClick={() => go('resilience')}
@@ -543,10 +560,10 @@ export const OverviewView: React.FC = () => {
         />
         <MetricCard
           label="Cloudflare"
-          value={!cfConfigured ? 'Not set' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'Degraded' : 'Healthy'}
+          value={!cfConfigured ? 'Not set' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'Degraded' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'Healthy' : 'Unknown'}
           sub={cfConfigured ? `${cloudflareZones.length} zone(s)` : 'API token not configured'}
           icon={ShieldCheck}
-          status={!cfConfigured ? 'unknown' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'warn' : 'ok'}
+          status={!cfConfigured ? 'unknown' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'warn' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'ok' : 'unknown'}
           onClick={() => go('cloudflare')}
           isDark={isDark}
         />
@@ -872,9 +889,9 @@ export const OverviewView: React.FC = () => {
             {servers.slice(0, 8).map(srv => {
               const dot = dotFor(srv.status);
               const isCrit = dot === 'crit';
-              const hasData = srv.lastSeen !== '';
-              const cpu = Math.round(srv.telemetry?.cpuPercent ?? 0);
-              const ram = Math.round(srv.telemetry?.ramPercent ?? 0);
+              const hasData = srv.agentStatus === 'CONNECTED' && Boolean(srv.telemetry);
+              const cpu = hasData ? Math.round(srv.telemetry.cpuPercent) : 0;
+              const ram = hasData ? Math.round(srv.telemetry.ramPercent) : 0;
               return (
                 <div
                   key={srv.id}
@@ -909,10 +926,10 @@ export const OverviewView: React.FC = () => {
                       </div>
                     </div>
                   ) : (
-                    <div className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>No agent data yet</div>
+                    <div className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>{srv.lastSeen ? `Agent ${srv.agentStatus}` : 'Not connected'}</div>
                   )}
                   <div className={`text-[9px] font-mono mt-1.5 truncate ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-                    {srv.region || '—'} · {srv.environment}
+                    {srv.region || 'Region n/a'} · {srv.environment}
                   </div>
                 </div>
               );

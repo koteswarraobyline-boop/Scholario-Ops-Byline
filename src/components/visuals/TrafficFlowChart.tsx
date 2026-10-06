@@ -4,6 +4,7 @@ import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
 import { Environment, OperationalStatus, VpsServer } from '../../types';
 import { Globe, ShieldCheck, Server, RefreshCw, Network, Loader2, X } from 'lucide-react';
+import { routeState } from '../ui/routing';
 
 const parseTs = (iso?: string | null): number | null => {
   if (!iso) return null;
@@ -20,7 +21,7 @@ const statusText = (s: OperationalStatus) =>
   s === 'HEALTHY' ? 'text-emerald-500' : s === 'WARNING' || s === 'STALE' ? 'text-amber-500' : s === 'CRITICAL' ? 'text-rose-500' : 'text-slate-400';
 
 export const TrafficFlowChart: React.FC = () => {
-  const { applications, servers, monitors, cloudflareZones, integrations, triggerFailover, theme } = useOps();
+  const { applications, servers, monitors, cloudflareZones, integrations, triggerFailover, theme, loadBalancer } = useOps();
   const { hasRole } = useAuth();
   const navigate = useNavigate();
   const isDark = theme === 'dark';
@@ -63,8 +64,12 @@ export const TrafficFlowChart: React.FC = () => {
     );
   }
 
-  const isDrActive = app.failoverState === 'DR_ACTIVE';
-  const isFailingOver = app.failoverState === 'FAILING_OVER';
+  const route = routeState(app, loadBalancer);
+  const routeUnknown = route === 'UNKNOWN';
+  const isDrActive = route === 'DR';
+  const isFailingOver = route === 'MOVING';
+  const lbRouting = app.loadBalancer ? loadBalancer?.routing.find(r => r.hostname === app.loadBalancer!.hostname) : undefined;
+  const lbPoolName = (id: string) => loadBalancer?.pools.find(x => x.id === id)?.name || id;
   const prdServer = servers.find(s => s.id === app.prdServerId);
   const drServer = servers.find(s => s.id === app.drServerId);
   const zone = cloudflareZones.find(z => z.domain === app.cloudflareZone);
@@ -82,7 +87,9 @@ export const TrafficFlowChart: React.FC = () => {
 
   const target: 'DR' | 'PRIMARY' = isDrActive ? 'PRIMARY' : 'DR';
   const targetServer = target === 'DR' ? drServer : prdServer;
-  const blocker = !integrations?.cloudflare.configured
+  const blocker = app.loadBalancer
+    ? 'Routed by the Cloudflare Load Balancer — use the failover pre-flight on PRD / DR Readiness'
+    : !integrations?.cloudflare.configured
     ? 'Cloudflare is not configured'
     : !app.cloudflareZone || !app.dnsRecordName
       ? 'No Cloudflare zone / DNS record set for this application'
@@ -105,7 +112,9 @@ export const TrafficFlowChart: React.FC = () => {
   const muted = isDark ? 'text-slate-400' : 'text-slate-500';
   const cardClass = `p-2.5 rounded border ${isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'}`;
 
-  const renderOrigin = (env: 'PRD' | 'DR', srv: VpsServer | undefined, active: boolean, avail: { total: number; healthy: number; critical: number }) => (
+  const renderOrigin = (env: 'PRD' | 'DR', srv: VpsServer | undefined, active: boolean, avail: { total: number; healthy: number; critical: number }) => {
+    const routeLabel = routeUnknown ? 'ROUTING UNKNOWN' : active ? 'ACTIVE' : 'STANDBY';
+    return (
     <div className={`p-2.5 rounded-lg border transition-all ${
       active
         ? env === 'PRD'
@@ -121,7 +130,7 @@ export const TrafficFlowChart: React.FC = () => {
         <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded font-bold shrink-0 ${
           active ? (env === 'PRD' ? 'bg-emerald-600 text-white' : 'bg-amber-600 text-white') : (isDark ? 'bg-slate-800 text-slate-400' : 'bg-slate-200 text-slate-600')
         }`}>
-          {active ? 'ACTIVE' : 'STANDBY'}
+          {routeLabel}
         </span>
       </div>
       {srv ? (
@@ -142,7 +151,8 @@ export const TrafficFlowChart: React.FC = () => {
         Monitors: {avail.total === 0 ? 'none configured' : `${avail.healthy}/${avail.total} healthy${avail.critical ? ` · ${avail.critical} critical` : ''}`}
       </div>
     </div>
-  );
+    );
+  };
 
   return (
     <div className={shell}>
@@ -156,13 +166,15 @@ export const TrafficFlowChart: React.FC = () => {
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-semibold text-xs tracking-tight">Traffic &amp; Failover Routing</span>
               <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold ${
-                isFailingOver
+                routeUnknown
+                  ? (isDark ? 'bg-slate-900 text-slate-300 border border-slate-700' : 'bg-slate-100 text-slate-700 border border-slate-300')
+                  : isFailingOver
                   ? (isDark ? 'bg-blue-950 text-blue-300 border border-blue-800' : 'bg-blue-100 text-blue-800 border border-blue-300')
                   : isDrActive
                     ? (isDark ? 'bg-amber-950 text-amber-300 border border-amber-800' : 'bg-amber-100 text-amber-800 border border-amber-300')
                     : (isDark ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-emerald-100 text-emerald-800 border border-emerald-300')
               }`}>
-                {isFailingOver ? 'FAILOVER IN PROGRESS' : isDrActive ? 'DR ACTIVE' : 'PRIMARY ACTIVE'}
+                {routeUnknown ? 'ROUTING UNKNOWN' : isFailingOver ? 'FAILOVER IN PROGRESS' : isDrActive ? 'DR ACTIVE' : 'PRIMARY ACTIVE'}
               </span>
             </div>
             <p className={`text-[11px] font-mono mt-0.5 ${muted}`}>
@@ -259,7 +271,7 @@ export const TrafficFlowChart: React.FC = () => {
                 <Globe className="w-4 h-4" />
               </div>
               <span className="font-semibold text-xs font-mono">Clients</span>
-              <span className={`text-[10px] font-mono mt-0.5 break-all ${muted}`}>{app.dnsRecordName || 'No DNS record set'}</span>
+              <span className={`text-[10px] font-mono mt-0.5 break-all ${muted}`}>{app.loadBalancer?.hostname || app.dnsRecordName || 'No DNS record set'}</span>
             </div>
 
             <div className="flex-1 px-1.5">
@@ -295,31 +307,35 @@ export const TrafficFlowChart: React.FC = () => {
               <div className="w-8 h-8 rounded-full bg-amber-500/20 text-amber-500 flex items-center justify-center mb-1.5">
                 <Network className="w-4 h-4" />
               </div>
-              <span className="font-semibold text-xs font-mono">DNS Record</span>
+              <span className="font-semibold text-xs font-mono">{app.loadBalancer ? 'Load Balancer' : 'DNS Record'}</span>
               <span className={`text-[10px] font-mono mt-0.5 ${muted}`}>
-                {dnsRecord ? `${dnsRecord.type} → ${dnsRecord.target}` : 'Record not synced'}
+                {app.loadBalancer
+                  ? (lbRouting?.found ? `order ${lbRouting.defaultPools.map(lbPoolName).join(' → ')}` : lbRouting?.error ? 'Routing not readable' : `Cloudflare LB: ${(loadBalancer?.status ?? 'PENDING').replace('_', ' ')}`)
+                  : dnsRecord ? `${dnsRecord.type} → ${dnsRecord.target}` : 'Record not synced'}
               </span>
               <span className={`text-[9px] font-mono mt-1 px-1.5 py-0.5 rounded font-semibold ${
                 pointsAt === 'PRD' ? 'bg-emerald-500/15 text-emerald-400'
                   : pointsAt === 'DR' ? 'bg-amber-500/20 text-amber-400'
                     : 'bg-slate-500/15 text-slate-400'
               }`}>
-                {pointsAt === 'PRD' ? 'Points at PRD' : pointsAt === 'DR' ? 'Points at DR' : pointsAt === 'OTHER' ? 'Points at unknown IP' : `State: ${app.failoverState.replace('_', ' ')}`}
-                {dnsRecord ? (dnsRecord.proxied ? ' · proxied' : ' · DNS only') : ''}
+                {app.loadBalancer
+                  ? (route === 'PRD' ? 'Serving PRD pool' : route === 'DR' ? 'Serving DR pool' : 'Serving pool unknown')
+                  : pointsAt === 'PRD' ? 'Points at PRD' : pointsAt === 'DR' ? 'Points at DR' : pointsAt === 'OTHER' ? 'Points at unknown IP' : `State: ${app.failoverState.replace('_', ' ')}`}
+                {!app.loadBalancer && dnsRecord ? (dnsRecord.proxied ? ' · proxied' : ' · DNS only') : ''}
               </span>
             </div>
 
             {/* Split connectors to origins */}
             <div className="w-12 flex flex-col items-center justify-center relative">
               <div className="h-28 w-full flex flex-col justify-between items-center py-2">
-                <div className={`w-full border-t-2 ${!isDrActive ? 'border-emerald-500' : 'border-dashed border-slate-600'}`} />
+                <div className={`w-full border-t-2 ${route === 'PRD' ? 'border-emerald-500' : 'border-dashed border-slate-600'}`} />
                 <div className={`w-full border-t-2 ${isDrActive ? 'border-amber-500' : 'border-dashed border-slate-600'}`} />
               </div>
             </div>
 
             {/* Stage 4: Origins */}
             <div className="w-64 space-y-2.5 z-10">
-              {renderOrigin('PRD', prdServer, !isDrActive, prdAvail)}
+              {renderOrigin('PRD', prdServer, route === 'PRD', prdAvail)}
               {renderOrigin('DR', drServer, isDrActive, drAvail)}
             </div>
           </div>

@@ -134,11 +134,11 @@ export const ReportsView: React.FC = () => {
         </div>
         <div className={card}>
           <div className={label}>Cloudflare</div>
-          <div className={`text-base font-bold mt-0.5 ${systemSummary.cloudflareStatus === 'HEALTHY' ? 'text-emerald-500' : 'text-amber-500'}`}>{systemSummary.cloudflareStatus}</div>
+          <div className={`text-base font-bold mt-0.5 ${systemSummary.cloudflareStatus === 'HEALTHY' ? 'text-emerald-500' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'text-amber-500' : 'text-slate-400'}`}>{systemSummary.cloudflareStatus}</div>
         </div>
         <div className={card}>
           <div className={label}>Overall</div>
-          <div className={`text-base font-bold mt-0.5 ${systemSummary.overallHealth === 'OPERATIONAL' ? 'text-emerald-500' : systemSummary.overallHealth === 'WARNING' ? 'text-amber-500' : 'text-rose-500'}`}>{systemSummary.overallHealth}</div>
+          <div className={`text-base font-bold mt-0.5 ${systemSummary.overallHealth === 'OPERATIONAL' ? 'text-emerald-500' : systemSummary.overallHealth === 'WARNING' ? 'text-amber-500' : systemSummary.overallHealth === 'UNKNOWN' ? 'text-slate-400' : 'text-rose-500'}`}>{systemSummary.overallHealth}</div>
         </div>
       </div>
 

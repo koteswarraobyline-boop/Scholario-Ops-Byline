@@ -81,6 +81,109 @@ export interface Application {
   recentDeploymentVersion?: string;
   lastTestedRecoveryDate?: string;
   lastTestedRecoveryDurationMin?: number;
+  /** Public application URLs probed by the synthetic monitors */
+  prdUrl?: string;
+  drUrl?: string;
+  /**
+   * Cloudflare Load Balancer mapping. When set, traffic routing is owned by the
+   * Cloudflare LB and Scholario Ops reads pool / origin health from the API.
+   */
+  loadBalancer?: AppLoadBalancerMapping;
+  /** Settings for the URL monitors that are created and kept in sync from prdUrl / drUrl */
+  healthCheck?: AppHealthCheck;
+  /** Per-environment inventory; unset fields are unknown / pending confirmation */
+  environments?: Partial<Record<Environment, EnvironmentInventory>>;
+}
+
+/** Facts about one environment of an application. null = not confirmed (shown as UNKNOWN / PENDING). */
+export interface EnvironmentInventory {
+  appPort: number | null;
+  healthPath: string | null;
+  webServer: string | null;
+  processManager: string | null;
+  routing: string | null;
+  /** Database the telemetry agent probes on this server; null = database monitoring not configured */
+  dbEngine: 'mysql' | 'mariadb' | 'postgresql' | null;
+  dbName: string | null;
+  dbPort: number | null;
+  /** Replication lag above this is a failure (null = use REPLICATION_MAX_LAG_SEC) */
+  replicationMaxLagSec: number | null;
+  /** A backup older than this is STALE (null = use BACKUP_MAX_AGE_HOURS) */
+  backupMaxAgeHours: number | null;
+  notes: string;
+}
+
+/** Database facts reported by the agent on the server that runs the database */
+export interface DatabaseReport {
+  engine: 'mysql' | 'mariadb' | 'postgresql';
+  name: string | null;
+  available: boolean;
+  latencyMs: number | null;
+  version: string | null;
+  sizeBytes: number | null;
+  connections: number | null;
+  maxConnections: number | null;
+  longRunningQueries: number | null;
+  replication: {
+    role: 'primary' | 'replica' | 'none' | 'unknown';
+    state: 'running' | 'stopped' | 'error' | 'unknown';
+    lagSec: number | null;
+    lastSuccessAt: string | null;
+    error: string | null;
+  } | null;
+  error: string | null;
+  observedAt: string;
+}
+
+export type ProviderStatus = 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE' | 'UNKNOWN';
+
+/** Normalised VPS facts from the Hostinger API (only fields the API returns) */
+export interface HostingerInfo {
+  vmId: number;
+  hostname: string | null;
+  plan: string | null;
+  cpus: number | null;
+  ramGb: number | null;
+  diskGb: number | null;
+  os: string | null;
+  state: string | null;
+  status: ProviderStatus;
+  region: string | null;
+  ipv4: string[];
+  fetchedAt: string;
+}
+
+export type DatabaseHealth = 'HEALTHY' | 'DEGRADED' | 'DOWN' | 'UNKNOWN' | 'NOT_CONFIGURED';
+export type BackupHealth = 'HEALTHY' | 'STALE' | 'FAILED' | 'UNKNOWN';
+
+export interface BackupStatus {
+  applicationId: string;
+  applicationName: string;
+  status: BackupHealth;
+  lastBackupAt: string | null;
+  lastBackupStatus: string | null;
+  ageHours: number | null;
+  thresholdHours: number;
+  type: string | null;
+  destination: string | null;
+  detail: string;
+}
+
+export interface AppHealthCheck {
+  /** null = any 2xx/3xx */
+  expectedStatus: number | null;
+  intervalSec: number;
+  timeoutSec: number;
+  /** Also monitor the TLS certificate of each URL host */
+  sslMonitoring: boolean;
+}
+
+export interface AppLoadBalancerMapping {
+  accountId: string;
+  /** Hostname served by the load balancer, e.g. app.example.com */
+  hostname: string;
+  prdPoolId: string;
+  drPoolId: string;
 }
 
 export interface VpsTelemetry {
@@ -92,6 +195,14 @@ export interface VpsTelemetry {
   networkOutKbps: number;
   observedAt: string;
   receivedAt: string;
+  /** Absolute values reported by agent >= 3.1 (null when the agent did not report them) */
+  memTotalMb?: number | null;
+  memUsedMb?: number | null;
+  memAvailableMb?: number | null;
+  diskTotalGb?: number | null;
+  diskUsedGb?: number | null;
+  diskFreeGb?: number | null;
+  uptimeSec?: number | null;
 }
 
 export interface VpsProcess {
@@ -141,11 +252,28 @@ export interface VpsServer {
   /** Last agent report time; empty string when the agent has never reported */
   lastSeen: string;
   notes?: string;
+  /** Purchased plan capacity (from configuration or the Hostinger API), separate from agent-measured values */
+  planSpec?: { name: string; cpuCores: number; ramGb: number; diskGb: number; source: 'manual' | 'config' | 'hostinger' };
+  /** Hostname and source IP of the last authenticated agent report */
+  reportedHostname?: string;
+  agentSourceIp?: string;
+  /** When the agent process started (changes on every agent restart) */
+  agentStartedAt?: string;
+  agentRestartCount?: number;
+  /** Collector errors reported by the agent in its last report */
+  agentErrors?: string[];
+  /** Database probes reported by the agent (empty / undefined = none reported) */
+  databases?: DatabaseReport[];
+  /** Facts from the Hostinger API when the server matched a Hostinger VM by IP */
+  hostinger?: HostingerInfo;
   telemetry: VpsTelemetry;
   processes: VpsProcess[];
   services: VpsService[];
   logs: VpsLogEntry[];
 }
+
+/** Classified result of a single synthetic check */
+export type ProbeStatus = 'UP' | 'DOWN' | 'DEGRADED' | 'TIMEOUT' | 'DNS_ERROR' | 'TLS_ERROR' | 'CONNECTION_ERROR' | 'UNKNOWN';
 
 export interface MonitorCheckHistory {
   timestamp: string;
@@ -153,6 +281,21 @@ export interface MonitorCheckHistory {
   responseTimeMs: number;
   statusCode?: number;
   detail?: string;
+  probeStatus?: ProbeStatus;
+}
+
+/** One persisted check result (DATA_DIR/checks/*.jsonl) */
+export interface CheckRecord {
+  t: string;
+  monitorId: string;
+  applicationId: string;
+  environment: Environment;
+  target: string;
+  ok: boolean;
+  probeStatus: ProbeStatus;
+  statusCode: number | null;
+  latencyMs: number;
+  reason: string;
 }
 
 export interface Monitor {
@@ -193,6 +336,11 @@ export interface Monitor {
   lastPingAt?: string;
   /** Last numeric value reported to a push-based monitor (e.g. replication lag seconds) */
   lastValue?: number;
+  /** Classification of the most recent check */
+  lastProbeStatus?: ProbeStatus;
+  lastStatusCode?: number | null;
+  /** 'app-url' / 'app-ssl': created from an application's PRD/DR URL and updated when the URL changes */
+  managedBy?: 'app-url' | 'app-ssl';
 }
 
 export interface IncidentTimelineEvent {
@@ -235,6 +383,34 @@ export interface Incident {
   runbookId?: string;
   notes: IncidentNote[];
   mitigationActionTaken?: string;
+  /** Facts captured from monitoring when the incident was raised / updated */
+  context?: IncidentContext;
+}
+
+export interface IncidentContext {
+  application: string;
+  environment: Environment;
+  vps: string | null;
+  ip: string | null;
+  monitor: string | null;
+  target: string | null;
+  firstDetectedAt: string;
+  latestDetectedAt: string;
+  failureReason: string;
+  probeStatus: ProbeStatus | null;
+  responseCode: number | null;
+  latencyMs: number | null;
+  cloudflare: {
+    poolName: string;
+    poolEnabled: boolean | null;
+    poolHealthy: boolean | null;
+    originAddress: string | null;
+    originHealthy: boolean | null;
+    originFailureReason: string | null;
+    checkedAt: string | null;
+  } | null;
+  recoveredAt?: string;
+  durationMinutes?: number;
 }
 
 export interface CloudflareDnsRecord {
@@ -252,7 +428,7 @@ export interface CloudflareLoadBalancer {
   primaryOrigin: string;
   drOrigin: string;
   activeOrigin: string;
-  healthCheckStatus: 'HEALTHY' | 'UNHEALTHY';
+  healthCheckStatus: 'HEALTHY' | 'UNHEALTHY' | 'UNKNOWN';
   failoverPolicy: 'AUTOMATIC_WITH_CONFIRMATION' | 'MANUAL';
   lastReroutedAt?: string;
 }
@@ -387,11 +563,108 @@ export interface DeadManControlPlane {
   lastAlertSentAt?: string;
 }
 
+/** NOT_CONFIGURED = the check cannot run because something is not set up yet (never a pass) */
+export type CheckVerdict = 'PASS' | 'FAIL' | 'WARNING' | 'UNKNOWN' | 'NOT_CONFIGURED';
+
 export interface DrReadinessItem {
   key: string;
   label: string;
-  status: 'READY' | 'WARNING' | 'FAILED' | 'UNKNOWN';
+  status: CheckVerdict;
   detail: string;
+  /** Timestamp of the data the verdict is based on (null when there is no data) */
+  observedAt: string | null;
+  /** 'core' = the 13 DR readiness checks; 'capacity' = DR server resources (agent) */
+  group?: 'core' | 'capacity';
+}
+
+export type DrOverall = 'READY' | 'PARTIALLY_READY' | 'NOT_READY' | 'UNKNOWN';
+
+// ── Cloudflare Load Balancing (read-only) ────────────────────────────────────
+export interface LbOriginHealth {
+  pop: string;
+  healthy: boolean | null;
+  rttMs: number | null;
+  responseCode: number | null;
+  failureReason: string | null;
+}
+
+export interface LbOrigin {
+  name: string;
+  address: string;
+  enabled: boolean | null;
+  weight: number | null;
+  /** From the pools list (Cloudflare's aggregated view) */
+  healthy: boolean | null;
+  failureReason: string | null;
+  /** Per-PoP health from the pool health endpoint */
+  health: LbOriginHealth[];
+}
+
+export interface LbPool {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean | null;
+  healthy: boolean | null;
+  role: 'PRD' | 'DR';
+  applicationId: string;
+  origins: LbOrigin[];
+  /** false when the mapped pool was not returned by the API */
+  found: boolean;
+  listFetchedAt: string | null;
+  healthFetchedAt: string | null;
+  healthError: string | null;
+}
+
+export interface LbRouting {
+  hostname: string;
+  found: boolean;
+  enabled: boolean | null;
+  proxied: boolean | null;
+  steeringPolicy: string | null;
+  defaultPools: string[];
+  fallbackPool: string | null;
+  /** First enabled + healthy pool in default_pools order (null when unknown) */
+  activePoolId: string | null;
+  fetchedAt: string | null;
+  error: string | null;
+}
+
+export type LbSyncStatus = 'NOT_CONFIGURED' | 'OK' | 'PERMISSION_REQUIRED' | 'ERROR' | 'PENDING';
+
+export interface LoadBalancerState {
+  accountId: string | null;
+  status: LbSyncStatus;
+  lastSyncAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  pools: LbPool[];
+  routing: LbRouting[];
+}
+
+export interface FailoverPreflightCheck {
+  key: string;
+  label: string;
+  status: CheckVerdict;
+  detail: string;
+  observedAt: string | null;
+}
+
+export interface FailoverPreflight {
+  appId: string;
+  appName: string;
+  target: 'DR' | 'PRIMARY';
+  currentPrimary: string;
+  currentDr: string;
+  routing: LbRouting | null;
+  checks: FailoverPreflightCheck[];
+  drOverall: DrOverall;
+  /** True when no check FAILs (the operator still has to confirm) */
+  preflightPassed: boolean;
+  /** LOAD_BALANCER_MANUAL: the switch is done in Cloudflare by an operator; DNS_RECORD: Ops switches the record */
+  mode: 'LOAD_BALANCER_MANUAL' | 'DNS_RECORD';
+  plan: string[];
+  generatedAt: string;
 }
 
 export interface TcpProbeResult {
@@ -419,6 +692,8 @@ export interface SyntheticTransactionResult {
 export interface HttpProbeResult {
   target: string;
   reachable: boolean;
+  /** Network-level classification: UP when an HTTP response was received */
+  probeStatus?: ProbeStatus;
   statusCode: number | null;
   latencyMs: number;
   resolvedIp?: string;
@@ -431,7 +706,9 @@ export interface HttpProbeResult {
 
 export interface IntegrationStatus {
   cloudflare: { configured: boolean; lastSyncAt: string | null; lastError: string | null; zoneCount: number };
-  hostinger: { configured: boolean; lastSyncAt: string | null; lastError: string | null; vmCount: number };
+  hostinger: { configured: boolean; lastSyncAt: string | null; lastError: string | null; vmCount: number; status: 'NOT_CONFIGURED' | 'OK' | 'AUTH_FAILED' | 'RATE_LIMITED' | 'ERROR' | 'PENDING' };
+  notifications: { status: 'CONFIGURED' | 'NOT_CONFIGURED'; enabledChannels: number };
+  loadBalancing: { configured: boolean; status: LbSyncStatus; lastSyncAt: string | null; lastError: string | null; poolCount: number };
   smtp: { configured: boolean };
   deadMan: { configured: boolean };
   publicUrl: string;

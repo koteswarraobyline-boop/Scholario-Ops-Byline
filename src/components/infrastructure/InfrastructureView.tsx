@@ -5,6 +5,14 @@ import { VpsServer, ServerMetricPoint } from '../../types';
 import { api } from '../../services/api';
 import { Search, X, Server, RefreshCw } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
+import { Ago, verdictColor } from '../ui/Freshness';
+
+const gb = (mb: number | null | undefined) => (mb === null || mb === undefined ? null : Math.round(mb / 102.4) / 10);
+const fmtUptime = (sec: number | null | undefined, days: number) => {
+  if (sec === null || sec === undefined) return days ? `${days} days` : '—';
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600);
+  return d ? `${d}d ${h}h` : `${h}h ${Math.floor((sec % 3600) / 60)}m`;
+};
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const validDate = (s?: string | null) => Boolean(s) && !Number.isNaN(Date.parse(s as string));
@@ -197,7 +205,7 @@ interface VpsDetailModalProps {
 export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose, isDark }) => {
   const { applications } = useOps();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<'system' | 'processes' | 'services' | 'logs'>('system');
+  const [activeTab, setActiveTab] = useState<'system' | 'processes' | 'services' | 'logs' | 'health'>('system');
   const app = applications.find(a => a.id === server.applicationId);
   const reported = hasReported(server);
   const t = server.telemetry;
@@ -249,7 +257,8 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
                 <span className={`text-xs font-semibold ${agentColor(server.agentStatus)}`}>Agent {server.agentStatus}</span>
               </div>
               <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                {[server.provider, server.region, server.plan].filter(Boolean).join(' · ') || 'Provider details not set'}
+                {server.provider || 'Provider: Not available'} · {server.region || 'Region: Not available'}
+                {server.planSpec ? ` · ${server.planSpec.name}: ${server.planSpec.cpuCores} CPU · ${server.planSpec.ramGb} GB RAM · ${server.planSpec.diskGb} GB disk (${server.planSpec.source === 'hostinger' ? 'Hostinger API' : 'configured plan'})` : server.plan ? ` · ${server.plan}` : ''}
                 {' · '}Application: <strong>{app?.name ?? 'Unassigned'}</strong>
               </p>
             </div>
@@ -268,6 +277,7 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
             { id: 'processes', label: `Processes (${server.processes.length})` },
             { id: 'services', label: `Services (${server.services.length})` },
             { id: 'logs', label: `Logs (${server.logs.length})` },
+            { id: 'health', label: 'Agent · Database · Provider' },
           ].map(tab => (
             <button
               key={tab.id}
@@ -315,6 +325,11 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
                 notReported('telemetry')
               ) : (
                 <>
+                  {server.agentStatus !== 'CONNECTED' && (
+                    <div className="p-2 rounded border border-amber-500/40 text-amber-500 text-[11px]">
+                      Agent {server.agentStatus}: the values below are from the last report (<Ago iso={server.lastSeen} />), not live.
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                     <div className={card}>
                       <div className={`text-[10px] uppercase ${muted}`}>CPU</div>
@@ -328,14 +343,22 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
                       <div className={`text-base font-bold tabular-nums ${t.ramPercent > 80 ? 'text-rose-500' : (isDark ? 'text-slate-100' : 'text-slate-900')}`}>
                         {fmtNum(t.ramPercent)}%
                       </div>
-                      <div className={`text-[10px] mt-0.5 ${muted}`}>{server.ramGb ? `${server.ramGb} GB` : '—'}</div>
+                      <div className={`text-[10px] mt-0.5 ${muted}`}>
+                        {t.memUsedMb != null && t.memTotalMb != null
+                          ? `${gb(t.memUsedMb)} / ${gb(t.memTotalMb)} GB used · ${gb(t.memAvailableMb) ?? '?'} GB available`
+                          : server.ramGb ? `${server.ramGb} GB total` : '—'}
+                      </div>
                     </div>
                     <div className={card}>
                       <div className={`text-[10px] uppercase ${muted}`}>Disk</div>
                       <div className={`text-base font-bold tabular-nums ${t.diskPercent > 85 ? 'text-rose-500' : (isDark ? 'text-slate-100' : 'text-slate-900')}`}>
                         {fmtNum(t.diskPercent)}%
                       </div>
-                      <div className={`text-[10px] mt-0.5 ${muted}`}>{server.diskGb ? `${server.diskGb} GB` : '—'}</div>
+                      <div className={`text-[10px] mt-0.5 ${muted}`}>
+                        {t.diskUsedGb != null && t.diskTotalGb != null
+                          ? `${t.diskUsedGb} / ${t.diskTotalGb} GB used · ${t.diskFreeGb ?? '?'} GB free`
+                          : server.diskGb ? `${server.diskGb} GB total` : '—'}
+                      </div>
                     </div>
                     <div className={card}>
                       <div className={`text-[10px] uppercase ${muted}`}>Load Average</div>
@@ -361,11 +384,11 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
                     </div>
                     <div>
                       <span className={muted}>Uptime:</span>
-                      <p className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{server.uptimeDays} days</p>
+                      <p className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{fmtUptime(t.uptimeSec, server.uptimeDays)}</p>
                     </div>
                     <div>
                       <span className={muted}>Sample observed:</span>
-                      <p className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{fmtTime(t.observedAt)}</p>
+                      <p className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{fmtTime(t.observedAt)} · <Ago iso={t.observedAt} staleAfterSec={60} /></p>
                     </div>
                   </div>
                 </>
@@ -454,6 +477,68 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
               </div>
             )
           )}
+
+          {/* TAB: AGENT / DATABASE / PROVIDER */}
+          {activeTab === 'health' && (() => {
+            const state = !server.lastSeen ? 'NOT_CONNECTED' : server.agentStatus === 'CONNECTED' ? 'ONLINE' : server.agentStatus === 'STALE' ? 'STALE' : 'OFFLINE';
+            const rows = (pairs: Array<[string, React.ReactNode]>) => (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
+                {pairs.map(([k, v]) => <div key={k} className="flex gap-2"><span className={`w-36 shrink-0 ${muted}`}>{k}</span><span className="break-words">{v ?? '—'}</span></div>)}
+              </div>
+            );
+            const unknown = <span className="text-slate-400">Not reported</span>;
+            return (
+              <div className="space-y-4">
+                <div className={card}>
+                  <div className="text-xs font-bold mb-2">Telemetry agent — <span className={verdictColor(state)}>{state.replace('_', ' ')}</span></div>
+                  {rows([
+                    ['Version', server.agentVersion || unknown],
+                    ['Last heartbeat', server.lastSeen ? <Ago iso={server.lastSeen} staleAfterSec={60} /> : unknown],
+                    ['Agent started', server.agentStartedAt ? fmtDateTime(server.agentStartedAt) : unknown],
+                    ['Restarts seen', server.lastSeen ? String(server.agentRestartCount ?? 0) : unknown],
+                    ['Reported hostname', server.reportedHostname || unknown],
+                    ['Reports from IP', server.agentSourceIp || unknown],
+                  ])}
+                  {(server.agentErrors?.length ?? 0) > 0 && (
+                    <div className="mt-2 text-[11px] text-amber-500">Collector errors: {server.agentErrors!.join(' · ')}</div>
+                  )}
+                </div>
+                <div className={card}>
+                  <div className="text-xs font-bold mb-2">Databases (probed by the agent on this server)</div>
+                  {!server.databases?.length ? (
+                    <div className={`text-[11px] ${muted}`}>{server.lastSeen ? 'The agent reports no database probe. Set DB_ENGINE (and DB_CNF / DB_PGPASSFILE for credentials) in /etc/scholario-agent.conf on the server.' : 'UNKNOWN — agent not connected.'}</div>
+                  ) : server.databases.map((d, i) => (
+                    <div key={i} className="space-y-1 mb-2">
+                      <div className="text-[11px] font-semibold">{d.engine}{d.name ? ` · ${d.name}` : ''} — <span className={d.available ? 'text-emerald-500' : 'text-rose-500'}>{d.available ? 'AVAILABLE' : 'UNAVAILABLE'}</span> <span className={muted}>(<Ago iso={d.observedAt} staleAfterSec={180} />)</span></div>
+                      {rows([
+                        ['Version', d.version ?? unknown],
+                        ['Latency', d.latencyMs != null ? `${d.latencyMs} ms` : unknown],
+                        ['Size', d.sizeBytes != null ? `${(d.sizeBytes / 1073741824).toFixed(2)} GB` : unknown],
+                        ['Connections', d.connections != null ? `${d.connections}${d.maxConnections ? ` / ${d.maxConnections}` : ''}` : unknown],
+                        ['Queries > 60 s', d.longRunningQueries != null ? String(d.longRunningQueries) : unknown],
+                        ['Replication', d.replication ? `${d.replication.role} · ${d.replication.state}${d.replication.lagSec != null ? ` · lag ${d.replication.lagSec}s` : ''}${d.replication.error ? ` · ${d.replication.error}` : ''}` : 'not detected'],
+                      ])}
+                      {d.error && <div className="text-[11px] text-rose-500">{d.error}</div>}
+                    </div>
+                  ))}
+                </div>
+                <div className={card}>
+                  <div className="text-xs font-bold mb-2">Hosting provider (Hostinger API)</div>
+                  {!server.hostinger ? (
+                    <div className={`text-[11px] ${muted}`}>Not available — HOSTINGER_API_TOKEN not set, the sync failed, or no Hostinger VM has this IP.</div>
+                  ) : rows([
+                    ['Status', <span className={verdictColor(server.hostinger.status)}>{server.hostinger.status}{server.hostinger.state ? ` (${server.hostinger.state})` : ''}</span>],
+                    ['Plan', server.hostinger.plan ?? unknown],
+                    ['CPU / RAM / Disk', `${server.hostinger.cpus ?? '?'} CPU · ${server.hostinger.ramGb ?? '?'} GB · ${server.hostinger.diskGb ?? '?'} GB`],
+                    ['OS', server.hostinger.os ?? unknown],
+                    ['Region', server.hostinger.region ?? 'Not available'],
+                    ['Hostname', server.hostinger.hostname ?? unknown],
+                    ['Read', <Ago iso={server.hostinger.fetchedAt} staleAfterSec={1800} />],
+                  ])}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* TAB: LOGS */}
           {activeTab === 'logs' && (

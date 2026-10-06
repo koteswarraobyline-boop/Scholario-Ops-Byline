@@ -4,7 +4,7 @@ import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
 import { Server, RefreshCw, AlertTriangle, KeyRound, Link2 } from 'lucide-react';
 import { api } from '../../services/api';
-import { VpsServer } from '../../types';
+import { VpsServer, HostingerInfo } from '../../types';
 import { EmptyState } from '../ui/EmptyState';
 import { ErrorState } from '../ui/ErrorState';
 import { SkeletonTable } from '../ui/Skeleton';
@@ -23,28 +23,19 @@ interface VmRow {
   dataCenter: string;
 }
 
-const str = (v: unknown): string => (typeof v === 'string' ? v : typeof v === 'number' ? String(v) : '');
-const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-const obj = (v: unknown): Record<string, unknown> | null => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
-
-const toRow = (raw: Record<string, unknown>, idx: number): VmRow => {
-  const dc = obj(raw.data_center);
-  const ipv4 = Array.isArray(raw.ipv4)
-    ? (raw.ipv4 as unknown[]).map(a => str(obj(a)?.address)).filter(Boolean)
-    : [];
-  return {
-    id: str(raw.id) || `vm-${idx}`,
-    hostname: str(raw.hostname),
-    state: str(raw.state),
-    cpus: num(raw.cpus),
-    memoryMb: num(raw.memory),
-    diskMb: num(raw.disk),
-    plan: str(raw.plan),
-    ipv4,
-    template: str(obj(raw.template)?.name),
-    dataCenter: [str(dc?.city), str(dc?.location), str(dc?.name)].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(' · '),
-  };
-};
+/** Rows come from the server's normalised Hostinger data (unknown fields stay null / empty). */
+const toRow = (vm: HostingerInfo): VmRow => ({
+  id: String(vm.vmId),
+  hostname: vm.hostname ?? '',
+  state: vm.state ?? '',
+  cpus: vm.cpus,
+  memoryMb: vm.ramGb !== null ? vm.ramGb * 1024 : null,
+  diskMb: vm.diskGb !== null ? vm.diskGb * 1024 : null,
+  plan: vm.plan ?? '',
+  ipv4: vm.ipv4,
+  template: vm.os ?? '',
+  dataCenter: vm.region ?? '',
+});
 
 const fmtGb = (mb: number | null) => (mb === null ? '—' : `${(mb / 1024).toFixed(mb % 1024 === 0 ? 0 : 1)} GB`);
 
