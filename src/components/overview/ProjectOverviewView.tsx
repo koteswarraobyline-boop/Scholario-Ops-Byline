@@ -1,28 +1,19 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
-import { 
-  BookOpen, 
-  Layers, 
-  Cpu, 
-  Server, 
-  ShieldCheck, 
-  CheckCircle2, 
-  Activity, 
-  FileText, 
-  Terminal, 
-  Sparkles,
+import {
+  Server,
+  ShieldCheck,
+  Activity,
   ArrowRight,
-  Radio,
   Globe,
-  Sliders,
-  Database,
   GitBranch,
   RefreshCw,
   Sun,
   Moon,
   AlertTriangle,
-  Clock,
-  ExternalLink
+  Network,
+  Settings2,
 } from 'lucide-react';
 
 /**
@@ -51,20 +42,15 @@ export const KpiCardSkeleton: React.FC<{ isDark: boolean; index?: number }> = ({
       }`}
     >
       <div>
-        {/* Top Header Row: Label + Icon */}
         <div className="flex items-center justify-between gap-2">
           <div className={`h-2.5 ${tWidth} rounded ${shimmer}`} />
           <div className={`w-3.5 h-3.5 rounded ${shimmer} shrink-0`} />
         </div>
-
-        {/* Middle Metric Row: 2xl Value + Status Pill */}
         <div className="mt-1.5 flex items-baseline gap-2">
           <div className={`h-7 ${vWidth} rounded ${shimmer}`} />
           <div className={`h-4.5 ${pWidth} rounded ${shimmer}`} />
         </div>
       </div>
-
-      {/* Bottom Footer Row: Description + Arrow */}
       <div className={`mt-2.5 pt-2 border-t flex items-center justify-between ${
         isDark ? 'border-[#1E293B]' : 'border-slate-100'
       }`}>
@@ -75,61 +61,101 @@ export const KpiCardSkeleton: React.FC<{ isDark: boolean; index?: number }> = ({
   );
 };
 
+type Section = 'architecture' | 'stack' | 'features' | 'themes' | 'principles';
+
 export const ProjectOverviewView: React.FC = () => {
-  const { 
-    theme, 
-    setActiveTab, 
-    systemSummary, 
-    incidents, 
-    servers, 
-    applications, 
+  const {
+    theme,
+    systemSummary,
+    incidents,
+    servers,
+    applications,
+    monitors,
     deployments,
+    cloudflareZones,
+    integrations,
     deadMan,
-    runAllProbes
+    isLoading,
+    refreshAll,
   } = useOps();
+  const navigate = useNavigate();
+  const go = (tab: string) => navigate(`/${tab}`);
   const isDark = theme === 'dark';
 
-  const [isLoading, setIsLoading] = useState(false);
-  const [activeSection, setActiveSection] = useState<'architecture' | 'stack' | 'features' | 'themes' | 'principles'>('architecture');
+  const [syncing, setSyncing] = useState(false);
+  const [activeSection, setActiveSection] = useState<Section>('architecture');
 
-  // Brief initial loading state to demonstrate zero-CLS transition on mount
-  useEffect(() => {
-    setIsLoading(true);
-    const timer = setTimeout(() => {
-      setIsLoading(false);
-    }, 450);
-    return () => clearTimeout(timer);
-  }, []);
-
-  const handleRefreshMetrics = () => {
-    setIsLoading(true);
-    runAllProbes();
-    setTimeout(() => {
-      setIsLoading(false);
-    }, 550);
+  const handleRefresh = async () => {
+    setSyncing(true);
+    try { await refreshAll(); } finally { setSyncing(false); }
   };
 
-  // Calculate real-time health stats
+  // ── Real-time stats derived from context ──────────────────────────────────
   const activeIncidents = incidents.filter(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED');
-  const criticalIncidentsCount = incidents.filter(i => i.severity === 'CRITICAL' && i.status !== 'RESOLVED').length;
+  const criticalIncidentsCount = activeIncidents.filter(i => i.severity === 'CRITICAL' || i.severity === 'EMERGENCY').length;
 
-  // Average cluster uptime across all applications
-  const avgUptime = applications.length > 0 
-    ? +(applications.reduce((acc, app) => acc + app.uptime30d, 0) / applications.length).toFixed(2)
-    : 99.98;
+  const uptimeVals = applications.map(a => a.uptime30d).filter((v): v is number => v !== null);
+  const avgUptime = uptimeVals.length ? uptimeVals.reduce((a, b) => a + b, 0) / uptimeVals.length : null;
 
-  // Pending / In-flight deployments
-  const pendingDeployments = deployments.filter(d => 
+  const pendingDeployments = deployments.filter(d =>
     d.status === 'BUILDING' || d.status === 'DEPLOYING' || d.status === 'HEALTH_CHECK' || d.status === 'SMOKE_TEST'
   );
   const latestDeployment = deployments[0];
-  const latestAppName = latestDeployment 
+  const latestAppName = latestDeployment
     ? (applications.find(a => a.id === latestDeployment.applicationId)?.name || latestDeployment.applicationId)
     : '';
 
+  const prdServers = servers.filter(s => s.environment === 'PRD').length;
+  const drServers = servers.filter(s => s.environment === 'DR').length;
+  const reportingServers = servers.filter(s => s.lastSeen !== '').length;
+  const regions = [...new Set(servers.map(s => s.region).filter(Boolean))];
+  const providers = [...new Set(servers.map(s => s.provider).filter(Boolean))];
+  const autoFailoverApps = applications.filter(a => a.autoFailover).length;
+  const dnsLinkedApps = applications.filter(a => a.dnsRecordName).length;
+  const cfConfigured = Boolean(integrations?.cloudflare.configured);
+  const deadManConfigured = deadMan.status !== 'NOT_CONFIGURED';
+  const thresholds = [...new Set(monitors.map(m => m.failureConfirmationThreshold))];
+
+  const deadManLabel = !deadManConfigured
+    ? 'Dead-man: not configured'
+    : deadMan.status === 'HEALTHY' ? `Dead-man: OK (${deadMan.intervalSec}s ping)` : `Dead-man: SILENT (${deadMan.consecutiveMisses} missed)`;
+
+  const card = `p-4 rounded-lg border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`;
+  const tile = `p-3 rounded border text-center ${isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'}`;
+  const bodyText = `text-xs leading-relaxed font-sans ${isDark ? 'text-slate-300' : 'text-slate-600'}`;
+
+  const kpiShell = (highlight: boolean) => `p-3.5 sm:p-4 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 min-h-[116px] focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none ${
+    highlight
+      ? (isDark ? 'bg-[#180E13] border-rose-900/70 hover:border-rose-600' : 'bg-rose-50/70 border-rose-200 hover:border-rose-400 shadow-xs')
+      : (isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs')
+  }`;
+  const kpiKeys = (tab: string) => (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(tab); }
+  };
+
+  const views: Array<{ id: string; title: string; desc: string }> = [
+    { id: 'overview', title: 'Command Center', desc: `Live summary: ${systemSummary.totalApps} application(s), ${systemSummary.totalServers} server(s), ${systemSummary.totalMonitors} monitor(s).` },
+    { id: 'setup', title: 'Setup', desc: 'Register servers and applications, link PRD/DR servers and Cloudflare DNS records, install the telemetry agent.' },
+    { id: 'applications', title: 'Applications', desc: 'Per-application health, uptime, latency percentiles and failover state.' },
+    { id: 'infrastructure', title: 'VPS Fleet', desc: 'Agent-reported CPU, RAM, disk, network, processes and services for each server.' },
+    { id: 'monitors', title: 'Monitors', desc: 'HTTP, TCP, DNS, SSL, heartbeat and infrastructure checks with confirmation thresholds.' },
+    { id: 'incidents', title: 'Incidents', desc: 'Incidents opened by confirmed monitor failures or declared manually; acknowledge, assign and resolve.' },
+    { id: 'resilience', title: 'PRD / DR Readiness', desc: 'DR readiness checks and Cloudflare DNS failover / failback.' },
+    { id: 'backups', title: 'Backups', desc: 'Backup records and freshness as reported to the control plane.' },
+    { id: 'dependencies', title: 'Dependencies', desc: 'Application dependency status.' },
+    { id: 'cloudflare', title: 'Cloudflare', desc: 'Zones, DNS records and SSL status synced from the Cloudflare API.' },
+    { id: 'hostinger', title: 'Hostinger', desc: 'VPS inventory synced from the Hostinger API.' },
+    { id: 'deployments', title: 'Deployments', desc: 'Deployment records reported to the control plane.' },
+    { id: 'runbooks', title: 'Runbooks', desc: 'Step-by-step operating procedures with per-step completion tracking.' },
+    { id: 'maintenance', title: 'Maintenance Windows', desc: 'Scheduled windows that suppress alerts for the affected monitors.' },
+    { id: 'communications', title: 'Communications', desc: 'Teams, email and webhook channels with escalation policies.' },
+    { id: 'reports', title: 'Daily Report', desc: 'Daily operational report generated from current data.' },
+    { id: 'audit', title: 'Audit Trail', desc: 'Chronological record of operator and system actions.' },
+  ];
+
   return (
     <div className="space-y-5 min-w-0">
-      
+
       {/* 1. Page Header */}
       <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b ${
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
@@ -144,26 +170,26 @@ export const ProjectOverviewView: React.FC = () => {
             </span>
           </div>
           <p className={`text-xs mt-1 font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Scholario IT Operations Control Center · Production Specification &amp; Real-Time Health Summary
+            Scholario IT Operations Control Center · How it works &amp; current health summary
           </p>
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
           <button
-            onClick={handleRefreshMetrics}
-            disabled={isLoading}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-medium rounded transition-colors border cursor-pointer ${
-              isDark 
-                ? 'text-slate-300 bg-[#162033] hover:bg-[#1C2942] border-[#243552]' 
+            onClick={handleRefresh}
+            disabled={syncing}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-medium rounded transition-colors border cursor-pointer disabled:opacity-60 disabled:cursor-wait ${
+              isDark
+                ? 'text-slate-300 bg-[#162033] hover:bg-[#1C2942] border-[#243552]'
                 : 'text-slate-700 bg-white hover:bg-slate-50 border-slate-300 shadow-2xs'
             }`}
-            title="Poll real-time cluster telemetry and refresh health stats"
+            title="Reload all operational data from the API"
           >
-            <RefreshCw className={`w-3.5 h-3.5 text-blue-500 ${isLoading ? 'animate-spin' : ''}`} />
-            <span>{isLoading ? 'SYNCING...' : 'SYNC STATS'}</span>
+            <RefreshCw className={`w-3.5 h-3.5 text-blue-500 ${syncing ? 'animate-spin' : ''}`} />
+            <span>{syncing ? 'SYNCING...' : 'SYNC STATS'}</span>
           </button>
           <button
-            onClick={() => setActiveTab('overview')}
+            onClick={() => go('overview')}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded transition-colors shadow-xs cursor-pointer"
           >
             <span>COMMAND CENTER</span>
@@ -172,7 +198,7 @@ export const ProjectOverviewView: React.FC = () => {
         </div>
       </div>
 
-      {/* 2. REAL-TIME SUMMARY KPI CARDS SECTION (OR SKELETON LOADERS) */}
+      {/* 2. KPI cards (or skeletons while the first load is in flight) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
         {isLoading ? (
           <>
@@ -184,97 +210,63 @@ export const ProjectOverviewView: React.FC = () => {
         ) : (
           <>
             {/* KPI 1: Active Incidents */}
-            <div 
-              role="button"
-              tabIndex={0}
-              onClick={() => setActiveTab('incidents')}
-              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveTab('incidents'); } }}
-              className={`p-3.5 sm:p-4 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 min-h-[116px] focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none ${
-                activeIncidents.length > 0
-                  ? (isDark ? 'bg-[#180E13] border-rose-900/70 hover:border-rose-600' : 'bg-rose-50/70 border-rose-200 hover:border-rose-400 shadow-xs')
-                  : (isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs')
-              }`}
-            >
+            <div role="button" tabIndex={0} onClick={() => go('incidents')} onKeyDown={kpiKeys('incidents')} className={kpiShell(activeIncidents.length > 0)}>
               <div>
                 <div className="flex items-center justify-between gap-2">
-                  <span className={`text-[10px] font-mono font-semibold uppercase tracking-wider truncate ${
-                    activeIncidents.length > 0 ? 'text-rose-500' : 'text-slate-400'
-                  }`}>
+                  <span className={`text-[10px] font-mono font-semibold uppercase tracking-wider truncate ${activeIncidents.length > 0 ? 'text-rose-500' : 'text-slate-400'}`}>
                     Active Incidents
                   </span>
-                  <AlertTriangle className={`w-3.5 h-3.5 shrink-0 ${
-                    activeIncidents.length > 0 ? 'text-rose-500 animate-pulse' : 'text-slate-400'
-                  }`} />
+                  <AlertTriangle className={`w-3.5 h-3.5 shrink-0 ${activeIncidents.length > 0 ? 'text-rose-500 animate-pulse' : 'text-slate-400'}`} />
                 </div>
                 <div className="mt-1.5 flex items-baseline gap-2">
-                  <span className={`text-2xl font-bold font-mono tabular-nums ${
-                    activeIncidents.length > 0 ? 'text-rose-500' : (isDark ? 'text-slate-100' : 'text-slate-900')
-                  }`}>
+                  <span className={`text-2xl font-bold font-mono tabular-nums ${activeIncidents.length > 0 ? 'text-rose-500' : (isDark ? 'text-slate-100' : 'text-slate-900')}`}>
                     {activeIncidents.length}
                   </span>
                   <span className={`text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded ${
-                    criticalIncidentsCount > 0
-                      ? 'bg-rose-500/20 text-rose-400 border border-rose-800'
-                      : 'bg-emerald-500/10 text-emerald-500'
+                    criticalIncidentsCount > 0 ? 'bg-rose-500/20 text-rose-400 border border-rose-800' : 'bg-emerald-500/10 text-emerald-500'
                   }`}>
-                    {criticalIncidentsCount > 0 ? `${criticalIncidentsCount} CRITICAL` : 'NOMINAL'}
+                    {criticalIncidentsCount > 0 ? `${criticalIncidentsCount} CRITICAL` : 'NONE CRITICAL'}
                   </span>
                 </div>
               </div>
               <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
                 <span className="truncate">
-                  {activeIncidents[0] ? `INC-1042: ${activeIncidents[0].title.slice(0, 22)}...` : 'All systems operational'}
+                  {activeIncidents[0] ? `${activeIncidents[0].id}: ${activeIncidents[0].title}` : 'No open incidents'}
                 </span>
                 <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
               </div>
             </div>
 
-            {/* KPI 2: Server Uptime Percentage */}
-            <div 
-              role="button"
-              tabIndex={0}
-              onClick={() => setActiveTab('uptime')}
-              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveTab('uptime'); } }}
-              className={`p-3.5 sm:p-4 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 min-h-[116px] focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none ${
-                isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs'
-              }`}
-            >
+            {/* KPI 2: Uptime */}
+            <div role="button" tabIndex={0} onClick={() => go('applications')} onKeyDown={kpiKeys('applications')} className={kpiShell(false)}>
               <div>
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-slate-400 truncate">
-                    Server Uptime Percentage
+                    Avg Application Uptime (30d)
                   </span>
                   <Activity className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
                 </div>
                 <div className="mt-1.5 flex items-baseline gap-2">
                   <span className={`text-2xl font-bold font-mono tabular-nums ${
-                    avgUptime >= 99.9 ? 'text-emerald-500' : 'text-amber-500'
+                    avgUptime === null ? 'text-slate-500' : avgUptime >= 99.9 ? 'text-emerald-500' : 'text-amber-500'
                   }`}>
-                    {avgUptime}%
+                    {avgUptime === null ? '—' : `${avgUptime.toFixed(2)}%`}
                   </span>
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-semibold">
-                    SLA ≥ 99.90%
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-500/10 text-slate-400 font-semibold">
+                    {avgUptime === null ? 'NO DATA YET' : `${uptimeVals.length} APP(S)`}
                   </span>
                 </div>
               </div>
               <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
                 <span className="truncate">
-                  {systemSummary.healthyServers}/{systemSummary.totalServers} Hostinger VPS Healthy
+                  {systemSummary.healthyServers}/{systemSummary.totalServers} servers healthy
                 </span>
                 <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
               </div>
             </div>
 
             {/* KPI 3: Pending Deployments */}
-            <div 
-              role="button"
-              tabIndex={0}
-              onClick={() => setActiveTab('deployments')}
-              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveTab('deployments'); } }}
-              className={`p-3.5 sm:p-4 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 min-h-[116px] focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none ${
-                isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs'
-              }`}
-            >
+            <div role="button" tabIndex={0} onClick={() => go('deployments')} onKeyDown={kpiKeys('deployments')} className={kpiShell(false)}>
               <div>
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-slate-400 truncate">
@@ -289,9 +281,7 @@ export const ProjectOverviewView: React.FC = () => {
                     {pendingDeployments.length}
                   </span>
                   <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded font-semibold ${
-                    pendingDeployments.length > 0 
-                      ? 'bg-blue-500/10 text-blue-400' 
-                      : 'bg-slate-500/10 text-slate-400'
+                    pendingDeployments.length > 0 ? 'bg-blue-500/10 text-blue-400' : 'bg-slate-500/10 text-slate-400'
                   }`}>
                     {pendingDeployments.length > 0 ? 'IN PROGRESS' : 'IDLE'}
                   </span>
@@ -299,26 +289,18 @@ export const ProjectOverviewView: React.FC = () => {
               </div>
               <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
                 <span className="truncate">
-                  {latestDeployment ? `Last: ${latestDeployment.version} (${latestAppName})` : 'Zero queued pipelines'}
+                  {latestDeployment ? `Last: ${latestDeployment.version} (${latestAppName})` : 'No deployments recorded'}
                 </span>
                 <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
               </div>
             </div>
 
-            {/* KPI 4: DR Standby Readiness */}
-            <div 
-              role="button"
-              tabIndex={0}
-              onClick={() => setActiveTab('resilience')}
-              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveTab('resilience'); } }}
-              className={`p-3.5 sm:p-4 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between min-w-0 min-h-[116px] focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none ${
-                isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs'
-              }`}
-            >
+            {/* KPI 4: DR Readiness */}
+            <div role="button" tabIndex={0} onClick={() => go('resilience')} onKeyDown={kpiKeys('resilience')} className={kpiShell(false)}>
               <div>
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-slate-400 truncate">
-                    PRD / DR Standby Mesh
+                    PRD / DR Readiness
                   </span>
                   <ShieldCheck className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
                 </div>
@@ -327,14 +309,12 @@ export const ProjectOverviewView: React.FC = () => {
                     {systemSummary.drReadinessCount} / {systemSummary.totalApps}
                   </span>
                   <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 font-semibold">
-                    WARM STANDBY
+                    DR READY
                   </span>
                 </div>
               </div>
               <div className="mt-2.5 pt-2 border-t border-inherit flex items-center justify-between text-[11px] font-mono text-slate-400">
-                <span className="truncate">
-                  Watchdog: {deadMan.status === 'HEALTHY' ? '1.0s Heartbeat OK' : 'Silenced'}
-                </span>
+                <span className="truncate">{deadManLabel}</span>
                 <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform shrink-0 ml-1 text-slate-400 group-hover:text-blue-500" />
               </div>
             </div>
@@ -344,21 +324,21 @@ export const ProjectOverviewView: React.FC = () => {
 
       {/* 3. Navigation Section Switcher */}
       <div className="flex flex-wrap gap-1.5 font-mono text-xs pt-1">
-        {[
+        {([
           { id: 'architecture', label: '1. Architecture & Data Flow' },
-          { id: 'stack', label: '2. Tech Stack & Inter Typography' },
-          { id: 'features', label: '3. 14 Operational Views' },
-          { id: 'themes', label: '4. Enterprise Dual Themes' },
-          { id: 'principles', label: '5. SRE Operational Principles' }
-        ].map(sec => (
+          { id: 'stack', label: '2. Tech Stack' },
+          { id: 'features', label: '3. Operational Views' },
+          { id: 'themes', label: '4. Themes' },
+          { id: 'principles', label: '5. Operational Principles' }
+        ] as Array<{ id: Section; label: string }>).map(sec => (
           <button
             key={sec.id}
-            onClick={() => setActiveSection(sec.id as any)}
+            onClick={() => setActiveSection(sec.id)}
             className={`px-3 py-1.5 rounded text-xs transition-colors cursor-pointer border ${
               activeSection === sec.id
                 ? 'bg-blue-600 text-white font-semibold border-blue-500 shadow-xs'
-                : isDark 
-                  ? 'bg-[#111726] hover:bg-[#162033] text-slate-300 border-[#1E293B]' 
+                : isDark
+                  ? 'bg-[#111726] hover:bg-[#162033] text-slate-300 border-[#1E293B]'
                   : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200 shadow-xs'
             }`}
           >
@@ -370,98 +350,89 @@ export const ProjectOverviewView: React.FC = () => {
       {/* Section 1: Architecture & Data Flow */}
       {activeSection === 'architecture' && (
         <div className="space-y-4">
-          <div className={`p-4 rounded-lg border ${
-            isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
-          }`}>
+          <div className={card}>
             <h2 className="text-xs font-bold font-mono uppercase tracking-wider text-blue-500 mb-2">
-              High-Level Topology Architecture
+              Topology (from registered data)
             </h2>
-            <p className={`text-xs leading-relaxed font-sans mb-4 ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
-              Scholario Ops manages an EdTech multi-region infrastructure spanning 8 core applications and 16 Hostinger KVM VPS nodes across Singapore, Frankfurt, Mumbai, and London. Traffic routing, DDoS defense, and failover orchestration are decoupled into an Anycast ingress tier and origin cluster.
+            <p className={`${bodyText} mb-4`}>
+              {servers.length === 0 && applications.length === 0 ? (
+                <>
+                  Nothing is registered yet. Add your PRD and DR servers and your applications in{' '}
+                  <button onClick={() => go('setup')} className="text-blue-400 hover:text-blue-300 underline underline-offset-2 cursor-pointer">Setup</button>.
+                </>
+              ) : (
+                <>
+                  Currently monitoring {applications.length} application(s) across {servers.length} server(s)
+                  {providers.length ? ` (${providers.join(', ')})` : ''}{regions.length ? ` in ${regions.join(', ')}` : ''}.
+                  Each application is served by a PRD server and can fail over to a DR server by switching its Cloudflare DNS record.
+                </>
+              )}
             </p>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 font-mono text-xs">
-              <div className={`p-3 rounded border text-center ${
-                isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
-              }`}>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 font-mono text-xs">
+              <div className={tile}>
                 <Globe className="w-5 h-5 mx-auto text-blue-500 mb-1" />
-                <div className="font-bold text-xs">1. End Users</div>
-                <div className="text-[10px] text-slate-400 mt-1">14,200 req/min</div>
-                <div className="text-[9px] text-emerald-500 mt-1">330+ Global PoPs</div>
+                <div className="font-bold text-xs">1. Clients</div>
+                <div className="text-[10px] text-slate-400 mt-1">Resolve the application hostname</div>
               </div>
-
-              <div className={`p-3 rounded border text-center ${
-                isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
-              }`}>
+              <div className={tile}>
                 <ShieldCheck className="w-5 h-5 mx-auto text-indigo-400 mb-1" />
-                <div className="font-bold text-xs">2. Anycast CDN</div>
-                <div className="text-[10px] text-slate-400 mt-1">Cloudflare Edge</div>
-                <div className="text-[9px] text-emerald-500 mt-1">TLS 1.3 Strict</div>
+                <div className="font-bold text-xs">2. Cloudflare DNS</div>
+                <div className="text-[10px] text-slate-400 mt-1">
+                  {cfConfigured ? `${cloudflareZones.length} zone(s) synced` : 'API token not configured'}
+                </div>
+                <div className="text-[9px] text-slate-500 mt-1">{dnsLinkedApps}/{applications.length} app(s) with a DNS record</div>
               </div>
-
-              <div className={`p-3 rounded border text-center ${
-                isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
-              }`}>
-                <Cpu className="w-5 h-5 mx-auto text-rose-400 mb-1" />
-                <div className="font-bold text-xs">3. WAF Defense</div>
-                <div className="text-[10px] text-slate-400 mt-1">ML Threat Filter</div>
-                <div className="text-[9px] text-amber-500 mt-1">Quarantined Bypass</div>
-              </div>
-
-              <div className={`p-3 rounded border text-center ${
-                isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
-              }`}>
-                <Sliders className="w-5 h-5 mx-auto text-amber-400 mb-1" />
-                <div className="font-bold text-xs">4. Load Balancer</div>
-                <div className="text-[10px] text-slate-400 mt-1">Traffic Director</div>
-                <div className="text-[9px] text-blue-400 mt-1">5s Probe Rate</div>
-              </div>
-
-              <div className={`p-3 rounded border text-center ${
-                isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'
-              }`}>
+              <div className={tile}>
                 <Server className="w-5 h-5 mx-auto text-emerald-400 mb-1" />
-                <div className="font-bold text-xs">5. Origins (PRD/DR)</div>
-                <div className="text-[10px] text-slate-400 mt-1">Hostinger Fleet</div>
-                <div className="text-[9px] text-emerald-500 mt-1">Active / Standby</div>
+                <div className="font-bold text-xs">3. PRD Origins</div>
+                <div className="text-[10px] text-slate-400 mt-1">{prdServers} server(s)</div>
               </div>
+              <div className={tile}>
+                <Network className="w-5 h-5 mx-auto text-amber-400 mb-1" />
+                <div className="font-bold text-xs">4. DR Origins</div>
+                <div className="text-[10px] text-slate-400 mt-1">{drServers} server(s)</div>
+              </div>
+            </div>
+            <div className={`text-[10px] font-mono mt-3 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+              Telemetry: {reportingServers}/{servers.length} server agent(s) reporting · {monitors.length} monitor(s) configured
             </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className={`p-4 rounded-lg border ${
-              isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
-            }`}>
+            <div className={card}>
               <h3 className="text-xs font-bold font-mono uppercase tracking-wider text-emerald-500 mb-1.5">
-                Zurich Dead-Man Watchdog
+                Dead-Man Heartbeat
               </h3>
-              <p className={`text-xs leading-relaxed font-sans ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
-                Independent out-of-band monitoring node located in Zurich, Switzerland (`ch-zh-monitor-01`). Emits cardiac rhythm pulses at 1.0 Hz with real-time jitter calculation. If 4 consecutive pulses are missed (tolerance window 5.0s), the control plane automatically triggers silence escalation via Microsoft Teams and SMS.
+              <p className={bodyText}>
+                The control plane pings an external heartbeat service on a fixed interval. If the control plane itself
+                goes down, that external service stops receiving pings and alerts independently.{' '}
+                {deadManConfigured
+                  ? `Configured target: ${deadMan.nodeLocation}, every ${deadMan.intervalSec}s, silence alert after ${deadMan.toleranceSec}s. Current status: ${deadMan.status}.`
+                  : 'Not configured — set DEADMAN_HEARTBEAT_URL in the server .env and restart.'}
               </p>
             </div>
 
-            <div className={`p-4 rounded-lg border ${
-              isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
-            }`}>
+            <div className={card}>
               <h3 className="text-xs font-bold font-mono uppercase tracking-wider text-amber-500 mb-1.5">
-                Anycast Failover Engine
+                DNS Failover
               </h3>
-              <p className={`text-xs leading-relaxed font-sans ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
-                Provides zero-downtime traffic diversion between primary origin nodes and standby disaster recovery nodes. Cloudflare load balancer origins are updated in real-time, preserving session affinity while isolating degraded compute nodes in under 15 seconds.
+              <p className={bodyText}>
+                Failover updates the application's Cloudflare DNS record from the PRD server IP to the DR server IP (and back
+                on failback). Manual failover requires the super_admin role. Auto-failover is enabled for {autoFailoverApps} of{' '}
+                {applications.length} application(s) and only triggers when PRD is confirmed CRITICAL and DR monitors are healthy.
               </p>
             </div>
           </div>
         </div>
       )}
 
-      {/* Section 2: Tech Stack & Inter Typography */}
+      {/* Section 2: Tech Stack */}
       {activeSection === 'stack' && (
         <div className="space-y-4">
-          <div className={`p-4 rounded-lg border ${
-            isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
-          }`}>
+          <div className={card}>
             <h2 className="text-xs font-bold font-mono uppercase tracking-wider text-blue-500 mb-2">
-              Technology Stack &amp; Typography Hierarchy
+              Technology Stack
             </h2>
             <div className="w-full min-w-0 overflow-x-auto">
               <table className="w-full text-left text-xs font-mono min-w-[600px]">
@@ -469,45 +440,24 @@ export const ProjectOverviewView: React.FC = () => {
                   <tr>
                     <th className="py-2 px-3">Layer</th>
                     <th className="py-2 px-3">Technology</th>
-                    <th className="py-2 px-3">Role &amp; Configuration</th>
+                    <th className="py-2 px-3">Role</th>
                   </tr>
                 </thead>
                 <tbody className={`divide-y ${isDark ? 'divide-[#1E293B]' : 'divide-slate-100'}`}>
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-blue-400">UI Framework</td>
-                    <td className="py-2.5 px-3">React 19</td>
-                    <td className={`py-2.5 px-3 font-sans ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Functional components, hooks, memoized actions, clean lifecycle management</td>
-                  </tr>
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-blue-400">Primary Typography</td>
-                    <td className="py-2.5 px-3 font-bold text-emerald-400">Inter</td>
-                    <td className={`py-2.5 px-3 font-sans ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Weights 300 to 900 loaded via Google Fonts; OpenType features cv02, cv03, cv04, cv11 applied globally across headers, titles, and body</td>
-                  </tr>
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-blue-400">Tabular Typography</td>
-                    <td className="py-2.5 px-3">JetBrains Mono</td>
-                    <td className={`py-2.5 px-3 font-sans ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Tabular figures (`tabular-nums`) for hostnames, IPv4, commit hashes, latency numbers, status tags</td>
-                  </tr>
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-blue-400">Build Tool</td>
-                    <td className="py-2.5 px-3">Vite 8</td>
-                    <td className={`py-2.5 px-3 font-sans ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>High-performance bundler running on port 3000 (0.0.0.0 host binding)</td>
-                  </tr>
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-blue-400">CSS Framework</td>
-                    <td className="py-2.5 px-3">Tailwind CSS v4</td>
-                    <td className={`py-2.5 px-3 font-sans ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Configured with `@theme` variables, zero-runtime CSS footprint</td>
-                  </tr>
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-blue-400">Iconography</td>
-                    <td className="py-2.5 px-3">lucide-react v0.546</td>
-                    <td className={`py-2.5 px-3 font-sans ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Vector glyphs with consistent optical sizing and stroke weights</td>
-                  </tr>
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-blue-400">State &amp; Persistence</td>
-                    <td className="py-2.5 px-3">OpsContext + localStorage</td>
-                    <td className={`py-2.5 px-3 font-sans ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Global reactive context with instant synchronization to 6 localStorage snapshot keys</td>
-                  </tr>
+                  {[
+                    ['UI Framework', 'React 19', 'Functional components and hooks'],
+                    ['Build Tool', 'Vite', 'Frontend dev server and bundler'],
+                    ['CSS Framework', 'Tailwind CSS v4', 'Utility-first styling with dark / light themes'],
+                    ['Iconography', 'lucide-react', 'Icon set used across the UI'],
+                    ['State', 'OpsContext', 'Single source of state loaded from the REST API and kept current via the realtime event stream'],
+                    ['Backend', 'Node.js API', 'Monitor engine, incident engine, Cloudflare / Hostinger integrations, agent ingestion'],
+                  ].map(([layer, tech, role]) => (
+                    <tr key={layer}>
+                      <td className="py-2.5 px-3 font-semibold text-blue-400">{layer}</td>
+                      <td className="py-2.5 px-3">{tech}</td>
+                      <td className={`py-2.5 px-3 font-sans ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>{role}</td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -515,129 +465,88 @@ export const ProjectOverviewView: React.FC = () => {
         </div>
       )}
 
-      {/* Section 3: 14 Operational Views */}
+      {/* Section 3: Operational Views */}
       {activeSection === 'features' && (
-        <div className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {[
-              { id: 'overview', title: 'Command Center', desc: 'Real-time telemetry, 5 core operational answers, all visual flow charts, and fleet preview.' },
-              { id: 'applications', title: 'Applications Catalog', desc: '8 EdTech tier systems with 10-tab modal inspection and failover orchestration.' },
-              { id: 'infrastructure', title: 'Hostinger VPS Fleet', desc: '16 KVM servers across 4 regions with 4 telemetry area graphs and process/service inspect.' },
-              { id: 'monitors', title: 'Monitoring Probe Engine', desc: '55+ continuous probes, heartbeat strip, manual triggers, and consecutive failure tracking.' },
-              { id: 'incidents', title: 'Incident Command', desc: 'Incident triage with 7-tab investigation modal, SLA timelines, and 7-step recovery state machine.' },
-              { id: 'resilience', title: 'PRD / DR Readiness', desc: 'Disaster recovery checklist, live replication lag verification, and traffic divert console.' },
-              { id: 'backups', title: 'Backup Integrity', desc: 'Database snapshots, object storage archives, and SHA-256 integrity checksum verification.' },
-              { id: 'dependencies', title: 'Dependency Topology', desc: 'Interactive graph tracing users through Anycast edge to VPS, databases, and third-party APIs.' },
-              { id: 'cloudflare', title: 'Cloudflare Edge', desc: 'DNS records management, Anycast routing, WAF bot defense, and load balancer health pools.' },
-              { id: 'hostinger', title: 'Hostinger Provider', desc: 'Hypervisor hardware specifications, region distribution, and agent telemetry uplink.' },
-              { id: 'deployments', title: 'Deployments Pipeline', desc: 'Pipeline stage tracking with rollback capability and version commit verification.' },
-              { id: 'runbooks', title: 'Runbooks (SOPs)', desc: 'Standard operating procedures with step-by-step operator execution tracking.' },
-              { id: 'maintenance', title: 'Maintenance Windows', desc: 'Scheduled maintenance with automatic monitor probe alert suppression.' },
-              { id: 'communications', title: 'Communications & On-Call', desc: 'Microsoft Teams, email, SMS notification channels, and multi-tier escalation policies.' },
-              { id: 'reports', title: 'Daily Ops Report', desc: 'Formatted daily executive briefing in terminal-style monospace with copy & export.' },
-              { id: 'audit', title: 'Audit Trail', desc: 'Immutable chronological audit record of all operator actions with filtering.' }
-            ].map(vw => (
-              <div 
-                key={vw.id}
-                onClick={() => setActiveTab(vw.id)}
-                className={`p-3.5 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between ${
-                  isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs'
-                }`}
-              >
-                <div>
-                  <div className="flex items-center justify-between">
-                    <span className="font-semibold text-xs font-mono group-hover:text-blue-500 transition-colors">
-                      {vw.title}
-                    </span>
-                    <ArrowRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-blue-500 transition-colors shrink-0" />
-                  </div>
-                  <p className={`text-xs font-sans mt-1.5 leading-relaxed ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                    {vw.desc}
-                  </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {views.map(vw => (
+            <div
+              key={vw.id}
+              onClick={() => go(vw.id)}
+              className={`p-3.5 rounded-lg border transition-all cursor-pointer group flex flex-col justify-between ${
+                isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs'
+              }`}
+            >
+              <div>
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-xs font-mono group-hover:text-blue-500 transition-colors flex items-center gap-1.5">
+                    {vw.id === 'setup' && <Settings2 className="w-3.5 h-3.5" />}
+                    {vw.title}
+                  </span>
+                  <ArrowRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-blue-500 transition-colors shrink-0" />
                 </div>
+                <p className={`text-xs font-sans mt-1.5 leading-relaxed ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                  {vw.desc}
+                </p>
               </div>
-            ))}
-          </div>
+            </div>
+          ))}
         </div>
       )}
 
-      {/* Section 4: Enterprise Dual Themes */}
+      {/* Section 4: Themes */}
       {activeSection === 'themes' && (
-        <div className="space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Dark Theme Card */}
-            <div className="p-4 rounded-lg border border-slate-700 bg-[#0B0F17] text-slate-100 space-y-3">
-              <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-                <div className="flex items-center gap-2">
-                  <Moon className="w-4 h-4 text-indigo-400" />
-                  <span className="font-bold text-xs font-mono">Dark Mode (Default)</span>
-                </div>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-800">
-                  SOC High-Contrast
-                </span>
-              </div>
-              <ul className="text-xs font-mono space-y-2 text-slate-300">
-                <li>• <strong>Canvas</strong>: Deep carbon `#0B0F17`</li>
-                <li>• <strong>Containers</strong>: SOC deep navy `#111726`</li>
-                <li>• <strong>Borders</strong>: Structural slate `#1E293B`</li>
-                <li>• <strong>Indicators</strong>: High-contrast emerald, amber, rose &amp; blue</li>
-                <li>• <strong>Optimal for</strong>: 24/7 Operations Centers, reduced eye fatigue</li>
-              </ul>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="p-4 rounded-lg border border-slate-700 bg-[#0B0F17] text-slate-100 space-y-3">
+            <div className="flex items-center gap-2 pb-2 border-b border-slate-800">
+              <Moon className="w-4 h-4 text-indigo-400" />
+              <span className="font-bold text-xs font-mono">Dark Mode (Default)</span>
             </div>
-
-            {/* Light Theme Card */}
-            <div className="p-4 rounded-lg border border-slate-300 bg-[#F6F8FC] text-slate-900 space-y-3 shadow-xs">
-              <div className="flex items-center justify-between pb-2 border-b border-slate-200">
-                <div className="flex items-center gap-2">
-                  <Sun className="w-4 h-4 text-amber-500" />
-                  <span className="font-bold text-xs font-mono">Light Mode</span>
-                </div>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-200 text-slate-700 border border-slate-300">
-                  Corporate Enterprise
-                </span>
-              </div>
-              <ul className="text-xs font-mono space-y-2 text-slate-700">
-                <li>• <strong>Canvas</strong>: Clean corporate `#F6F8FC`</li>
-                <li>• <strong>Sidebar</strong>: Enterprise navy `#17233C`</li>
-                <li>• <strong>Containers</strong>: Pure white `#FFFFFF`</li>
-                <li>• <strong>Borders</strong>: Crisp structural slate `#E2E8F0`</li>
-                <li>• <strong>Optimal for</strong>: Daylight viewing, executive briefing</li>
-              </ul>
+            <ul className="text-xs font-mono space-y-2 text-slate-300">
+              <li>• <strong>Canvas</strong>: `#0B0F17`</li>
+              <li>• <strong>Containers</strong>: `#111726`</li>
+              <li>• <strong>Borders</strong>: `#1E293B`</li>
+              <li>• <strong>Suited for</strong>: Operations-centre wall displays</li>
+            </ul>
+          </div>
+          <div className="p-4 rounded-lg border border-slate-300 bg-[#F6F8FC] text-slate-900 space-y-3 shadow-xs">
+            <div className="flex items-center gap-2 pb-2 border-b border-slate-200">
+              <Sun className="w-4 h-4 text-amber-500" />
+              <span className="font-bold text-xs font-mono">Light Mode</span>
             </div>
+            <ul className="text-xs font-mono space-y-2 text-slate-700">
+              <li>• <strong>Canvas</strong>: `#F6F8FC`</li>
+              <li>• <strong>Containers</strong>: `#FFFFFF`</li>
+              <li>• <strong>Borders</strong>: `#E2E8F0`</li>
+              <li>• <strong>Suited for</strong>: Daylight viewing, reports</li>
+            </ul>
           </div>
         </div>
       )}
 
-      {/* Section 5: SRE Operational Principles */}
+      {/* Section 5: Operational Principles */}
       {activeSection === 'principles' && (
-        <div className="space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 font-mono text-xs">
-            <div className={`p-4 rounded-lg border space-y-2 ${
-              isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
-            }`}>
-              <div className="text-xs font-bold text-blue-500 uppercase">1. Consecutive Check Rules</div>
-              <p className={`text-xs font-sans leading-relaxed ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
-                Spurious blips and transient network hiccups are automatically retried. Incidents only trigger on a confirmed 3/3 consecutive probe failure sequence, and resolution strictly requires 3/3 consecutive passes to prevent flap cycles.
-              </p>
-            </div>
-
-            <div className={`p-4 rounded-lg border space-y-2 ${
-              isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
-            }`}>
-              <div className="text-xs font-bold text-amber-500 uppercase">2. Decoupled Watchdog</div>
-              <p className={`text-xs font-sans leading-relaxed ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
-                The independent Zurich monitor runs completely outside the Hostinger hypervisor mesh. It guarantees that complete infrastructure blackouts or regional fiber cuts are immediately detected and escalated.
-              </p>
-            </div>
-
-            <div className={`p-4 rounded-lg border space-y-2 ${
-              isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
-            }`}>
-              <div className="text-xs font-bold text-emerald-500 uppercase">3. Rapid Anycast Rerouting</div>
-              <p className={`text-xs font-sans leading-relaxed ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
-                Traffic diversion is executed at Cloudflare's Anycast Edge instead of waiting for DNS propagation. Degraded origin nodes are quarantined while warm standby DR nodes receive 100% of live traffic with zero data loss.
-              </p>
-            </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 font-mono text-xs">
+          <div className={`${card} space-y-2`}>
+            <div className="text-xs font-bold text-blue-500 uppercase">1. Confirmed Failures Only</div>
+            <p className={bodyText}>
+              A monitor only opens an incident after its configured number of consecutive failures, and an incident
+              auto-resolves only after the configured number of consecutive passes.
+              {thresholds.length > 0 && ` Failure thresholds in use: ${thresholds.sort((a, b) => a - b).join(', ')}.`}
+            </p>
+          </div>
+          <div className={`${card} space-y-2`}>
+            <div className="text-xs font-bold text-amber-500 uppercase">2. Independent Watchdog</div>
+            <p className={bodyText}>
+              The dead-man heartbeat is checked by an external service, so a complete outage of the control plane is
+              still detected. {deadManConfigured ? 'It is configured.' : 'It is not configured yet.'}
+            </p>
+          </div>
+          <div className={`${card} space-y-2`}>
+            <div className="text-xs font-bold text-emerald-500 uppercase">3. Honest Data</div>
+            <p className={bodyText}>
+              Every figure on these dashboards comes from real checks, agent reports or provider APIs. Values that have
+              not been measured yet are shown as "—" or "No data".
+            </p>
           </div>
         </div>
       )}

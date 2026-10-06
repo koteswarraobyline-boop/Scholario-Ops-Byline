@@ -22,7 +22,7 @@ import { CommunicationsView} from './components/communications/CommunicationsVie
 import { ReportsView }       from './components/analytics/ReportsView';
 import { AuditLogsView }     from './components/admin/AuditLogsView';
 import { UsersView }         from './components/admin/UsersView';
-import { RealVpsTestbenchView } from './components/resilience/RealVpsTestbenchView';
+import { SetupView }         from './components/setup/SetupView';
 
 // ── Protected Route ──────────────────────────────────────────────────────────
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -53,7 +53,7 @@ const DashboardView: React.FC<{ tab: string }> = ({ tab }) => {
   }, [tab, setActiveTab]);
 
   const viewMap: Record<string, React.ReactNode> = {
-    'real-vps':     <RealVpsTestbenchView />,
+    setup:          <SetupView />,
     overview:       <OverviewView />,
     applications:   <ApplicationsView />,
     infrastructure: <InfrastructureView />,
@@ -79,7 +79,7 @@ const DashboardView: React.FC<{ tab: string }> = ({ tab }) => {
 // ── App root ─────────────────────────────────────────────────────────────────
 export default function App() {
   return (
-    <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+    <BrowserRouter>
       <AuthProvider>
         <Routes>
           {/* Public */}
@@ -105,8 +105,9 @@ export default function App() {
 // Inner router that has access to OpsProvider
 const DashboardRoutes: React.FC = () => (
   <Routes>
-    <Route path="/"              element={<Navigate to="/real-vps" replace />} />
-    <Route path="/real-vps"      element={<DashboardView tab="real-vps" />} />
+    <Route path="/"              element={<Navigate to="/overview" replace />} />
+    <Route path="/setup"         element={<DashboardView tab="setup" />} />
+    <Route path="/real-vps"      element={<Navigate to="/setup" replace />} />
     <Route path="/overview"      element={<DashboardView tab="overview" />} />
     <Route path="/applications"  element={<DashboardView tab="applications" />} />
     <Route path="/infrastructure"element={<DashboardView tab="infrastructure" />} />
@@ -124,6 +125,6 @@ const DashboardRoutes: React.FC = () => (
     <Route path="/reports"       element={<DashboardView tab="reports" />} />
     <Route path="/audit"         element={<DashboardView tab="audit" />} />
     <Route path="/users"         element={<DashboardView tab="users" />} />
-    <Route path="*"              element={<Navigate to="/real-vps" replace />} />
+    <Route path="*"              element={<Navigate to="/overview" replace />} />
   </Routes>
 );

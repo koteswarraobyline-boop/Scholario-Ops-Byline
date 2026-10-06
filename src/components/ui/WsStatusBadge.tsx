@@ -1,8 +1,9 @@
 import React from 'react';
-import { WsConnectionStatus } from '../../hooks/useWebSocket';
+import { RealtimeStatus } from '../../context/OpsContext';
 import { Wifi, WifiOff, RefreshCw } from 'lucide-react';
 
-interface WsStatusBadgeProps { status: WsConnectionStatus; isDark: boolean }
+/** Shows the state of the realtime (SSE) connection to the Ops API. */
+interface WsStatusBadgeProps { status: RealtimeStatus | 'CONNECTING'; isDark: boolean }
 
 export const WsStatusBadge: React.FC<WsStatusBadgeProps> = ({ status, isDark }) => {
   if (status === 'LIVE') {

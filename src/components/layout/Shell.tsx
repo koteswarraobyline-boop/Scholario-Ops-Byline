@@ -2,8 +2,8 @@ import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
-import { useWebSocket } from '../../hooks/useWebSocket';
 import { WsStatusBadge } from '../ui/WsStatusBadge';
+import { Toaster } from '../ui/Toaster';
 import { 
   Activity, 
   AlertTriangle, 
@@ -29,7 +29,8 @@ import {
   Shield,
   Sun,
   Moon,
-  LogOut
+  LogOut,
+  Settings
 } from 'lucide-react';
 import { CommandPalette } from './CommandPalette';
 import { CreateMonitorModal } from '../monitors/CreateMonitorModal';
@@ -67,13 +68,13 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     triggerHealthCheck,
     theme,
     toggleTheme,
-    realVpsConfig,
+    realtimeStatus,
+    isLoading,
+    loadError,
+    refreshAll,
+    integrations,
   } = useOps();
 
-  const { status: wsStatus } = useWebSocket();
-  const refreshData = () => {
-    triggerHealthCheck();
-  };
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const { user, logout } = useAuth();
@@ -89,13 +90,17 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  const activeCriticalIncident = incidents.find(i => i.severity === 'CRITICAL' && (i.status === 'OPEN' || i.status === 'INVESTIGATING' || i.status === 'MITIGATING' || i.status === 'ACKNOWLEDGED'));
+  const activeCriticalIncident = incidents.find(i => (i.severity === 'CRITICAL' || i.severity === 'EMERGENCY') && (i.status === 'OPEN' || i.status === 'INVESTIGATING' || i.status === 'MITIGATING' || i.status === 'ACKNOWLEDGED'));
 
-  const handleManualRefresh = () => {
+  const handleManualRefresh = async () => {
+    if (isRefreshing) return;
     setIsRefreshing(true);
-    runAllProbes();
-    refreshData();
-    setTimeout(() => setIsRefreshing(false), 800);
+    try {
+      await Promise.all([runAllProbes(), triggerHealthCheck()]);
+      await refreshAll();
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
   const handleLogout = async () => {
@@ -107,9 +112,9 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
   const navSections: NavSection[] = [
     {
-      title: 'Real 2-VPS Testbench',
+      title: 'Configuration',
       items: [
-        { id: 'real-vps', label: '⚡ 2-VPS Testbench', icon: Zap, badge: 'REAL', badgeColor: 'text-emerald-400 font-bold' }
+        { id: 'setup', label: 'Setup & Connections', icon: Settings, badge: systemSummary.totalServers === 0 ? 'START' : undefined, badgeColor: 'text-amber-400 font-bold' }
       ]
     },
     {
@@ -132,14 +137,14 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       title: 'Resilience',
       items: [
         { id: 'resilience', label: 'PRD / DR Readiness', icon: Cloud, badge: `${systemSummary.drReadinessCount}/${systemSummary.totalApps}` },
-        { id: 'backups', label: 'Backups', icon: Database, badge: `${systemSummary.backupsCurrentCount}/${systemSummary.totalApps}` }
+        { id: 'backups', label: 'Backups', icon: Database, badge: systemSummary.backupsCurrentCount > 0 ? `${systemSummary.backupsCurrentCount}` : undefined }
       ]
     },
     {
       title: 'Providers',
       items: [
         { id: 'hostinger', label: 'Hostinger VPS', icon: Server },
-        { id: 'cloudflare', label: 'Cloudflare Edge', icon: ShieldCheck, badge: systemSummary.cloudflareStatus === 'DEGRADED' ? 'Degraded' : 'Active', badgeColor: systemSummary.cloudflareStatus === 'DEGRADED' ? 'text-amber-400' : 'text-emerald-400' }
+        { id: 'cloudflare', label: 'Cloudflare Edge', icon: ShieldCheck, badge: !integrations?.cloudflare.configured ? 'Off' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'Degraded' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'Active' : 'Unknown', badgeColor: !integrations?.cloudflare.configured ? 'text-slate-500' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'text-amber-400' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'text-emerald-400' : 'text-slate-400' }
       ]
     },
     {
@@ -166,7 +171,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     {
       title: 'Admin',
       items: [
-        { id: 'users', label: 'Users', icon: Activity }
+        { id: 'users', label: 'Users & Account', icon: Activity }
       ]
     }
   ];
@@ -177,6 +182,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     }`}>
       <CommandPalette />
       <CreateMonitorModal />
+      <Toaster />
 
       {/* LEFT SIDEBAR - Deep Carbon / Enterprise Navy Shell */}
       <aside 
@@ -266,16 +272,18 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
           {!isSidebarCollapsed ? (
             <div className="space-y-1.5 font-mono">
               <div className="flex items-center justify-between text-slate-300">
-                <span className="text-[9px] uppercase tracking-wider">Independent Watchdog</span>
-                <span className={`w-1.5 h-1.5 rounded-full ${deadMan.status === 'HEALTHY' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400 animate-ping'}`} />
+                <span className="text-[9px] uppercase tracking-wider">Dead-Man Heartbeat</span>
+                <span className={`w-1.5 h-1.5 rounded-full ${deadMan.status === 'HEALTHY' ? 'bg-emerald-400 animate-pulse' : deadMan.status === 'NOT_CONFIGURED' ? 'bg-slate-500' : 'bg-rose-400 animate-ping'}`} />
               </div>
-              <div className="text-slate-400 text-[10px] truncate">
-                Zurich ZH4 · 1.0s Heartbeat
+              <div className="text-slate-400 text-[10px] truncate" title={deadMan.targetControlPlane || 'Set DEADMAN_HEARTBEAT_URL to enable'}>
+                {deadMan.status === 'NOT_CONFIGURED'
+                  ? 'Not configured'
+                  : `${deadMan.nodeLocation} · every ${deadMan.intervalSec}s${deadMan.status === 'CRITICAL_SILENCE' ? ' · FAILING' : ''}`}
               </div>
             </div>
           ) : (
             <div className="flex justify-center">
-              <span className={`w-1.5 h-1.5 rounded-full ${deadMan.status === 'HEALTHY' ? 'bg-emerald-400' : 'bg-rose-400'}`} />
+              <span className={`w-1.5 h-1.5 rounded-full ${deadMan.status === 'HEALTHY' ? 'bg-emerald-400' : deadMan.status === 'NOT_CONFIGURED' ? 'bg-slate-500' : 'bg-rose-400'}`} />
             </div>
           )}
         </div>
@@ -300,8 +308,8 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
             </span>
             <span className={`hidden sm:inline ${isDark ? 'text-slate-600' : 'text-slate-400'}`}>/</span>
             <div className={`flex items-center gap-1.5 text-[11px] font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              <span>CLUSTER: SINGAPORE (HOSTINGER PRD)</span>
+              <span className={`w-1.5 h-1.5 rounded-full ${systemSummary.totalServers === 0 ? 'bg-slate-500' : systemSummary.healthyServers === systemSummary.totalServers ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+              <span>{systemSummary.totalServers} SERVERS · {systemSummary.totalApps} APPS · {systemSummary.totalMonitors} MONITORS</span>
             </div>
           </div>
 
@@ -331,25 +339,22 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
             </button>
           </div>
 
-          {/* Right Zone: Theme Toggle, Health, Simulator & Profile */}
+          {/* Right Zone: Setup, Theme Toggle, Health & Profile */}
           <div className="flex items-center gap-2.5">
-            {/* Real 2-VPS Quick Action Pill */}
+            {/* Setup quick action */}
             <button
-              onClick={() => navigate('/real-vps')}
+              onClick={() => navigate('/setup')}
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-bold transition-all border cursor-pointer ${
-                activeTab === 'real-vps'
+                activeTab === 'setup'
                   ? 'bg-blue-600 text-white border-blue-500 shadow-xs'
                   : isDark
                     ? 'bg-[#151E30] hover:bg-[#1A263D] text-emerald-400 border-emerald-900/60'
                     : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-300'
               }`}
-              title="Open Real 2-VPS Testbench"
+              title="Register servers & applications, install agents, check integrations"
             >
-              <Zap className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-              <span className="hidden md:inline">2-VPS TESTBENCH</span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/30 font-semibold">
-                {realVpsConfig ? `${realVpsConfig.routing === 'MAIN' ? 'MAIN PRD' : 'DR STANDBY'}` : '2-VPS'}
-              </span>
+              <Zap className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="hidden md:inline">SETUP</span>
             </button>
 
             {/* Theme Toggle Button (Light / Dark) */}
@@ -378,24 +383,29 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
             {/* Health Status Indicator */}
             <button
               onClick={() => navigate('/incidents')}
+              title={systemSummary.visibilityGaps.length ? `Partial data: ${systemSummary.visibilityGaps.join(' · ')}` : undefined}
               className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded text-xs font-mono transition-colors border cursor-pointer ${
                 systemSummary.overallHealth === 'CRITICAL'
                   ? (isDark ? 'border-rose-900/80 bg-rose-950/40 text-rose-300' : 'border-rose-300 bg-rose-50 text-rose-800')
                   : systemSummary.overallHealth === 'WARNING'
                     ? (isDark ? 'border-amber-900/80 bg-amber-950/40 text-amber-300' : 'border-amber-300 bg-amber-50 text-amber-800')
-                    : (isDark ? 'border-emerald-900/80 bg-emerald-950/40 text-emerald-300' : 'border-emerald-300 bg-emerald-50 text-emerald-800')
+                    : systemSummary.overallHealth === 'UNKNOWN'
+                      ? (isDark ? 'border-slate-700 bg-slate-900/40 text-slate-300' : 'border-slate-300 bg-slate-50 text-slate-700')
+                      : (isDark ? 'border-emerald-900/80 bg-emerald-950/40 text-emerald-300' : 'border-emerald-300 bg-emerald-50 text-emerald-800')
               }`}
             >
               <span className={`w-1.5 h-1.5 rounded-full ${
                 systemSummary.overallHealth === 'CRITICAL' ? 'bg-rose-500 animate-pulse' :
-                systemSummary.overallHealth === 'WARNING' ? 'bg-amber-500' : 'bg-emerald-500'
+                systemSummary.overallHealth === 'WARNING' ? 'bg-amber-500' : systemSummary.overallHealth === 'UNKNOWN' ? 'bg-slate-500' : 'bg-emerald-500'
               }`} />
               <span className="text-[11px] font-semibold">
                 {systemSummary.criticalIncidents > 0 
                   ? `${systemSummary.criticalIncidents} CRITICAL INCIDENT` 
                   : systemSummary.openIncidents > 0 
                     ? `${systemSummary.openIncidents} INCIDENT OPEN`
-                    : 'ALL SYSTEMS OPERATIONAL'}
+                    : systemSummary.overallHealth === 'OPERATIONAL'
+                      ? (systemSummary.visibilityGaps.length ? 'OPERATIONAL · PARTIAL DATA' : 'ALL SYSTEMS OPERATIONAL')
+                      : systemSummary.overallHealth === 'WARNING' ? 'DEGRADED' : systemSummary.overallHealth === 'CRITICAL' ? 'CRITICAL' : 'STATUS UNKNOWN'}
               </span>
             </button>
 
@@ -403,6 +413,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
             {/* Poll Probes */}
             <button
               onClick={handleManualRefresh}
+              disabled={isRefreshing}
               className={`p-1.5 rounded transition-colors cursor-pointer ${
                 isDark 
                   ? 'text-slate-400 hover:text-slate-100 hover:bg-[#162033]' 
@@ -414,7 +425,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
             </button>
 
             {/* WebSocket status */}
-            <WsStatusBadge status={wsStatus} isDark={isDark} />
+            <WsStatusBadge status={realtimeStatus} isDark={isDark} />
 
             {/* Operator avatar + logout */}
             <div className={`flex items-center gap-2 pl-2 border-l ${isDark ? 'border-slate-800' : 'border-slate-300'}`}>
@@ -443,14 +454,13 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
           <div className="px-3 sm:px-5 py-2 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs shrink-0 font-mono bg-rose-600 text-white font-bold animate-pulse shadow-md z-30">
             <div className="flex items-center gap-2">
               <span className="w-2.5 h-2.5 rounded-full bg-white animate-ping shrink-0" />
-              <span>CRITICAL NOTIFICATION: SCHOLARIO OPS API SERVICE (/health) UNREACHABLE!</span>
-              <span className="text-[10px] opacity-90 hidden md:inline font-normal">Automated escalation trigger engaged across CommunicationsView</span>
+              <span>SCHOLARIO OPS API (/api/health) UNREACHABLE — data on screen may be stale</span>
             </div>
             <button
-              onClick={() => setActiveTab('communications')}
+              onClick={() => { void triggerHealthCheck(); }}
               className="px-2.5 py-0.5 rounded text-[11px] font-mono bg-white text-rose-700 hover:bg-rose-50 transition-colors cursor-pointer self-start sm:self-auto shrink-0 shadow-xs"
             >
-              VIEW COMMUNICATIONS TRIGGER
+              RETRY
             </button>
           </div>
         )}
@@ -473,13 +483,13 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                 {activeCriticalIncident.title}
               </span>
               <span className={`text-[10px] hidden md:inline ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
-                Opened {activeCriticalIncident.durationMinutes}m ago · Owner: {activeCriticalIncident.owner.split('(')[0]}
+                Opened {activeCriticalIncident.durationMinutes}m ago · Owner: {(activeCriticalIncident.owner ?? 'Unassigned').split('(')[0]}
               </span>
             </div>
             <button
               onClick={() => {
                 setSelectedIncidentId(activeCriticalIncident.id);
-                setActiveTab('incidents');
+                navigate('/incidents');
               }}
               className={`flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-mono transition-colors border cursor-pointer ${
                 isDark 
@@ -498,7 +508,16 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
           isDark ? 'bg-[#0E131F] text-slate-100' : 'bg-[#F6F8FC] text-slate-900'
         }`}>
           <div className="max-w-7xl mx-auto space-y-5">
-            {children}
+            {isLoading ? (
+              <div className={`rounded-lg border p-10 text-center text-xs font-mono animate-pulse ${isDark ? 'border-[#1E293B] text-slate-400' : 'border-slate-200 text-slate-500'}`}>
+                Loading live data from the Scholario Ops API…
+              </div>
+            ) : loadError ? (
+              <div className={`rounded-lg border p-6 text-xs font-mono space-y-3 ${isDark ? 'border-rose-900 bg-rose-950/30 text-rose-200' : 'border-rose-200 bg-rose-50 text-rose-800'}`}>
+                <div className="font-bold">Could not load data: {loadError}</div>
+                <button onClick={() => { void refreshAll(); }} className="px-3 py-1 rounded bg-rose-600 text-white cursor-pointer">Retry</button>
+              </div>
+            ) : children}
           </div>
         </main>
       </div>

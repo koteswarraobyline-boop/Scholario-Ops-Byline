@@ -1,47 +1,45 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
-import { 
-  Search, 
-  Server, 
-  Layers, 
-  AlertTriangle, 
-  Activity, 
-  Cloud, 
-  GitBranch, 
+import { useAuth } from '../../context/AuthContext';
+import {
+  Search,
+  Server,
+  Layers,
+  AlertTriangle,
+  Activity,
+  Cloud,
+  GitBranch,
   X,
   ArrowRight,
-  Zap,
   CheckCircle2,
   RefreshCw,
   Send,
-  Download,
   Terminal,
   Radio,
-  RotateCcw,
   Check,
   FileText,
-  Bell,
-  Sliders,
   Database,
   Calendar,
   ShieldCheck,
   Shield,
   Cpu,
-  Compass,
   CornerDownLeft,
-  BookOpen,
   Plus,
-  BarChart3
+  Users,
+  Settings,
+  Network,
+  Loader2,
 } from 'lucide-react';
 
-export type PaletteCategory = 
-  | 'ALL' 
-  | 'ROUTES' 
-  | 'APPS' 
-  | 'SERVERS' 
-  | 'INCIDENTS' 
-  | 'ACTIONS' 
-  | 'MONITORS' 
+export type PaletteCategory =
+  | 'ALL'
+  | 'ROUTES'
+  | 'APPS'
+  | 'SERVERS'
+  | 'INCIDENTS'
+  | 'ACTIONS'
+  | 'MONITORS'
   | 'RUNBOOKS';
 
 export interface CommandItem {
@@ -54,35 +52,67 @@ export interface CommandItem {
   badgeType?: 'default' | 'critical' | 'warning' | 'success' | 'action' | 'route';
   icon: React.ComponentType<{ className?: string }>;
   keywords: string;
-  action: () => void;
+  /** Shown in a confirm dialog before the action runs (high-impact actions) */
+  confirm?: string;
+  /** Message shown in the palette after the action completes successfully */
+  successMessage?: string;
+  /** Returning false keeps the palette open (e.g. failed action — the context already toasted the error) */
+  action: () => void | boolean | Promise<unknown>;
 }
 
+const OPEN_STATUSES = new Set(['OPEN', 'ACKNOWLEDGED', 'INVESTIGATING', 'MITIGATING', 'MONITORING']);
+
+const ROUTES: Array<{ tab: string; title: string; subtitle: string; icon: CommandItem['icon']; keywords: string }> = [
+  { tab: 'setup', title: 'Setup', subtitle: 'Register servers and applications, install the telemetry agent, integration status', icon: Settings, keywords: 'setup register onboarding agent install integrations configure' },
+  { tab: 'overview', title: 'Overview', subtitle: 'Overall health of applications, servers, monitors and incidents', icon: Activity, keywords: 'overview dashboard home status health' },
+  { tab: 'applications', title: 'Applications', subtitle: 'Applications with PRD/DR mapping and failover state', icon: Layers, keywords: 'applications apps catalog' },
+  { tab: 'infrastructure', title: 'Infrastructure', subtitle: 'Registered VPS servers and agent telemetry', icon: Server, keywords: 'infrastructure servers vps nodes cpu ram disk telemetry' },
+  { tab: 'monitors', title: 'Monitors', subtitle: 'HTTP/TCP/DNS/SSL and heartbeat monitors', icon: Radio, keywords: 'monitors probes checks uptime' },
+  { tab: 'incidents', title: 'Incidents', subtitle: 'Open and resolved incidents', icon: AlertTriangle, keywords: 'incidents tickets triage acknowledge resolve' },
+  { tab: 'resilience', title: 'DR Readiness', subtitle: 'Disaster recovery readiness and failover', icon: ShieldCheck, keywords: 'resilience dr disaster recovery readiness failover' },
+  { tab: 'backups', title: 'Backups', subtitle: 'Backup records and freshness', icon: Database, keywords: 'backups restore snapshots' },
+  { tab: 'dependencies', title: 'Dependencies', subtitle: 'Application dependency map', icon: Network, keywords: 'dependencies map topology' },
+  { tab: 'hostinger', title: 'Hostinger', subtitle: 'Hostinger VPS inventory from the provider API', icon: Cpu, keywords: 'hostinger provider vps vms' },
+  { tab: 'cloudflare', title: 'Cloudflare', subtitle: 'Zones, DNS records and DNS failover', icon: Cloud, keywords: 'cloudflare dns zones ssl edge' },
+  { tab: 'deployments', title: 'Deployments', subtitle: 'Deployment history', icon: GitBranch, keywords: 'deployments releases versions' },
+  { tab: 'runbooks', title: 'Runbooks', subtitle: 'Operational procedures', icon: Terminal, keywords: 'runbooks procedures sop' },
+  { tab: 'maintenance', title: 'Maintenance', subtitle: 'Maintenance windows', icon: Calendar, keywords: 'maintenance windows schedule' },
+  { tab: 'communications', title: 'Communications', subtitle: 'Notification channels and escalation policies', icon: Send, keywords: 'communications notifications channels escalation teams email webhook' },
+  { tab: 'reports', title: 'Reports', subtitle: 'Daily operations report', icon: FileText, keywords: 'reports daily summary' },
+  { tab: 'audit', title: 'Audit Logs', subtitle: 'Record of operator actions', icon: Shield, keywords: 'audit logs history' },
+  { tab: 'users', title: 'Users', subtitle: 'Operator accounts and roles', icon: Users, keywords: 'users accounts roles password' },
+];
+
 export const CommandPalette: React.FC = () => {
-  const { 
-    isCommandPaletteOpen, 
-    setIsCommandPaletteOpen, 
-    applications, 
-    servers, 
-    monitors, 
-    incidents, 
-    runbooks, 
+  const {
+    isCommandPaletteOpen,
+    setIsCommandPaletteOpen,
+    applications,
+    servers,
+    monitors,
+    incidents,
+    runbooks,
+    communicationChannels,
     setSelectedAppId,
     setSelectedServerId,
     setSelectedIncidentId,
     setSelectedRunbookId,
-    setActiveTab,
     triggerFailover,
     acknowledgeIncident,
     resolveIncident,
     runProbeCheck,
     runAllProbes,
-    setIsAddMonitorModalOpen,
+    openAddMonitorWithContext,
     sendTestNotification,
-    triggerSimulatedScenario,
-    deadMan,
+    syncCloudflare,
+    syncHostinger,
+    integrations,
+    refreshAll,
     systemSummary,
-    theme
+    theme,
   } = useOps();
+  const { hasRole } = useAuth();
+  const navigate = useNavigate();
 
   const isDark = theme === 'dark';
 
@@ -90,26 +120,12 @@ export const CommandPalette: React.FC = () => {
   const [selectedCategory, setSelectedCategory] = useState<PaletteCategory>('ALL');
   const [highlightedIndex, setHighlightedIndex] = useState(0);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const [runningId, setRunningId] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Global keyboard shortcut listener for Ctrl+K and Cmd+K
-  useEffect(() => {
-    const handleGlobalKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
-        e.preventDefault();
-        e.stopPropagation();
-        setIsCommandPaletteOpen(!isCommandPaletteOpen);
-      }
-    };
-
-    window.addEventListener('keydown', handleGlobalKeyDown, { capture: true });
-    return () => {
-      window.removeEventListener('keydown', handleGlobalKeyDown, { capture: true });
-    };
-  }, [isCommandPaletteOpen, setIsCommandPaletteOpen]);
-
-  // Focus management when opening/closing
+  // Focus management when opening (Ctrl/Cmd+K is handled globally by OpsContext)
   useEffect(() => {
     if (isCommandPaletteOpen) {
       setQuery('');
@@ -124,623 +140,370 @@ export const CommandPalette: React.FC = () => {
     }
   }, [isCommandPaletteOpen]);
 
-  const showFeedback = useCallback((msg: string) => {
-    setActionFeedback(msg);
-    setTimeout(() => {
-      setActionFeedback(null);
-      setIsCommandPaletteOpen(false);
-    }, 1200);
-  }, [setIsCommandPaletteOpen]);
+  useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
 
-  // Construct comprehensive searchable command items list
+  const close = useCallback(() => setIsCommandPaletteOpen(false), [setIsCommandPaletteOpen]);
+
+  const go = useCallback((tab: string) => {
+    navigate(`/${tab}`);
+    close();
+  }, [navigate, close]);
+
+  const canOperate = hasRole('operator');
+  const canAdmin = hasRole('it_administrator');
+  const canFailover = hasRole('super_admin');
+
   const allCommands = useMemo<CommandItem[]>(() => {
     const items: CommandItem[] = [];
 
-    // =========================================================================
-    // 1. NAVIGATION ROUTES
-    // =========================================================================
-    const navigationRoutes = [
-      {
-        id: 'route-overview',
-        tab: 'overview',
-        title: 'Command Center / Overview',
-        subtitle: 'Global infrastructure health, telemetry, 5 core operational questions',
-        badge: 'ROUTE',
-        icon: Activity,
-        keywords: 'overview dashboard command center telemetry health home status'
-      },
-      {
-        id: 'route-incidents',
-        tab: 'incidents',
-        title: 'Incident Command & Workspace',
-        subtitle: `${systemSummary.openIncidents} active incident tickets, timeline, blast radius, mitigation`,
-        badge: systemSummary.openIncidents > 0 ? `${systemSummary.openIncidents} OPEN` : 'ALL CLEAR',
-        badgeType: (systemSummary.criticalIncidents > 0 ? 'critical' : systemSummary.openIncidents > 0 ? 'warning' : 'success') as CommandItem['badgeType'],
-        icon: AlertTriangle,
-        keywords: 'incidents tickets triage blast radius postmortem root cause acknowledge investigate'
-      },
-      {
-        id: 'route-alerts',
-        tab: 'alerts',
-        title: 'Alert Feed & Deduplication',
-        subtitle: 'Continuous alert stream, deduplication fingerprints, and active notifications',
-        badge: 'ROUTE',
-        icon: Bell,
-        keywords: 'alerts feed signals deadman noise deduplication paging notifications'
-      },
-      {
-        id: 'route-apps',
-        tab: 'applications',
-        title: 'Applications Catalog & Topology',
-        subtitle: `${systemSummary.healthyApps}/${systemSummary.totalApps} applications nominal, PRD/DR mappings, 10-tab deep inspection`,
-        badge: `${systemSummary.healthyApps}/${systemSummary.totalApps}`,
-        badgeType: (systemSummary.healthyApps === systemSummary.totalApps ? 'success' : 'critical') as CommandItem['badgeType'],
-        icon: Layers,
-        keywords: 'applications catalog systems cipher apex nimbus mosaic ascend vantage lumo beacon tier'
-      },
-      {
-        id: 'route-monitors',
-        tab: 'monitors',
-        title: 'Continuous Monitors & Probes',
-        subtitle: `${systemSummary.healthyMonitors}/${systemSummary.totalMonitors} probes passing, consecutive failure engine (3 checks), intervals`,
-        badge: `${systemSummary.healthyMonitors}/${systemSummary.totalMonitors}`,
-        badgeType: (systemSummary.healthyMonitors === systemSummary.totalMonitors ? 'success' : 'warning') as CommandItem['badgeType'],
-        icon: Radio,
-        keywords: 'monitors probes synthetic ping https tcp mysql dns endpoint checks polling'
-      },
-      {
-        id: 'route-infrastructure',
-        tab: 'infrastructure',
-        title: 'Infrastructure / Hostinger VPS Fleet',
-        subtitle: `${systemSummary.healthyServers}/${systemSummary.totalServers} VPS nodes healthy, CPU/RAM/Disk metrics, power states`,
-        badge: `${systemSummary.healthyServers}/${systemSummary.totalServers} NODES`,
-        badgeType: (systemSummary.healthyServers === systemSummary.totalServers ? 'success' : 'critical') as CommandItem['badgeType'],
-        icon: Server,
-        keywords: 'infrastructure servers vps hostinger nodes cpu ram disk reboot power ssh telemetry'
-      },
-      {
-        id: 'route-dependencies',
-        tab: 'dependencies',
-        title: 'Dependency Graph & Blast Radius',
-        subtitle: 'Interactive upstream/downstream dependency mapping from users to Cloudflare to VPS to DB',
-        badge: 'MAP',
-        icon: Cpu,
-        keywords: 'dependencies blast radius topology graph relationships database upstream downstream'
-      },
-      {
-        id: 'route-resilience',
-        tab: 'resilience',
-        title: 'PRD / DR Resilience & Readiness',
-        subtitle: `${systemSummary.drReadinessCount}/${systemSummary.totalApps} ready for failover, replication lag, target RPO vs actual`,
-        badge: `${systemSummary.drReadinessCount}/${systemSummary.totalApps} READY`,
-        badgeType: 'success' as CommandItem['badgeType'],
-        icon: Cloud,
-        keywords: 'dr disaster recovery resilience readiness rto rpo replication standby secondary failover'
-      },
-      {
-        id: 'route-failover',
-        tab: 'failover',
-        title: 'Failover Console & Traffic Routing',
-        subtitle: 'Live Cloudflare Anycast traffic director, origin failover switch & failback control',
-        badge: 'ROUTING',
-        icon: RefreshCw,
-        keywords: 'failover console switch traffic cloudflare anycast divert failback primary dr'
-      },
-      {
-        id: 'route-backups',
-        tab: 'backups',
-        title: 'Backups & Integrity Verification',
-        subtitle: `${systemSummary.backupsCurrentCount}/${systemSummary.totalApps} current, SHA-256 checksums, AES-256 encryption, restore drills`,
-        badge: `${systemSummary.backupsCurrentCount}/${systemSummary.totalApps} VERIFIED`,
-        badgeType: 'success' as CommandItem['badgeType'],
-        icon: Database,
-        keywords: 'backups snapshots restores sha256 encryption cold storage drills retention rpo'
-      },
-      {
-        id: 'route-hostinger',
-        tab: 'hostinger',
-        title: 'Hostinger Cloud Provider Integration',
-        subtitle: 'Hostinger API sync, hardware virtualization, snapshot volumes and data center health',
-        badge: 'PROVIDER',
-        icon: Server,
-        keywords: 'hostinger cloud provider vps datacenter virtualization snapshots api'
-      },
-      {
-        id: 'route-cloudflare',
-        tab: 'cloudflare',
-        title: 'Cloudflare Edge, DNS & WAF',
-        subtitle: `Status: ${systemSummary.cloudflareStatus} · Anycast DNS zones, WAF rule inspection, SSL/TLS certs`,
-        badge: systemSummary.cloudflareStatus,
-        badgeType: (systemSummary.cloudflareStatus === 'HEALTHY' ? 'success' : 'warning') as CommandItem['badgeType'],
-        icon: ShieldCheck,
-        keywords: 'cloudflare edge anycast dns waf ssl tls certificates security proxy firewall'
-      },
-      {
-        id: 'route-deployments',
-        tab: 'deployments',
-        title: 'Deployments Pipeline & Rollback',
-        subtitle: 'Build/Deploy stages, health smoke tests, active releases, and instant rollback triggers',
-        badge: 'PIPELINE',
-        icon: GitBranch,
-        keywords: 'deployments ci cd pipeline releases commits rollbacks smoke tests artifacts'
-      },
-      {
-        id: 'route-changes',
-        tab: 'changes',
-        title: 'Infrastructure Change History',
-        subtitle: 'Chronological changelog of DNS updates, kernel patches, scaling, and firewall edits',
-        badge: 'LOGS',
-        icon: FileText,
-        keywords: 'changes configuration drift audit history modifications releases patches'
-      },
-      {
-        id: 'route-maintenance',
-        tab: 'maintenance',
-        title: 'Maintenance Windows & Suppression',
-        subtitle: 'Scheduled downtime, alert suppression policy, and customer notification banners',
-        badge: 'SCHEDULE',
-        icon: Calendar,
-        keywords: 'maintenance windows suppression scheduled downtime calendar silence'
-      },
-      {
-        id: 'route-runbooks',
-        tab: 'runbooks',
-        title: 'Interactive Operational Runbooks',
-        subtitle: 'Standard Operating Procedures (SOPs), step-by-step mitigation checklists and shell scripts',
-        badge: `${runbooks.length} RUNBOOKS`,
-        icon: Terminal,
-        keywords: 'runbooks sops playbooks mitigation procedures commands automation emergency'
-      },
-      {
-        id: 'route-communications',
-        tab: 'communications',
-        title: 'Communications & Notification Channels',
-        subtitle: 'Microsoft Teams webhook, On-Call Email, Generic Webhook dispatch, test payloads',
-        badge: 'DISPATCH',
-        icon: Bell,
-        keywords: 'communications notifications teams email webhook pagerduty oncall alerts'
-      },
-      {
-        id: 'route-escalation',
-        tab: 'escalation',
-        title: 'Escalation Policies & On-Call Rotation',
-        subtitle: 'Multi-tier incident paging, primary & secondary engineers, timeout escalation ladder',
-        badge: 'POLICIES',
-        icon: Sliders,
-        keywords: 'escalation policies oncall rotation engineer paging tiers timeout schedules'
-      },
-      {
-        id: 'route-uptime',
-        tab: 'uptime',
-        title: 'Uptime & SLA Compliance Analytics',
-        subtitle: '30-day availability metrics, SLA breach calculators, and latency percentiles (P50/P99)',
-        badge: 'ANALYTICS',
-        icon: Activity,
-        keywords: 'uptime sla compliance availability p50 p99 latency reporting metrics'
-      },
-      {
-        id: 'route-reports',
-        tab: 'reports',
-        title: 'Daily Operations Briefing & Reports',
-        subtitle: 'Daily IT executive summary, incident post-mortems, and text/PDF artifact downloads',
-        badge: 'REPORTING',
-        icon: FileText,
-        keywords: 'reports briefing daily executive summary export download documentation'
-      },
-      {
-        id: 'route-audit',
-        tab: 'audit',
-        title: 'Admin Audit Logs & Compliance',
-        subtitle: 'Operator action logs, threshold adjustments, failover commands, and access logs',
-        badge: 'SECURITY',
-        icon: Shield,
-        keywords: 'audit logs operator security who did what history compliance forensics'
-      },
-      {
-        id: 'route-project-overview',
-        tab: 'project-overview',
-        title: 'Project Overview & Architecture Manual',
-        subtitle: 'Production specification, Inter font hierarchy, dual enterprise themes, and 14 view documentation',
-        badge: 'MANUAL',
-        icon: BookOpen,
-        keywords: 'project overview manual documentation architecture tech stack inter typography'
+    // ── 1. Navigation ────────────────────────────────────────────────────────
+    for (const r of ROUTES) {
+      let badge: string | undefined;
+      let badgeType: CommandItem['badgeType'] = 'route';
+      if (r.tab === 'incidents') {
+        badge = systemSummary.openIncidents > 0 ? `${systemSummary.openIncidents} OPEN` : 'NONE OPEN';
+        badgeType = systemSummary.criticalIncidents > 0 ? 'critical' : systemSummary.openIncidents > 0 ? 'warning' : 'success';
+      } else if (r.tab === 'applications' && systemSummary.totalApps > 0) {
+        badge = `${systemSummary.healthyApps}/${systemSummary.totalApps} HEALTHY`;
+        badgeType = systemSummary.healthyApps === systemSummary.totalApps ? 'success' : 'warning';
+      } else if (r.tab === 'infrastructure' && systemSummary.totalServers > 0) {
+        badge = `${systemSummary.healthyServers}/${systemSummary.totalServers} HEALTHY`;
+        badgeType = systemSummary.healthyServers === systemSummary.totalServers ? 'success' : 'warning';
+      } else if (r.tab === 'monitors' && systemSummary.totalMonitors > 0) {
+        badge = `${systemSummary.healthyMonitors}/${systemSummary.totalMonitors} HEALTHY`;
+        badgeType = systemSummary.healthyMonitors === systemSummary.totalMonitors ? 'success' : 'warning';
       }
-    ];
-
-    navigationRoutes.forEach(r => {
       items.push({
-        id: r.id,
+        id: `route-${r.tab}`,
         category: 'ROUTES',
-        categoryLabel: 'Navigation Route',
+        categoryLabel: 'Go to',
         title: r.title,
         subtitle: r.subtitle,
-        badge: r.badge,
-        badgeType: r.badgeType || 'route',
+        badge: badge ?? 'ROUTE',
+        badgeType,
         icon: r.icon,
-        keywords: `route navigate go to ${r.keywords} ${r.tab}`,
-        action: () => {
-          setActiveTab(r.tab);
-          setIsCommandPaletteOpen(false);
-        }
-      });
-    });
-
-    // =========================================================================
-    // 2. SPECIFIC APPLICATION NAMES
-    // =========================================================================
-    applications.forEach(app => {
-      const isHealthy = app.status === 'HEALTHY';
-      const isDr = app.failoverState === 'DR_ACTIVE';
-      items.push({
-        id: `app-name-${app.id}`,
-        category: 'APPS',
-        categoryLabel: 'Application System',
-        title: `${app.name} (${app.codeName})`,
-        subtitle: `${app.description} · ${app.tier.replace('_', ' ')} · PRD: ${app.prdServerId} · DR: ${app.drServerId} · Zone: ${app.cloudflareZone}`,
-        badge: isDr ? 'DR ACTIVE' : app.status,
-        badgeType: isDr ? 'warning' : isHealthy ? 'success' : 'critical',
-        icon: Layers,
-        keywords: `application app ${app.name} ${app.codeName} ${app.id} ${app.tier} ${app.description} ${app.cloudflareZone} ${app.prdServerId} ${app.drServerId}`,
-        action: () => {
-          setSelectedAppId(app.id);
-          setActiveTab('applications');
-          setIsCommandPaletteOpen(false);
-        }
-      });
-    });
-
-    // =========================================================================
-    // 3. SERVER IDS (VPS NODES & HOSTNAMES)
-    // =========================================================================
-    servers.forEach(srv => {
-      const isHealthy = srv.status === 'HEALTHY';
-      items.push({
-        id: `server-id-${srv.id}`,
-        category: 'SERVERS',
-        categoryLabel: 'Hostinger VPS Node',
-        title: `${srv.id} (${srv.hostname})`,
-        subtitle: `IP: ${srv.ip} · Env: ${srv.environment} · Region: ${srv.region} · CPU ${srv.telemetry.cpuPercent}% · RAM ${srv.telemetry.ramPercent}% · Disk ${srv.telemetry.diskPercent}%`,
-        badge: `${srv.environment} · ${srv.region}`,
-        badgeType: isHealthy ? 'default' : 'critical',
-        icon: Server,
-        keywords: `vps server hostinger ${srv.id} ${srv.hostname} ${srv.ip} ${srv.region} ${srv.environment} ${srv.plan} cpu ram disk node`,
-        action: () => {
-          setSelectedServerId(srv.id);
-          setActiveTab('infrastructure');
-          setIsCommandPaletteOpen(false);
-        }
-      });
-    });
-
-    // =========================================================================
-    // 4. INCIDENT TICKET NUMBERS & DETAILS
-    // =========================================================================
-    incidents.forEach(inc => {
-      const isCrit = inc.severity === 'CRITICAL';
-      const isOpen = inc.status === 'OPEN' || inc.status === 'INVESTIGATING' || inc.status === 'MITIGATING';
-      items.push({
-        id: `incident-ticket-${inc.id}`,
-        category: 'INCIDENTS',
-        categoryLabel: 'Incident Ticket',
-        title: `${inc.id}: ${inc.title}`,
-        subtitle: `Root Cause: ${inc.rootCause} · Owner: ${inc.owner} · App: ${inc.affectedServices.join(', ')} · Status: ${inc.status}`,
-        badge: `${inc.severity} · ${inc.status}`,
-        badgeType: isCrit && isOpen ? 'critical' : isOpen ? 'warning' : 'success',
-        icon: AlertTriangle,
-        keywords: `incident ticket ${inc.id} ${inc.title} ${inc.rootCause} ${inc.severity} ${inc.status} ${inc.owner} ${inc.affectedServices.join(' ')} ${inc.fingerprint}`,
-        action: () => {
-          setSelectedIncidentId(inc.id);
-          setActiveTab('incidents');
-          setIsCommandPaletteOpen(false);
-        }
-      });
-    });
-
-    // =========================================================================
-    // 5. COMMON MANAGEMENT ACTIONS
-    // =========================================================================
-    items.push({
-      id: 'action-view-latency-metrics',
-      category: 'ACTIONS',
-      categoryLabel: 'Management Action',
-      title: 'Real-Time Endpoint Latency & Uptime Visualizer',
-      subtitle: 'Visualize live latency percentiles (P50/P90/P99), SLA uptime compliance, and synthetic health check distributions',
-      badge: 'VISUALIZE',
-      badgeType: 'action',
-      icon: BarChart3,
-      keywords: 'latency uptime visualizer health check percentiles metrics response time endpoints chart statistics matrix',
-      action: () => {
-        setActiveTab('monitors');
-        setIsCommandPaletteOpen(false);
-      }
-    });
-
-    items.push({
-      id: 'action-create-monitor',
-      category: 'ACTIONS',
-      categoryLabel: 'Management Action',
-      title: 'Create / Add Continuous Monitor Probe',
-      subtitle: 'Configure edge HTTPS, internal TCP sockets, database pool probes, and dead-man heartbeats with real VPS and application data',
-      badge: 'CREATE PROBE',
-      badgeType: 'action',
-      icon: Plus,
-      keywords: 'create monitor add probe new monitor check endpoint vps hostinger tcp https health check synthetic socket',
-      action: () => {
-        setActiveTab('monitors');
-        setIsCommandPaletteOpen(false);
-        setIsAddMonitorModalOpen(true);
-      }
-    });
-
-    items.push({
-      id: 'action-probe-all',
-      category: 'ACTIONS',
-      categoryLabel: 'Management Action',
-      title: 'Run Health Probes on All Monitors',
-      subtitle: 'Execute immediate probe check across all continuous monitors and synthetic endpoints',
-      badge: 'EXECUTE',
-      badgeType: 'action',
-      icon: RefreshCw,
-      keywords: 'probe all monitors check health polling refresh execute manual run test',
-      action: () => {
-        runAllProbes();
-        showFeedback('Triggered health probe across all monitors');
-      }
-    });
-
-    // Active Incident Actions
-    const activeCrit = incidents.find(i => i.severity === 'CRITICAL' && (i.status === 'OPEN' || i.status === 'INVESTIGATING'));
-    if (activeCrit) {
-      if (!activeCrit.acknowledged) {
-        items.push({
-          id: `action-ack-${activeCrit.id}`,
-          category: 'ACTIONS',
-          categoryLabel: 'Incident Action',
-          title: `Acknowledge Active Incident: ${activeCrit.id}`,
-          subtitle: `Acknowledge ${activeCrit.title} (${activeCrit.owner})`,
-          badge: 'ACKNOWLEDGE',
-          badgeType: 'warning',
-          icon: AlertTriangle,
-          keywords: `acknowledge incident ack ${activeCrit.id} ${activeCrit.title}`,
-          action: () => {
-            acknowledgeIncident(activeCrit.id);
-            showFeedback(`Acknowledged incident ${activeCrit.id}`);
-          }
-        });
-      }
-
-      items.push({
-        id: `action-resolve-${activeCrit.id}`,
-        category: 'ACTIONS',
-        categoryLabel: 'Incident Action',
-        title: `Resolve Incident: ${activeCrit.id}`,
-        subtitle: `Confirm mitigation and sign off resolution for ${activeCrit.id}`,
-        badge: 'RESOLVE',
-        badgeType: 'success',
-        icon: CheckCircle2,
-        keywords: `resolve incident fix close ${activeCrit.id} ${activeCrit.title}`,
-        action: () => {
-          resolveIncident(activeCrit.id, 'Resolved via Command Palette');
-          showFeedback(`Resolved incident ${activeCrit.id}`);
-        }
+        keywords: `route navigate go to open ${r.tab} ${r.keywords}`,
+        action: () => go(r.tab),
       });
     }
 
-    // Failover Actions for Applications
-    applications.forEach(app => {
+    // ── 2. Applications ──────────────────────────────────────────────────────
+    for (const app of applications) {
+      const prd = servers.find(s => s.id === app.prdServerId);
+      const dr = servers.find(s => s.id === app.drServerId);
       const isDr = app.failoverState === 'DR_ACTIVE';
       items.push({
-        id: `action-failover-${app.id}`,
+        id: `app-${app.id}`,
+        category: 'APPS',
+        categoryLabel: 'Application',
+        title: app.codeName ? `${app.name} (${app.codeName})` : app.name,
+        subtitle: [
+          `PRD: ${prd ? `${prd.hostname} ${prd.ip}` : '—'}`,
+          `DR: ${dr ? `${dr.hostname} ${dr.ip}` : '—'}`,
+          app.dnsRecordName ? `DNS: ${app.dnsRecordName}` : null,
+        ].filter(Boolean).join(' · '),
+        badge: isDr ? 'DR ACTIVE' : app.status,
+        badgeType: isDr ? 'warning' : app.status === 'HEALTHY' ? 'success' : app.status === 'CRITICAL' ? 'critical' : app.status === 'WARNING' ? 'warning' : 'default',
+        icon: Layers,
+        keywords: `application app ${app.name} ${app.codeName} ${app.id} ${app.tier} ${app.cloudflareZone} ${app.dnsRecordName ?? ''}`,
+        action: () => {
+          setSelectedAppId(app.id);
+          go('applications');
+        },
+      });
+
+      // Failover / failback (super_admin, requires DNS failover configuration)
+      if (canFailover && app.dnsRecordName && app.prdServerId && app.drServerId && app.failoverState !== 'FAILING_OVER') {
+        const target: 'DR' | 'PRIMARY' = isDr ? 'PRIMARY' : 'DR';
+        const targetServer = isDr ? prd : dr;
+        items.push({
+          id: `action-failover-${app.id}`,
+          category: 'ACTIONS',
+          categoryLabel: 'Failover',
+          title: isDr ? `Fail back ${app.name} to PRD` : `Fail over ${app.name} to DR`,
+          subtitle: `Switch Cloudflare DNS ${app.dnsRecordName} to ${targetServer ? `${targetServer.hostname} (${targetServer.ip})` : (isDr ? 'the PRD server' : 'the DR server')}`,
+          badge: isDr ? 'FAILBACK' : 'FAILOVER',
+          badgeType: isDr ? 'action' : 'critical',
+          icon: Cloud,
+          keywords: `failover failback switch dns cloudflare ${app.name} ${app.codeName} dr primary prd`,
+          confirm: isDr
+            ? `Fail back ${app.name}? Cloudflare DNS ${app.dnsRecordName} will be pointed back at the PRD server.`
+            : `Fail over ${app.name} to DR? Cloudflare DNS ${app.dnsRecordName} will be pointed at the DR server and live traffic will move.`,
+          successMessage: `${app.name}: DNS switched to ${target === 'DR' ? 'DR' : 'PRD'}`,
+          action: () => triggerFailover(app.id, target, 'Triggered from command palette'),
+        });
+      }
+    }
+
+    // ── 3. Servers ───────────────────────────────────────────────────────────
+    for (const srv of servers) {
+      const hasTelemetry = Boolean(srv.lastSeen);
+      items.push({
+        id: `server-${srv.id}`,
+        category: 'SERVERS',
+        categoryLabel: 'Server',
+        title: `${srv.hostname}`,
+        subtitle: [
+          srv.ip || '—',
+          srv.environment,
+          srv.region || null,
+          hasTelemetry && srv.telemetry
+            ? `CPU ${Math.round(srv.telemetry.cpuPercent)}% · RAM ${Math.round(srv.telemetry.ramPercent)}% · Disk ${Math.round(srv.telemetry.diskPercent)}%`
+            : 'Agent has not reported yet',
+        ].filter(Boolean).join(' · '),
+        badge: `${srv.environment} · ${srv.status}`,
+        badgeType: srv.status === 'HEALTHY' ? 'success' : srv.status === 'CRITICAL' ? 'critical' : srv.status === 'WARNING' ? 'warning' : 'default',
+        icon: Server,
+        keywords: `server vps ${srv.id} ${srv.hostname} ${srv.ip} ${srv.region} ${srv.environment} ${srv.provider} ${srv.plan}`,
+        action: () => {
+          setSelectedServerId(srv.id);
+          go('infrastructure');
+        },
+      });
+    }
+
+    // ── 4. Incidents ─────────────────────────────────────────────────────────
+    for (const inc of incidents) {
+      const isOpen = OPEN_STATUSES.has(inc.status);
+      const isCrit = inc.severity === 'CRITICAL' || inc.severity === 'EMERGENCY';
+      const appName = applications.find(a => a.id === inc.applicationId)?.name;
+      items.push({
+        id: `incident-${inc.id}`,
+        category: 'INCIDENTS',
+        categoryLabel: 'Incident',
+        title: `${inc.id}: ${inc.title}`,
+        subtitle: [appName, inc.environment, `Owner: ${inc.owner || 'Unassigned'}`, inc.rootCause || null].filter(Boolean).join(' · '),
+        badge: `${inc.severity} · ${inc.status}`,
+        badgeType: isCrit && isOpen ? 'critical' : isOpen ? 'warning' : 'success',
+        icon: AlertTriangle,
+        keywords: `incident ticket ${inc.id} ${inc.title} ${inc.severity} ${inc.status} ${inc.owner} ${appName ?? ''} ${inc.fingerprint}`,
+        action: () => {
+          setSelectedIncidentId(inc.id);
+          go('incidents');
+        },
+      });
+
+      if (isOpen && canOperate) {
+        if (!inc.acknowledged) {
+          items.push({
+            id: `action-ack-${inc.id}`,
+            category: 'ACTIONS',
+            categoryLabel: 'Incident',
+            title: `Acknowledge ${inc.id}`,
+            subtitle: inc.title,
+            badge: 'ACKNOWLEDGE',
+            badgeType: 'warning',
+            icon: AlertTriangle,
+            keywords: `acknowledge ack incident ${inc.id} ${inc.title}`,
+            successMessage: `${inc.id} acknowledged`,
+            action: () => acknowledgeIncident(inc.id),
+          });
+        }
+        items.push({
+          id: `action-resolve-${inc.id}`,
+          category: 'ACTIONS',
+          categoryLabel: 'Incident',
+          title: `Resolve ${inc.id}`,
+          subtitle: inc.title,
+          badge: 'RESOLVE',
+          badgeType: 'success',
+          icon: CheckCircle2,
+          keywords: `resolve close incident ${inc.id} ${inc.title}`,
+          confirm: `Resolve ${inc.id} "${inc.title}"?`,
+          successMessage: `${inc.id} resolved`,
+          action: () => resolveIncident(inc.id, 'Resolved from command palette'),
+        });
+      }
+    }
+
+    // ── 5. General actions ───────────────────────────────────────────────────
+    if (canOperate && monitors.length > 0) {
+      items.push({
+        id: 'action-probe-all',
         category: 'ACTIONS',
-        categoryLabel: 'Failover Routing',
-        title: isDr 
-          ? `Failback ${app.name} to Primary Origin` 
-          : `Emergency Failover: Divert ${app.name} to DR Standby`,
-        subtitle: isDr 
-          ? `Revert Cloudflare Anycast traffic to Primary node (${app.prdServerId})` 
-          : `Route Cloudflare Anycast traffic to DR standby node (${app.drServerId})`,
-        badge: isDr ? 'FAILBACK' : 'FAILOVER',
-        badgeType: isDr ? 'action' : 'critical',
+        categoryLabel: 'Monitors',
+        title: 'Run all monitor checks now',
+        subtitle: `Probe ${monitors.filter(m => m.enabled).length} enabled monitor(s) immediately`,
+        badge: 'RUN',
+        badgeType: 'action',
+        icon: RefreshCw,
+        keywords: 'probe all monitors check run now test',
+        successMessage: 'Monitor checks completed',
+        action: () => runAllProbes(),
+      });
+    }
+
+    if (canAdmin) {
+      items.push({
+        id: 'action-create-monitor',
+        category: 'ACTIONS',
+        categoryLabel: 'Monitors',
+        title: 'Add a monitor',
+        subtitle: 'Create an HTTP, TCP, DNS, SSL or heartbeat monitor',
+        badge: 'CREATE',
+        badgeType: 'action',
+        icon: Plus,
+        keywords: 'create add new monitor probe check',
+        action: () => {
+          go('monitors');
+          openAddMonitorWithContext();
+        },
+      });
+      items.push({
+        id: 'action-register-server',
+        category: 'ACTIONS',
+        categoryLabel: 'Setup',
+        title: 'Register a server or application',
+        subtitle: 'Open Setup to add VPS servers, applications and the telemetry agent',
+        badge: 'SETUP',
+        badgeType: 'action',
+        icon: Settings,
+        keywords: 'register add server application vps agent setup onboarding',
+        action: () => go('setup'),
+      });
+    }
+
+    if (canOperate && integrations?.cloudflare.configured) {
+      items.push({
+        id: 'action-sync-cloudflare',
+        category: 'ACTIONS',
+        categoryLabel: 'Cloudflare',
+        title: 'Sync Cloudflare now',
+        subtitle: 'Refresh zones and DNS records from the Cloudflare API',
+        badge: 'SYNC',
+        badgeType: 'action',
         icon: Cloud,
-        keywords: `failover failback reroute traffic cloudflare ${app.name} ${app.codeName} dr primary`,
-        action: () => {
-          triggerFailover(app.id, isDr ? 'PRIMARY' : 'DR');
-          showFeedback(`${isDr ? 'Initiated failback to Primary origin' : 'Diverted traffic to DR Standby'} for ${app.name}`);
-        }
+        keywords: 'sync cloudflare refresh zones dns',
+        successMessage: 'Cloudflare synced',
+        action: () => syncCloudflare(),
       });
-    });
-
-    // Communication Test Actions
-    items.push({
-      id: 'action-notify-teams',
-      category: 'ACTIONS',
-      categoryLabel: 'Notification',
-      title: 'Dispatch Test Payload to Microsoft Teams',
-      subtitle: 'Send webhook verification alert to #ops-control-center',
-      badge: 'DISPATCH',
-      badgeType: 'action',
-      icon: Send,
-      keywords: 'dispatch send notification test microsoft teams webhook alert comms',
-      action: async () => {
-        await sendTestNotification('comm-teams-ops');
-        showFeedback('Dispatched test alert payload to Microsoft Teams');
-      }
-    });
-
-    items.push({
-      id: 'action-notify-email',
-      category: 'ACTIONS',
-      categoryLabel: 'Notification',
-      title: 'Dispatch Test Alert to Escalation Email',
-      subtitle: 'Send test verification email to oncall@scholario.net',
-      badge: 'DISPATCH',
-      badgeType: 'action',
-      icon: Send,
-      keywords: 'dispatch send test email oncall escalation alert comms',
-      action: async () => {
-        await sendTestNotification('comm-email-oncall');
-        showFeedback('Dispatched test email to oncall@scholario.net');
-      }
-    });
-
-    // Report Download Action
-    items.push({
-      id: 'action-download-report',
-      category: 'ACTIONS',
-      categoryLabel: 'Reporting',
-      title: 'Download Daily Operations & SLA Briefing (.txt)',
-      subtitle: 'Generate formatted immutable daily health briefing artifact',
-      badge: 'DOWNLOAD',
-      badgeType: 'action',
-      icon: Download,
-      keywords: 'download report daily briefing export sla compliance txt file summary',
-      action: () => {
-        const text = `SCHOLARIO OPS CONTROL CENTER DAILY BRIEFING\nGenerated: ${new Date().toISOString()}\nApplications: ${systemSummary.healthyApps}/${systemSummary.totalApps} Nominal\nHostinger Nodes: ${systemSummary.healthyServers}/${systemSummary.totalServers} Operational\nMonitors: ${systemSummary.healthyMonitors}/${systemSummary.totalMonitors} Active\nWatchdog Plane: ${deadMan.status}\nOpen Incidents: ${systemSummary.openIncidents}`;
-        const blob = new Blob([text], { type: 'text/plain' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `scholario-ops-report-${new Date().toISOString().slice(0, 10)}.txt`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        showFeedback('Generated and downloaded daily ops briefing');
-      }
-    });
-
-    // Simulator Scenarios
-    items.push({
-      id: 'action-sim-recover',
-      category: 'ACTIONS',
-      categoryLabel: 'Simulation',
-      title: 'Simulate Scenario: Mosaic Recovery & 3-Check Verification',
-      subtitle: 'Simulates database connection flush, 3 consecutive passes & incident resolution',
-      badge: 'SIMULATE',
-      badgeType: 'success',
-      icon: CheckCircle2,
-      keywords: 'simulate recovery mosaic verify pass resolve scenario',
-      action: () => {
-        triggerSimulatedScenario?.('RESOLVE_MOSAIC');
-        showFeedback('Simulated recovery sequence: 3 checks verified & incident resolved');
-      }
-    });
-
-    items.push({
-      id: 'action-sim-fail',
-      category: 'ACTIONS',
-      categoryLabel: 'Simulation',
-      title: 'Simulate Scenario: Inject MySQL Connection Starvation',
-      subtitle: 'Simulates 500 connections reached on Mosaic PRD, triggering INC-1042',
-      badge: 'SIMULATE',
-      badgeType: 'critical',
-      icon: AlertTriangle,
-      keywords: 'simulate failure inject mosaic database mysql pool exhaustion scenario',
-      action: () => {
-        triggerSimulatedScenario?.('TRIGGER_MOSAIC_FAIL');
-        showFeedback('Injected failure scenario: Mosaic connection pool starved');
-      }
-    });
-
-    items.push({
-      id: 'action-sim-deadman',
-      category: 'ACTIONS',
-      categoryLabel: 'Simulation',
-      title: 'Simulate Scenario: Toggle External Dead-Man Silence',
-      subtitle: 'Simulates watchdog timeout from Zurich monitoring node',
-      badge: 'SIMULATE',
-      badgeType: 'warning',
-      icon: Radio,
-      keywords: 'simulate deadman silence watchdog timeout heartbeat zurich scenario',
-      action: () => {
-        triggerSimulatedScenario('DEADMAN_SILENCE');
-        showFeedback('Toggled independent dead-man watchdog state');
-      }
-    });
-
-    items.push({
-      id: 'action-sim-reset',
-      category: 'ACTIONS',
-      categoryLabel: 'System',
-      title: 'Reset Ops Control Center to Baseline State',
-      subtitle: 'Restores initial applications, servers, monitors and incident records',
-      badge: 'RESET',
-      badgeType: 'default',
-      icon: RotateCcw,
-      keywords: 'reset clear baseline restart restore default state initial',
-      action: () => {
-        triggerSimulatedScenario('RESET_ALL');
-        showFeedback('Restored system state to baseline');
-      }
-    });
-
-    // =========================================================================
-    // 6. CONTINUOUS MONITORS
-    // =========================================================================
-    monitors.forEach(mon => {
+    }
+    if (canOperate && integrations?.hostinger.configured) {
       items.push({
-        id: `mon-item-${mon.id}`,
+        id: 'action-sync-hostinger',
+        category: 'ACTIONS',
+        categoryLabel: 'Hostinger',
+        title: 'Sync Hostinger now',
+        subtitle: 'Refresh the VPS inventory from the Hostinger API',
+        badge: 'SYNC',
+        badgeType: 'action',
+        icon: Cpu,
+        keywords: 'sync hostinger refresh vps vms inventory',
+        successMessage: 'Hostinger synced',
+        action: () => syncHostinger(),
+      });
+    }
+
+    items.push({
+      id: 'action-refresh-all',
+      category: 'ACTIONS',
+      categoryLabel: 'Data',
+      title: 'Reload all data from the server',
+      subtitle: 'Re-fetch applications, servers, monitors, incidents and more',
+      badge: 'RELOAD',
+      badgeType: 'action',
+      icon: RefreshCw,
+      keywords: 'reload refresh data resync',
+      successMessage: 'Data reloaded',
+      action: () => refreshAll(),
+    });
+
+    // Test notifications for each configured, enabled channel
+    if (canOperate) {
+      for (const ch of communicationChannels.filter(c => c.enabled)) {
+        items.push({
+          id: `action-test-channel-${ch.id}`,
+          category: 'ACTIONS',
+          categoryLabel: 'Notification',
+          title: `Send test notification: ${ch.name}`,
+          subtitle: `${ch.type} channel`,
+          badge: 'TEST',
+          badgeType: 'action',
+          icon: Send,
+          keywords: `test send notification channel ${ch.name} ${ch.type}`,
+          successMessage: `Test notification sent to ${ch.name}`,
+          action: () => sendTestNotification(ch.id),
+        });
+      }
+    }
+
+    // ── 6. Monitors ──────────────────────────────────────────────────────────
+    for (const mon of monitors) {
+      const appName = applications.find(a => a.id === mon.applicationId)?.name;
+      items.push({
+        id: `monitor-${mon.id}`,
         category: 'MONITORS',
-        categoryLabel: 'Continuous Monitor Probe',
-        title: `${mon.id}: ${mon.name}`,
-        subtitle: `${mon.target} · ${mon.type} · Response: ${mon.responseTimeMs}ms · Interval: ${mon.intervalSec}s · ${mon.consecutiveRecoveries} recoveries / ${mon.consecutiveFailures} fails`,
+        categoryLabel: canOperate ? 'Monitor · run check' : 'Monitor',
+        title: mon.name,
+        subtitle: [
+          mon.type,
+          mon.target || null,
+          appName ? `${appName} ${mon.environment}` : mon.environment,
+          mon.lastCheck ? `${mon.responseTimeMs}ms` : 'Not checked yet',
+          mon.enabled ? null : 'Paused',
+        ].filter(Boolean).join(' · '),
         badge: mon.status,
-        badgeType: mon.status === 'HEALTHY' ? 'success' : 'critical',
+        badgeType: mon.status === 'HEALTHY' ? 'success' : mon.status === 'CRITICAL' ? 'critical' : mon.status === 'WARNING' ? 'warning' : 'default',
         icon: Radio,
-        keywords: `monitor probe endpoint url ping check ${mon.id} ${mon.name} ${mon.target} ${mon.type}`,
-        action: () => {
-          runProbeCheck(mon.id);
-          setActiveTab('monitors');
-          setIsCommandPaletteOpen(false);
-        }
+        keywords: `monitor probe check ${mon.id} ${mon.name} ${mon.target} ${mon.type} ${appName ?? ''}`,
+        successMessage: canOperate ? `Checked ${mon.name}` : undefined,
+        action: async () => {
+          if (canOperate) await runProbeCheck(mon.id);
+          go('monitors');
+        },
       });
-    });
+    }
 
-    // =========================================================================
-    // 7. OPERATIONAL RUNBOOKS
-    // =========================================================================
-    runbooks.forEach(rb => {
+    // ── 7. Runbooks ──────────────────────────────────────────────────────────
+    for (const rb of runbooks) {
       items.push({
-        id: `rb-item-${rb.id}`,
+        id: `runbook-${rb.id}`,
         category: 'RUNBOOKS',
-        categoryLabel: 'Operational Runbook',
-        title: `${rb.id}: ${rb.title}`,
-        subtitle: `${rb.description} (${rb.steps.length} steps, ~${rb.estimatedDurationMin}m)`,
+        categoryLabel: 'Runbook',
+        title: rb.title,
+        subtitle: `${rb.description ? `${rb.description} · ` : ''}${rb.steps.length} steps · ~${rb.estimatedDurationMin}m`,
         badge: rb.category,
         badgeType: 'default',
         icon: Terminal,
-        keywords: `runbook sop procedure guide step ${rb.id} ${rb.title} ${rb.category}`,
+        keywords: `runbook procedure ${rb.id} ${rb.title} ${rb.category}`,
         action: () => {
           setSelectedRunbookId(rb.id);
-          setActiveTab('runbooks');
-          setIsCommandPaletteOpen(false);
-        }
+          go('runbooks');
+        },
       });
-    });
+    }
 
     return items;
   }, [
-    applications,
-    servers,
-    monitors,
-    incidents,
-    runbooks,
-    deadMan,
-    systemSummary,
-    runAllProbes,
-    acknowledgeIncident,
-    resolveIncident,
-    triggerFailover,
-    sendTestNotification,
-    triggerSimulatedScenario,
-    runProbeCheck,
-    setSelectedAppId,
-    setSelectedServerId,
-    setSelectedIncidentId,
-    setSelectedRunbookId,
-    setActiveTab,
-    setIsCommandPaletteOpen,
-    showFeedback
+    applications, servers, monitors, incidents, runbooks, communicationChannels, integrations, systemSummary,
+    canOperate, canAdmin, canFailover, go,
+    runAllProbes, acknowledgeIncident, resolveIncident, triggerFailover, sendTestNotification, runProbeCheck,
+    openAddMonitorWithContext, syncCloudflare, syncHostinger, refreshAll,
+    setSelectedAppId, setSelectedServerId, setSelectedIncidentId, setSelectedRunbookId,
   ]);
+
+  /** Runs a command, awaiting async actions; keeps the palette open on failure. */
+  const execute = useCallback(async (item: CommandItem) => {
+    if (runningId) return;
+    if (item.confirm && !window.confirm(item.confirm)) return;
+    setRunningId(item.id);
+    try {
+      const result = await item.action();
+      if (result === false) return; // error already reported by the context as a toast
+      if (item.successMessage) {
+        setActionFeedback(item.successMessage);
+        if (closeTimer.current) clearTimeout(closeTimer.current);
+        closeTimer.current = setTimeout(() => {
+          setActionFeedback(null);
+          close();
+        }, 900);
+      } else {
+        close();
+      }
+    } finally {
+      setRunningId(null);
+    }
+  }, [runningId, close]);
 
   // Filter commands by query and selected category
   const filteredCommands = useMemo(() => {
@@ -789,12 +552,11 @@ export const CommandPalette: React.FC = () => {
       scrollIntoView(prevIndex);
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      if (filteredCommands[highlightedIndex]) {
-        filteredCommands[highlightedIndex].action();
-      }
+      const item = filteredCommands[highlightedIndex];
+      if (item) void execute(item);
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      setIsCommandPaletteOpen(false);
+      close();
     }
   };
 
@@ -804,9 +566,9 @@ export const CommandPalette: React.FC = () => {
     { id: 'ALL', label: 'All', count: allCommands.length },
     { id: 'ROUTES', label: 'Routes', count: allCommands.filter(c => c.category === 'ROUTES').length },
     { id: 'APPS', label: 'Applications', count: applications.length },
-    { id: 'SERVERS', label: 'Server IDs', count: servers.length },
+    { id: 'SERVERS', label: 'Servers', count: servers.length },
     { id: 'INCIDENTS', label: 'Incidents', count: incidents.length },
-    { id: 'ACTIONS', label: '⚡ Actions', count: allCommands.filter(c => c.category === 'ACTIONS').length },
+    { id: 'ACTIONS', label: 'Actions', count: allCommands.filter(c => c.category === 'ACTIONS').length },
     { id: 'MONITORS', label: 'Monitors', count: monitors.length },
     { id: 'RUNBOOKS', label: 'Runbooks', count: runbooks.length }
   ];
@@ -814,7 +576,7 @@ export const CommandPalette: React.FC = () => {
   return (
     <div 
       className="fixed inset-0 z-50 flex items-start justify-center pt-14 sm:pt-20 bg-black/80 backdrop-blur-xs p-3 sm:p-4 animate-in fade-in duration-100"
-      onClick={() => setIsCommandPaletteOpen(false)}
+      onClick={close}
       onKeyDown={handleKeyDown}
     >
       <div 
@@ -833,7 +595,7 @@ export const CommandPalette: React.FC = () => {
           <input
             ref={inputRef}
             type="text"
-            placeholder="Search routes, apps (Cipher, Mosaic...), server IDs (vps-sg-prd-01...), incident tickets (INC-1042), or actions..."
+            placeholder="Search pages, applications, servers, incidents, monitors, runbooks or actions..."
             value={query}
             onChange={e => setQuery(e.target.value)}
             className={`w-full bg-transparent text-xs placeholder:text-slate-400 focus:outline-none font-mono tracking-tight ${
@@ -851,7 +613,7 @@ export const CommandPalette: React.FC = () => {
             </button>
           )}
           <button 
-            onClick={() => setIsCommandPaletteOpen(false)}
+            onClick={close}
             className={`px-1.5 py-0.5 text-[10px] rounded transition-colors border cursor-pointer ${
               isDark 
                 ? 'text-slate-400 bg-[#121927] hover:bg-[#1C273C] border-slate-700' 
@@ -917,9 +679,9 @@ export const CommandPalette: React.FC = () => {
                 <div
                   key={item.id}
                   data-command-item
-                  onClick={() => item.action()}
+                  onClick={() => void execute(item)}
                   onMouseEnter={() => setHighlightedIndex(index)}
-                  className={`w-full flex items-center justify-between p-2.5 rounded cursor-pointer transition-all ${
+                  className={`w-full flex items-center justify-between p-2.5 rounded transition-all ${runningId && runningId !== item.id ? 'opacity-50 cursor-wait' : 'cursor-pointer'} ${
                     isHighlighted 
                       ? isDark 
                         ? 'bg-[#162033] border-l-2 border-blue-500 text-white pl-2' 
@@ -977,7 +739,9 @@ export const CommandPalette: React.FC = () => {
                       </span>
                     )}
                     <div className="w-5 flex justify-center">
-                      {isHighlighted ? (
+                      {runningId === item.id ? (
+                        <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin" />
+                      ) : isHighlighted ? (
                         <CornerDownLeft className="w-3.5 h-3.5 text-blue-500 animate-pulse" />
                       ) : (
                         <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
@@ -990,7 +754,7 @@ export const CommandPalette: React.FC = () => {
           ) : (
             <div className="py-12 text-center text-slate-400 font-sans space-y-1">
               <div className="text-xs">No matching items found for &quot;{query}&quot;</div>
-              <div className="text-[11px] text-slate-500">Try searching for an application name (e.g. &apos;Mosaic&apos;), server ID (e.g. &apos;vps-sg-prd-01&apos;), incident ticket (e.g. &apos;INC-1042&apos;), or route (e.g. &apos;Overview&apos;).</div>
+              <div className="text-[11px] text-slate-500">Search by application, server hostname or IP, incident ID, monitor name, runbook or page name.</div>
             </div>
           )}
         </div>

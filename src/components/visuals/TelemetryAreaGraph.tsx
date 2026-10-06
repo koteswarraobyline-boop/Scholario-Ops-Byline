@@ -4,12 +4,21 @@ import { useOps } from '../../context/OpsContext';
 interface TelemetryAreaGraphProps {
   title: string;
   subtitle?: string;
+  /** Real samples, oldest first. Non-finite values are ignored. */
   data: number[];
   unit: string;
   warningThreshold?: number;
   criticalThreshold?: number;
   color?: 'blue' | 'emerald' | 'amber' | 'rose' | 'indigo';
+  /** Optional per-point labels (e.g. sample timestamps) shown on hover */
+  labels?: string[];
+  /** Shown instead of the chart when there are no samples */
+  emptyMessage?: string;
+  /** Lower bound for the y-axis maximum (defaults to 100 for % units, otherwise the data peak) */
+  minScaleMax?: number;
 }
+
+const fmt = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
 
 // Function to generate smooth cubic bezier curve through points
 function getBezierPath(points: { x: number; y: number }[]): string {
@@ -43,20 +52,59 @@ export const TelemetryAreaGraph: React.FC<TelemetryAreaGraphProps> = ({
   unit,
   warningThreshold,
   criticalThreshold,
-  color = 'blue'
+  color = 'blue',
+  labels,
+  emptyMessage = 'No samples recorded yet',
+  minScaleMax,
 }) => {
   const { theme } = useOps();
   const isDark = theme === 'dark';
 
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
 
-  if (!data || data.length === 0) return null;
+  const series = (data ?? []).filter(v => Number.isFinite(v));
 
-  const min = Math.min(...data);
-  const max = Math.max(...data, 100);
-  const current = data[data.length - 1];
-  const peak = Math.max(...data);
-  const avg = +(data.reduce((a, b) => a + b, 0) / data.length).toFixed(1);
+  const header = (valueNode: React.ReactNode) => (
+    <div className="flex items-center justify-between mb-1">
+      <div>
+        <span className="text-xs font-semibold">{title}</span>
+        {subtitle && (
+          <span className={`text-[10px] ml-1.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+            {subtitle}
+          </span>
+        )}
+      </div>
+      {valueNode}
+    </div>
+  );
+
+  const shellClass = `p-3 rounded-lg border font-mono transition-colors ${
+    isDark ? 'bg-[#111726] border-[#1C273C]' : 'bg-white border-slate-200 shadow-xs'
+  }`;
+
+  if (series.length === 0) {
+    return (
+      <div className={shellClass}>
+        {header(<span className={`text-sm font-bold ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>—</span>)}
+        <div className={`h-18 my-1 flex items-center justify-center text-center px-2 rounded border border-dashed text-[10px] ${
+          isDark ? 'border-[#1C273C] text-slate-500' : 'border-slate-200 text-slate-400'
+        }`}>
+          {emptyMessage}
+        </div>
+      </div>
+    );
+  }
+
+  const min = Math.min(...series);
+  const peak = Math.max(...series);
+  const max = Math.max(
+    peak,
+    minScaleMax ?? (unit.trim() === '%' ? 100 : 0),
+    warningThreshold ?? 0,
+    criticalThreshold ?? 0,
+  ) || 1;
+  const current = series[series.length - 1];
+  const avg = series.reduce((a, b) => a + b, 0) / series.length;
 
   // SVG dimensions
   const width = 360;
@@ -67,9 +115,9 @@ export const TelemetryAreaGraph: React.FC<TelemetryAreaGraphProps> = ({
   const graphHeight = height - paddingY * 2;
 
   // Calculate coordinates
-  const points = data.map((val, idx) => {
-    const x = paddingX + (idx / (data.length - 1)) * graphWidth;
-    const y = height - paddingY - ((val - 0) / (max - 0 || 1)) * graphHeight;
+  const points = series.map((val, idx) => {
+    const x = paddingX + (series.length === 1 ? graphWidth / 2 : (idx / (series.length - 1)) * graphWidth);
+    const y = height - paddingY - (Math.max(0, val) / max) * graphHeight;
     return { x, y, val };
   });
 
@@ -85,84 +133,52 @@ export const TelemetryAreaGraph: React.FC<TelemetryAreaGraphProps> = ({
   `;
 
   const colorMap = {
-    blue: {
-      line: '#3B82F6',
-      fill: isDark ? 'rgba(59, 130, 246, 0.3)' : 'rgba(59, 130, 246, 0.15)',
-      gradientStart: '#3B82F6',
-      text: 'text-blue-500'
-    },
-    emerald: {
-      line: '#10B981',
-      fill: isDark ? 'rgba(16, 185, 129, 0.3)' : 'rgba(16, 185, 129, 0.15)',
-      gradientStart: '#10B981',
-      text: 'text-emerald-500'
-    },
-    amber: {
-      line: '#F59E0B',
-      fill: isDark ? 'rgba(245, 158, 11, 0.3)' : 'rgba(245, 158, 11, 0.15)',
-      gradientStart: '#F59E0B',
-      text: 'text-amber-500'
-    },
-    rose: {
-      line: '#F43F5E',
-      fill: isDark ? 'rgba(244, 63, 94, 0.3)' : 'rgba(244, 63, 94, 0.15)',
-      gradientStart: '#F43F5E',
-      text: 'text-rose-500'
-    },
-    indigo: {
-      line: '#6366F1',
-      fill: isDark ? 'rgba(99, 102, 241, 0.3)' : 'rgba(99, 102, 241, 0.15)',
-      gradientStart: '#6366F1',
-      text: 'text-indigo-500'
-    }
+    blue: { line: '#3B82F6', text: 'text-blue-500' },
+    emerald: { line: '#10B981', text: 'text-emerald-500' },
+    amber: { line: '#F59E0B', text: 'text-amber-500' },
+    rose: { line: '#F43F5E', text: 'text-rose-500' },
+    indigo: { line: '#6366F1', text: 'text-indigo-500' },
   };
 
   const scheme = colorMap[color];
   const uniqueGradId = `grad-${title.replace(/[^a-zA-Z0-9]/g, '')}`;
+  const shown = hoveredIdx !== null && series[hoveredIdx] !== undefined ? series[hoveredIdx] : current;
+  const thresholdY = (v: number) => height - paddingY - (v / max) * graphHeight;
 
   return (
-    <div className={`p-3 rounded-lg border font-mono transition-colors ${
-      isDark ? 'bg-[#111726] border-[#1C273C]' : 'bg-white border-slate-200 shadow-xs'
-    }`}>
+    <div className={shellClass}>
       {/* Title & Current Stat Readouts */}
-      <div className="flex items-center justify-between mb-1">
-        <div>
-          <span className="text-xs font-semibold">{title}</span>
-          {subtitle && (
-            <span className={`text-[10px] ml-1.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-              {subtitle}
-            </span>
-          )}
-        </div>
+      {header(
         <div className="flex items-baseline gap-1">
-          <span className={`text-sm font-bold ${scheme.text}`}>
-            {hoveredIdx !== null ? data[hoveredIdx] : current}
-          </span>
+          <span className={`text-sm font-bold ${scheme.text}`}>{fmt(shown)}</span>
           <span className={`text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{unit}</span>
         </div>
-      </div>
+      )}
+      {hoveredIdx !== null && labels?.[hoveredIdx] && (
+        <div className={`text-[9px] -mt-0.5 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>{labels[hoveredIdx]}</div>
+      )}
 
       {/* SVG Time-Series Chart */}
       <div className="relative my-1">
-        <svg 
-          viewBox={`0 0 ${width} ${height}`} 
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
           className="w-full h-18 overflow-visible"
           onMouseLeave={() => setHoveredIdx(null)}
         >
           <defs>
             <linearGradient id={uniqueGradId} x1="0%" y1="0%" x2="0%" y2="100%">
-              <stop offset="0%" stopColor={scheme.gradientStart} stopOpacity={isDark ? "0.45" : "0.3"} />
-              <stop offset="100%" stopColor={scheme.gradientStart} stopOpacity="0.0" />
+              <stop offset="0%" stopColor={scheme.line} stopOpacity={isDark ? "0.45" : "0.3"} />
+              <stop offset="100%" stopColor={scheme.line} stopOpacity="0.0" />
             </linearGradient>
           </defs>
 
           {/* Warning threshold line */}
-          {warningThreshold && (
+          {warningThreshold !== undefined && (
             <line
               x1={paddingX}
-              y1={height - paddingY - (warningThreshold / max) * graphHeight}
+              y1={thresholdY(warningThreshold)}
               x2={width - paddingX}
-              y2={height - paddingY - (warningThreshold / max) * graphHeight}
+              y2={thresholdY(warningThreshold)}
               stroke="#F59E0B"
               strokeWidth="1"
               strokeDasharray="3 3"
@@ -170,11 +186,22 @@ export const TelemetryAreaGraph: React.FC<TelemetryAreaGraphProps> = ({
             />
           )}
 
+          {/* Critical threshold line */}
+          {criticalThreshold !== undefined && (
+            <line
+              x1={paddingX}
+              y1={thresholdY(criticalThreshold)}
+              x2={width - paddingX}
+              y2={thresholdY(criticalThreshold)}
+              stroke="#F43F5E"
+              strokeWidth="1"
+              strokeDasharray="3 3"
+              strokeOpacity="0.65"
+            />
+          )}
+
           {/* Smooth Bezier Area Fill */}
-          <path
-            d={areaPath}
-            fill={`url(#${uniqueGradId})`}
-          />
+          {points.length > 1 && <path d={areaPath} fill={`url(#${uniqueGradId})`} />}
 
           {/* Smooth Bezier Line Stroke */}
           <path
@@ -207,10 +234,10 @@ export const TelemetryAreaGraph: React.FC<TelemetryAreaGraphProps> = ({
       <div className={`flex items-center justify-between text-[10px] pt-1.5 border-t ${
         isDark ? 'border-[#1C273C] text-slate-400' : 'border-slate-100 text-slate-500'
       }`}>
-        <span>Min: {min}{unit}</span>
-        <span>Avg: {avg}{unit}</span>
-        <span>Peak: {peak}{unit}</span>
-        <span className={scheme.text}>Now: {current}{unit}</span>
+        <span>Min: {fmt(min)}{unit}</span>
+        <span>Avg: {fmt(avg)}{unit}</span>
+        <span>Peak: {fmt(peak)}{unit}</span>
+        <span className={scheme.text}>Now: {fmt(current)}{unit}</span>
       </div>
     </div>
   );

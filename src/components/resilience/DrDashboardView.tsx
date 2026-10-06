@@ -1,78 +1,166 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
-import { 
-  Cloud, 
-  Users, 
-  Globe, 
-  AlertTriangle,
-  RefreshCw
-} from 'lucide-react';
-import { TrafficFlowChart } from '../visuals/TrafficFlowChart';
+import { useAuth } from '../../context/AuthContext';
+import { api } from '../../services/api';
+import { DrReadinessItem, DrOverall, VpsServer } from '../../types';
+import { Users, Globe, AlertTriangle, RefreshCw, ShieldCheck, Loader2 } from 'lucide-react';
+import { EmptyState } from '../ui/EmptyState';
+import { Ago, verdictColor } from '../ui/Freshness';
+import { LbFailoverConsole } from './LbFailoverConsole';
+import { routeState } from '../ui/routing';
+import { LbPoolCard } from '../providers/LoadBalancerPanel';
+
+const validDate = (s?: string | null) => Boolean(s) && !Number.isNaN(Date.parse(s as string));
+const fmtDateTime = (s?: string | null, fallback = '—') => (validDate(s) ? new Date(s as string).toLocaleString() : fallback);
+
+const readinessColor = (s: DrReadinessItem['status']) => verdictColor(s);
+
+const statusColor = (s?: string) =>
+  s === 'HEALTHY' ? 'text-emerald-500' : s === 'WARNING' || s === 'STALE' ? 'text-amber-500' : s === 'CRITICAL' ? 'text-rose-500' : 'text-slate-400';
 
 export const DrDashboardView: React.FC = () => {
-  const { applications, servers, cloudflareZones, triggerFailover, theme } = useOps();
+  const { applications, servers, monitors, cloudflareZones, triggerFailover, theme, isLoading, loadBalancer } = useOps();
+  const { hasRole } = useAuth();
+  const navigate = useNavigate();
   const isDark = theme === 'dark';
-  const [selectedAppId, setSelectedAppId] = useState<string>('app-mosaic');
+  const canFailover = hasRole('super_admin');
+
+  const [selectedAppId, setSelectedAppId] = useState<string>('');
   const [confirmingFailover, setConfirmingFailover] = useState(false);
+  const [failoverReason, setFailoverReason] = useState('');
+  const [failoverBusy, setFailoverBusy] = useState(false);
+
+  const [checks, setChecks] = useState<DrReadinessItem[]>([]);
+  const [overall, setOverall] = useState<DrOverall | null>(null);
+  const [score, setScore] = useState<{ passed: number; total: number } | null>(null);
+  const [readinessLoading, setReadinessLoading] = useState(false);
+  const [readinessError, setReadinessError] = useState<string | null>(null);
+  const [readinessAt, setReadinessAt] = useState<string>('');
 
   const selectedApp = applications.find(a => a.id === selectedAppId) || applications[0];
+  const appId = selectedApp?.id;
 
-  // Guard: data still loading
+  const loadReadiness = useCallback(async () => {
+    if (!appId) return;
+    setReadinessLoading(true);
+    try {
+      const r = await api.getDrReadiness(appId);
+      setChecks(r.checks ?? []);
+      setOverall(r.overall ?? null);
+      setScore(typeof r.passed === 'number' ? { passed: r.passed, total: r.total } : null);
+      setReadinessError(null);
+      setReadinessAt(r.evaluatedAt ?? '');
+    } catch (err) {
+      setReadinessError(err instanceof Error ? err.message : 'Failed to load DR readiness');
+    } finally {
+      setReadinessLoading(false);
+    }
+  }, [appId]);
+
+  useEffect(() => {
+    setChecks([]);
+    setOverall(null);
+    setReadinessError(null);
+    if (!appId) return;
+    void loadReadiness();
+    const timer = setInterval(() => { void loadReadiness(); }, 30_000);
+    return () => clearInterval(timer);
+  }, [appId, loadReadiness]);
+
   if (!selectedApp) {
     return (
-      <div className={`space-y-6 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-        <div className="text-xs font-mono animate-pulse">Loading DR dashboard...</div>
+      <div className="space-y-6">
+        <div className={`pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+          <h1 className="text-lg font-bold font-mono tracking-tight">DISASTER RECOVERY &amp; TRAFFIC FAILOVER</h1>
+        </div>
+        {isLoading ? (
+          <div className={`text-xs font-mono animate-pulse ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Loading DR dashboard…</div>
+        ) : (
+          <EmptyState
+            icon={ShieldCheck}
+            title="No applications registered"
+            description="Register applications with a PRD and DR server, Cloudflare zone and DNS record in Setup to enable DR failover."
+            action={{ label: 'Open Setup', onClick: () => navigate('/setup') }}
+          />
+        )}
       </div>
     );
   }
 
   const prdServer = servers.find(s => s.id === selectedApp.prdServerId);
   const drServer = servers.find(s => s.id === selectedApp.drServerId);
-  const cfZone = cloudflareZones.find(z => z.domain === selectedApp.cloudflareZone);
+  const cfZone = cloudflareZones.find(z => selectedApp.cloudflareZone && (z.domain === selectedApp.cloudflareZone || selectedApp.cloudflareZone.endsWith(`.${z.domain}`)));
+  const dnsRecord = cfZone?.dnsRecords.find(r => r.name === selectedApp.dnsRecordName && (r.type === 'A' || r.type === 'AAAA'));
+  const prdMonitors = monitors.filter(m => m.applicationId === selectedApp.id && m.environment === 'PRD' && m.enabled);
+  const drMonitors = monitors.filter(m => m.applicationId === selectedApp.id && m.environment === 'DR' && m.enabled);
 
-  const isDrActive = selectedApp.failoverState === 'DR_ACTIVE';
+  const lbMapped = Boolean(selectedApp.loadBalancer);
+  const routing = lbMapped ? loadBalancer?.routing.find(r => r.hostname === selectedApp.loadBalancer!.hostname) : undefined;
+  const lbPools = lbMapped ? (loadBalancer?.pools ?? []).filter(p => p.applicationId === selectedApp.id) : [];
+  // For LB apps, "receiving traffic" comes from Cloudflare routing; null = unknown
+  const lbServing = (env: 'PRD' | 'DR'): boolean | null => {
+    if (!routing?.found || !routing.activePoolId) return null;
+    const poolId = env === 'PRD' ? selectedApp.loadBalancer!.prdPoolId : selectedApp.loadBalancer!.drPoolId;
+    return routing.activePoolId === poolId;
+  };
+  const isDrActive = lbMapped ? lbServing('DR') === true : selectedApp.failoverState === 'DR_ACTIVE';
+  const isFailingOver = selectedApp.failoverState === 'FAILING_OVER';
+  const target: 'DR' | 'PRIMARY' = isDrActive ? 'PRIMARY' : 'DR';
+  const targetServer = target === 'DR' ? drServer : prdServer;
 
-  const handleToggleFailover = () => {
-    triggerFailover(selectedApp.id, isDrActive ? 'PRIMARY' : 'DR');
-    setConfirmingFailover(false);
+  const blockers: string[] = [];
+  if (!selectedApp.cloudflareZone) blockers.push('no Cloudflare zone');
+  if (!selectedApp.dnsRecordName) blockers.push('no DNS record');
+  if (!targetServer) blockers.push(`no ${target === 'DR' ? 'DR' : 'PRD'} server linked`);
+  else if (!targetServer.ip) blockers.push(`${target === 'DR' ? 'DR' : 'PRD'} server has no IP`);
+
+  const handleFailover = async () => {
+    setFailoverBusy(true);
+    try {
+      const ok = await triggerFailover(selectedApp.id, target, failoverReason.trim() || undefined);
+      if (ok) {
+        setConfirmingFailover(false);
+        setFailoverReason('');
+        void loadReadiness();
+      }
+    } finally {
+      setFailoverBusy(false);
+    }
   };
 
-  const readinessChecks = [
-    {
-      category: 'Data Replication',
-      status: selectedApp.currentReplicationLagSec <= selectedApp.rpoTargetMin * 60 ? 'READY' : 'FAILED',
-      detail: `Lag is ${selectedApp.currentReplicationLagSec}s (Target < ${selectedApp.rpoTargetMin * 60}s)`
-    },
-    {
-      category: 'Snapshot Freshness',
-      status: 'READY',
-      detail: 'Snapshot completed < 24h ago with SHA-256 integrity checksum'
-    },
-    {
-      category: 'Restore Drill Verification',
-      status: 'READY',
-      detail: `Verified in sandbox drill (${selectedApp.lastTestedRecoveryDate || '2026-09-18'}) in ${selectedApp.lastTestedRecoveryDurationMin || 22}m`
-    },
-    {
-      category: 'DR Standby Compute',
-      status: drServer?.status === 'HEALTHY' ? 'READY' : 'WARNING',
-      detail: `Hostinger ${drServer?.region} standby node is powered on and healthy`
-    },
-    {
-      category: 'Configuration Drift',
-      status: cfZone?.driftDetected ? 'WARNING' : 'READY',
-      detail: cfZone?.driftDetected ? 'Configuration drift detected' : 'Nginx, PHP/Node environment variables mirrored'
-    },
-    {
-      category: 'Cloudflare LB Failover Pool',
-      status: 'READY',
-      detail: 'Health check probe active on port 443 with automated rerouting enabled'
-    }
-  ];
+  const muted = isDark ? 'text-slate-400' : 'text-slate-500';
+
+  const originRow = (srv: VpsServer | undefined, env: 'PRD' | 'DR', active: boolean | null, envMonitors: typeof monitors) => {
+    const healthy = envMonitors.length > 0 && envMonitors.every(m => m.status === 'HEALTHY');
+    return (
+      <div className={`p-2.5 rounded border flex items-center justify-between gap-2 ${
+        active
+          ? (isDark ? 'bg-[#0E1A14] border-emerald-900/80 text-emerald-300' : 'bg-emerald-50 border-emerald-300 text-emerald-950')
+          : (isDark ? 'bg-[#0B0F17] border-[#1A2436] text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-600')
+      }`}>
+        <div className="flex items-center gap-2 min-w-0">
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${active ? 'bg-emerald-500' : 'bg-slate-500'}`} />
+          <div className="min-w-0">
+            <div className="font-bold truncate">{env === 'PRD' ? 'PRIMARY (PRD)' : 'STANDBY (DR)'}: {srv ? srv.hostname.split('.')[0] : 'Not linked'}</div>
+            <div className={`text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+              {srv ? <>{srv.ip || 'No IP'}{srv.region ? ` · ${srv.region}` : ''} · <span className={statusColor(srv.status)}>{srv.status}</span> · agent {srv.agentStatus}</> : 'Link a server in Setup'}
+            </div>
+            <div className={`text-[10px] ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
+              {envMonitors.length === 0
+                ? 'No monitors for this environment'
+                : <span className={healthy ? 'text-emerald-500' : 'text-amber-500'}>{envMonitors.filter(m => m.status === 'HEALTHY').length}/{envMonitors.length} monitors healthy</span>}
+            </div>
+          </div>
+        </div>
+        <span className="font-bold text-[11px] shrink-0">{active === null ? 'ROUTING UNKNOWN' : active ? 'RECEIVING TRAFFIC' : 'STANDBY'}</span>
+      </div>
+    );
+  };
 
   return (
     <div className="space-y-6">
-      
+
       {/* Header */}
       <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b ${
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
@@ -82,207 +170,239 @@ export const DrDashboardView: React.FC = () => {
             DISASTER RECOVERY &amp; TRAFFIC FAILOVER
           </h1>
           <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            RPO/RTO target compliance, continuous binary replication &amp; Cloudflare origin pool routing
+            DR readiness from live checks, and failover between PRD and DR (Cloudflare Load Balancer or DNS)
           </p>
         </div>
 
         {/* App Selector */}
         <div className="flex items-center gap-2 font-mono text-xs">
-          <span className={isDark ? 'text-slate-400' : 'text-slate-600'}>Target System:</span>
+          <span className={isDark ? 'text-slate-400' : 'text-slate-600'}>Application:</span>
           <select
-            value={selectedAppId}
+            value={selectedApp.id}
             onChange={e => {
               setSelectedAppId(e.target.value);
               setConfirmingFailover(false);
+              setFailoverReason('');
             }}
             className={`px-2.5 py-1 rounded border outline-none cursor-pointer ${
-              isDark 
-                ? 'bg-[#0B0F17] border-[#1E293B] text-slate-200' 
-                : 'bg-white border-slate-300 text-slate-800 shadow-2xs'
+              isDark ? 'bg-[#0B0F17] border-[#1E293B] text-slate-200' : 'bg-white border-slate-300 text-slate-800 shadow-2xs'
             }`}
           >
             {applications.map(app => (
               <option key={app.id} value={app.id}>
-                {app.name} ({app.failoverState === 'DR_ACTIVE' ? 'DR Routed' : 'Primary Active'})
+                {app.name} ({({ PRD: 'Primary active', DR: 'DR active', MOVING: 'switching', UNKNOWN: 'routing unknown' } as const)[routeState(app, loadBalancer)]})
               </option>
             ))}
           </select>
         </div>
       </div>
 
-      {/* Interactive Anycast Failover & Traffic Routing Architecture Flow Chart */}
-      <TrafficFlowChart />
-
-      {/* FAILOVER TOPOLOGY PIPELINE */}
+      {/* ROUTING TOPOLOGY */}
       <div className={`rounded-lg border p-5 space-y-5 font-mono transition-colors ${
         isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
       }`}>
-        <div className={`flex items-center justify-between border-b pb-2.5 ${
-          isDark ? 'border-[#1A2332]' : 'border-slate-100'
-        }`}>
+        <div className={`flex items-center justify-between border-b pb-2.5 ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
           <div className="flex items-center gap-2">
             <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />
-            <h2 className="text-xs font-bold uppercase tracking-wider">
-              Network Routing Topology: {selectedApp.name}
-            </h2>
+            <h2 className="text-xs font-bold uppercase tracking-wider">Routing: {selectedApp.name}</h2>
           </div>
-          <span className={`text-xs font-bold ${
-            isDrActive ? 'text-amber-500' : 'text-emerald-500'
-          }`}>
-            {isDrActive ? 'ROUTED TO DR STANDBY' : 'ROUTED TO PRIMARY ORIGIN'}
+          <span className={`text-xs font-bold ${lbMapped && lbServing('PRD') === null ? 'text-slate-400' : isFailingOver || isDrActive ? 'text-amber-500' : 'text-emerald-500'}`}>
+            {lbMapped && lbServing('PRD') === null ? 'ROUTING UNKNOWN' : isFailingOver ? 'FAILOVER IN PROGRESS' : isDrActive ? 'ROUTED TO DR' : 'ROUTED TO PRIMARY'}
           </span>
         </div>
 
-        {/* Visual Flow Grid */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-center text-xs">
-          
-          {/* Step 1: Users */}
-          <div className={`p-3 rounded border text-center space-y-1 ${
-            isDark ? 'bg-[#0B0F17] border-[#1A2436]' : 'bg-slate-50 border-slate-200'
-          }`}>
+          <div className={`p-3 rounded border text-center space-y-1 ${isDark ? 'bg-[#0B0F17] border-[#1A2436]' : 'bg-slate-50 border-slate-200'}`}>
             <Users className="w-4 h-4 mx-auto text-blue-500" />
-            <div className="font-bold">Public Ingress</div>
-            <div className={`text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>TLS 1.3 / Port 443</div>
+            <div className="font-bold">Public traffic</div>
+            <div className={`text-[10px] truncate ${muted}`}>{selectedApp.loadBalancer?.hostname || selectedApp.dnsRecordName || 'DNS record not configured'}</div>
           </div>
 
-          {/* Step 2: Cloudflare Edge */}
-          <div className={`p-3 rounded border text-center space-y-1 ${
-            isDark ? 'bg-[#0B0F17] border-[#1A2436]' : 'bg-slate-50 border-slate-200'
-          }`}>
+          <div className={`p-3 rounded border text-center space-y-1 ${isDark ? 'bg-[#0B0F17] border-[#1A2436]' : 'bg-slate-50 border-slate-200'}`}>
             <Globe className="w-4 h-4 mx-auto text-amber-500" />
-            <div className="font-bold">Cloudflare Anycast</div>
-            <div className={`text-[10px] truncate ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{selectedApp.cloudflareZone}</div>
-            <div className="text-[10px] text-emerald-500 font-semibold">Pool Health Check OK</div>
+            <div className="font-bold">{lbMapped ? 'Cloudflare Load Balancer' : 'Cloudflare DNS'}</div>
+            <div className={`text-[10px] truncate ${muted}`}>{selectedApp.cloudflareZone || 'Zone not configured'}</div>
+            {lbMapped ? (
+              <div className={`text-[10px] font-semibold ${routing?.found ? 'text-emerald-500' : muted}`}>
+                {routing?.found
+                  ? `order: ${routing.defaultPools.map(id => lbPools.find(p => p.id === id)?.name || id).join(' → ')}`
+                  : routing?.error ? 'Routing: ' + routing.error.slice(0, 80) : loadBalancer?.status === 'OK' ? 'Routing not read' : (loadBalancer?.status ?? 'Not loaded').replace('_', ' ')}
+              </div>
+            ) : (
+              <div className={`text-[10px] font-semibold truncate ${dnsRecord ? 'text-emerald-500' : muted}`}>
+                {dnsRecord ? `${dnsRecord.name} → ${dnsRecord.target}` : cfZone ? 'Record not found in synced zone' : 'Zone not synced'}
+              </div>
+            )}
           </div>
 
-          {/* Step 3 & 4: Primary vs DR Origin Targets */}
           <div className="md:col-span-2 space-y-2">
-            
-            {/* Primary Origin Node */}
-            <div className={`p-2.5 rounded border flex items-center justify-between ${
-              !isDrActive 
-                ? (isDark ? 'bg-[#0E1A14] border-emerald-900/80 text-emerald-300' : 'bg-emerald-50 border-emerald-300 text-emerald-950')
-                : (isDark ? 'bg-[#180E13] border-rose-900/60 text-rose-300 opacity-80' : 'bg-rose-50/50 border-rose-200 text-slate-500')
-            }`}>
-              <div className="flex items-center gap-2">
-                <span className={`w-1.5 h-1.5 rounded-full ${!isDrActive ? 'bg-emerald-500' : 'bg-rose-500'}`} />
-                <div>
-                  <div className="font-bold">PRIMARY (PRD): {prdServer?.hostname.split('.')[0]}</div>
-                  <div className={`text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{prdServer?.ip} · Hostinger {prdServer?.region}</div>
-                </div>
-              </div>
-              <span className="font-bold text-[11px]">
-                {!isDrActive ? 'ACTIVE (100% Traffic)' : 'FAILED / BYPASSED'}
-              </span>
-            </div>
-
-            {/* DR Standby Origin Node */}
-            <div className={`p-2.5 rounded border flex items-center justify-between ${
-              isDrActive 
-                ? (isDark ? 'bg-[#0E1A14] border-emerald-900/80 text-emerald-300' : 'bg-amber-50 border-amber-300 text-amber-950')
-                : (isDark ? 'bg-[#0B0F17] border-[#1A2436] text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-600')
-            }`}>
-              <div className="flex items-center gap-2">
-                <span className={`w-1.5 h-1.5 rounded-full ${isDrActive ? 'bg-emerald-500' : 'bg-slate-500'}`} />
-                <div>
-                  <div className="font-bold">STANDBY (DR): {drServer?.hostname.split('.')[0]}</div>
-                  <div className={`text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{drServer?.ip} · Hostinger {drServer?.region}</div>
-                </div>
-              </div>
-              <span className="font-bold text-[11px]">
-                {isDrActive ? 'ACTIVE (Serving Traffic)' : 'STANDBY (Continuous Sync)'}
-              </span>
-            </div>
-
+            {originRow(prdServer, 'PRD', lbMapped ? lbServing('PRD') : !isDrActive && !isFailingOver, prdMonitors)}
+            {originRow(drServer, 'DR', lbMapped ? lbServing('DR') : isDrActive, drMonitors)}
           </div>
+        </div>
 
+        {lbMapped && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            {lbPools.length === 0
+              ? <div className={`text-[11px] ${muted}`}>Cloudflare pool state not loaded</div>
+              : lbPools.map(p => <LbPoolCard key={p.id} pool={p} isDark={isDark} compact active={routing?.found ? (routing.activePoolId ? routing.activePoolId === p.id : null) : undefined} />)}
+          </div>
+        )}
+
+        <div className={`grid grid-cols-2 sm:grid-cols-4 gap-3 text-[11px] pt-3 border-t ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
+          <div>
+            <span className={muted}>Auto-failover:</span>
+            <div className={`font-semibold ${selectedApp.autoFailover ? 'text-emerald-500' : ''}`}>{selectedApp.autoFailover ? 'Enabled' : 'Disabled'}</div>
+          </div>
+          <div>
+            <span className={muted}>Last failover:</span>
+            <div className="font-semibold">{fmtDateTime(selectedApp.lastFailoverAt, 'Never')}</div>
+          </div>
+          <div>
+            <span className={muted}>Replication lag:</span>
+            <div className="font-semibold">{selectedApp.currentReplicationLagSec === null ? 'No data' : `${selectedApp.currentReplicationLagSec}s`}</div>
+          </div>
+          <div>
+            <span className={muted}>RTO / RPO target:</span>
+            <div className="font-semibold">{selectedApp.rtoTargetMin}m / {selectedApp.rpoTargetMin}m</div>
+          </div>
         </div>
 
         {/* Failover Controls */}
-        <div className={`pt-3 border-t flex flex-col sm:flex-row items-center justify-between gap-3 text-xs ${
-          isDark ? 'border-[#1A2332]' : 'border-slate-100'
-        }`}>
-          <div className={isDark ? 'text-slate-400' : 'text-slate-600'}>
-            Current routing state: <strong className={isDark ? 'text-slate-200' : 'text-slate-900'}>{isDrActive ? 'Serving traffic from DR standby' : 'Normal routing to Primary origin'}</strong>.
-          </div>
-
-          <div>
-            {!confirmingFailover ? (
+        <div className={`pt-3 border-t space-y-2 text-xs ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
+          {lbMapped ? (
+            <LbFailoverConsole app={selectedApp} />
+          ) : !canFailover ? (
+            <div className={`font-sans ${muted}`}>Only super administrators can switch traffic between PRD and DR.</div>
+          ) : blockers.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-2 font-sans">
+              <span className="text-amber-500">Failover unavailable: {blockers.join(', ')}.</span>
+              <button onClick={() => navigate('/setup')} className="px-2.5 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white font-mono font-semibold cursor-pointer">
+                Configure in Setup
+              </button>
+            </div>
+          ) : !confirmingFailover ? (
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+              <div className={muted}>
+                Switching will point <strong className={isDark ? 'text-slate-200' : 'text-slate-900'}>{selectedApp.dnsRecordName}</strong> to{' '}
+                <strong className={isDark ? 'text-slate-200' : 'text-slate-900'}>{targetServer?.ip}</strong>.
+              </div>
               <button
+                disabled={isFailingOver}
                 onClick={() => setConfirmingFailover(true)}
-                className={`px-3 py-1.5 rounded font-semibold text-xs text-white transition-colors cursor-pointer shadow-xs ${
+                className={`px-3 py-1.5 rounded font-semibold text-xs text-white transition-colors cursor-pointer shadow-xs disabled:opacity-50 disabled:cursor-not-allowed ${
                   isDrActive ? 'bg-blue-600 hover:bg-blue-700' : 'bg-rose-600 hover:bg-rose-700'
                 }`}
               >
-                {isDrActive ? 'INITIATE FAILBACK TO PRIMARY' : 'EXECUTE EMERGENCY DR FAILOVER'}
+                {isFailingOver ? 'FAILOVER IN PROGRESS…' : isDrActive ? 'FAIL BACK TO PRIMARY' : 'FAIL OVER TO DR'}
               </button>
-            ) : (
-              <div className={`flex items-center gap-2 p-1.5 rounded font-sans border ${
-                isDark ? 'bg-[#1F1710] border-amber-900' : 'bg-amber-50 border-amber-200'
-              }`}>
-                <span className={`text-xs font-medium ${isDark ? 'text-amber-300' : 'text-amber-800'}`}>
-                  Confirm rerouting traffic for {selectedApp.name}?
-                </span>
+            </div>
+          ) : (
+            <div className={`p-3 rounded font-sans border space-y-2 ${isDark ? 'bg-[#1F1710] border-amber-900' : 'bg-amber-50 border-amber-200'}`}>
+              <div className="font-bold text-amber-500 flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4" />
+                <span>Confirm Cloudflare DNS switch for {selectedApp.name}</span>
+              </div>
+              <p className={`text-[11px] ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+                <strong className="font-mono">{selectedApp.dnsRecordName}</strong> (zone <span className="font-mono">{selectedApp.cloudflareZone}</span>)
+                {dnsRecord ? <> currently → <span className="font-mono">{dnsRecord.target}</span></> : null} will be pointed to the{' '}
+                {target === 'DR' ? 'DR' : 'PRD'} server <strong className="font-mono">{targetServer?.hostname}</strong> (<strong className="font-mono">{targetServer?.ip}</strong>).
+                {target === 'DR' && overall !== null && overall !== 'READY' && <span className="text-rose-500 font-semibold"> DR readiness is {overall.replace('_', ' ')}.</span>}
+              </p>
+              <input
+                type="text"
+                value={failoverReason}
+                onChange={e => setFailoverReason(e.target.value)}
+                placeholder="Reason (recorded in the audit log)"
+                className={`w-full px-2 py-1 rounded border text-xs font-mono outline-none ${
+                  isDark ? 'bg-[#0B0F17] border-[#1E293B] text-slate-200' : 'bg-white border-slate-300 text-slate-800'
+                }`}
+              />
+              <div className="flex items-center gap-2">
                 <button
-                  onClick={handleToggleFailover}
-                  className="px-2.5 py-0.5 bg-amber-600 hover:bg-amber-700 text-white rounded text-xs font-semibold font-mono cursor-pointer"
+                  disabled={failoverBusy}
+                  onClick={handleFailover}
+                  className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-xs font-semibold font-mono cursor-pointer flex items-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  Confirm Reroute
+                  {failoverBusy && <Loader2 className="w-3 h-3 animate-spin" />}
+                  <span>{failoverBusy ? 'Switching DNS…' : 'Switch DNS now'}</span>
                 </button>
                 <button
+                  disabled={failoverBusy}
                   onClick={() => setConfirmingFailover(false)}
-                  className={`px-2 py-0.5 rounded text-xs cursor-pointer ${
+                  className={`px-2 py-1 rounded text-xs cursor-pointer disabled:opacity-60 ${
                     isDark ? 'bg-slate-800 hover:bg-slate-700 text-slate-300' : 'bg-slate-200 hover:bg-slate-300 text-slate-700'
                   }`}
                 >
                   Cancel
                 </button>
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* DR READINESS SCORECARD */}
+      {/* DR READINESS (from the backend) */}
       <div className={`rounded-lg border p-5 space-y-4 font-mono text-xs transition-colors ${
         isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
       }`}>
-        <div className={`flex items-center justify-between border-b pb-2 ${
-          isDark ? 'border-[#1A2332]' : 'border-slate-100'
-        }`}>
+        <div className={`flex flex-wrap items-center justify-between gap-2 border-b pb-2 ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
           <div>
-            <h2 className="text-xs font-bold uppercase tracking-wider">
-              Disaster Recovery Readiness Audit: {selectedApp.name}
-            </h2>
-            <p className={`text-[11px] font-sans ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-              Verified operational criteria required before certifying disaster recovery
+            <h2 className="text-xs font-bold uppercase tracking-wider">DR Readiness: {selectedApp.name}</h2>
+            <p className={`text-[11px] font-sans ${muted}`}>
+              Evaluated by the server from live monitors, agent telemetry and Cloudflare pool health{readinessAt ? <> · evaluated <Ago iso={readinessAt} /></> : ''}
             </p>
           </div>
-          <div className="text-right text-xs">
-            <span className={isDark ? 'text-slate-400' : 'text-slate-500'}>RTO Target: </span>
-            <strong className="text-blue-500">{selectedApp.rtoTargetMin}m</strong>
-            <span className={`ml-3 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>RPO Target: </span>
-            <strong className="text-blue-500">{selectedApp.rpoTargetMin}m</strong>
+          <div className="flex items-center gap-3">
+            {overall !== null && (
+              <span className={`text-xs font-bold ${verdictColor(overall)}`}>
+                OVERALL: {overall.replace('_', ' ')}{score ? ` · ${score.passed}/${score.total} checks pass` : ''}
+              </span>
+            )}
+            <button
+              onClick={() => void loadReadiness()}
+              disabled={readinessLoading}
+              className={`p-1 rounded border cursor-pointer disabled:opacity-60 ${isDark ? 'border-[#1E293B] text-slate-300 hover:bg-[#1A2436]' : 'border-slate-300 text-slate-600 hover:bg-slate-100'}`}
+              title="Refresh readiness"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${readinessLoading ? 'animate-spin' : ''}`} />
+            </button>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
-          {readinessChecks.map(chk => (
-            <div key={chk.category} className={`p-3 rounded border space-y-1 ${
-              isDark ? 'bg-[#0B0F17] border-[#1A2436]' : 'bg-slate-50 border-slate-200'
-            }`}>
-              <div className="flex items-center justify-between">
-                <span className="font-semibold">{chk.category}</span>
-                <span className={`text-[10px] font-bold ${
-                  chk.status === 'READY' ? 'text-emerald-500' : 'text-rose-500'
-                }`}>
-                  {chk.status}
-                </span>
-              </div>
-              <p className={`text-[11px] font-sans ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{chk.detail}</p>
-            </div>
-          ))}
-        </div>
+        {readinessError ? (
+          <div className="text-rose-500 text-[11px]">Could not load DR readiness: {readinessError}</div>
+        ) : checks.length === 0 ? (
+          <div className={`text-[11px] ${muted} ${readinessLoading ? 'animate-pulse' : ''}`}>
+            {readinessLoading ? 'Evaluating readiness…' : 'No readiness checks returned.'}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {(['core', 'capacity'] as const).map(group => {
+              const list = checks.filter(c => (c.group ?? 'core') === group);
+              if (!list.length) return null;
+              return (
+                <div key={group} className="space-y-2">
+                  <div className={`text-[10px] uppercase tracking-wider font-bold ${muted}`}>
+                    {group === 'core' ? 'DR readiness checks (count toward READY)' : 'DR server capacity (telemetry agent — informational)'}
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                    {list.map((chk, i) => (
+                      <div key={chk.key} className={`p-3 rounded border space-y-1 ${isDark ? 'bg-[#0B0F17] border-[#1A2436]' : 'bg-slate-50 border-slate-200'}`}>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold">{group === 'core' ? `${i + 1}. ` : ''}{chk.label}</span>
+                          <span className={`text-[10px] font-bold ${readinessColor(chk.status)}`}>{chk.status.replace('_', ' ')}</span>
+                        </div>
+                        <p className={`text-[11px] font-sans break-words ${muted}`}>{chk.detail}</p>
+                        <p className={`text-[10px] ${muted}`}>Data: <Ago iso={chk.observedAt} /></p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
     </div>
