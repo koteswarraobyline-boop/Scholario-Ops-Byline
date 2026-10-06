@@ -17,26 +17,14 @@ export default defineConfig(() => {
     },
     // Expose env vars to the browser with VITE_ prefix
     define: {
-      'import.meta.env.VITE_API_URL': JSON.stringify(process.env.VITE_API_URL || 'http://localhost:4000'),
-      'import.meta.env.VITE_WS_URL':  JSON.stringify(process.env.VITE_WS_URL  || 'ws://localhost:4000/ws'),
+      'import.meta.env.VITE_API_URL': JSON.stringify(process.env.VITE_API_URL || ''),
+      'import.meta.env.VITE_WS_URL':  JSON.stringify(process.env.VITE_WS_URL  || ''),
     },
     server: {
       port: 3000,
       host: '0.0.0.0',
       hmr: false,
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
-      // Proxy API + WS to the backend (avoids CORS in dev)
-      proxy: {
-        '/api': {
-          target: 'http://localhost:4000',
-          changeOrigin: true,
-        },
-        '/ws': {
-          target: 'ws://localhost:4000',
-          ws: true,
-          changeOrigin: true,
-        },
-      },
     },
   };
 });

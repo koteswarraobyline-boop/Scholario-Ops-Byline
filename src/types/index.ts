@@ -368,22 +368,45 @@ export interface DrReadinessItem {
   detail: string;
 }
 
+export type RealVpsProbeState =
+  | 'HEALTHY'
+  | 'UNREACHABLE'
+  | 'TIMEOUT'
+  | 'CONNECTION_REFUSED'
+  | 'HTTP_ERROR'
+  | 'INVALID_HEALTH_RESPONSE'
+  | 'UNKNOWN';
+
+export type RealVpsErrorCategory =
+  | 'TIMEOUT'
+  | 'CONNECTION_REFUSED'
+  | 'NETWORK_UNREACHABLE'
+  | 'DNS_FAILURE'
+  | 'HTTP_ERROR'
+  | 'INVALID_RESPONSE';
+
 export interface RealVpsNode {
   id: string;
   name: string;
+  role?: string;
   ip: string;
   hostname: string;
   port: number;
   healthUrl: string;
+  healthPath?: string;
   provider: string;
   region: string;
   environment: 'PRD' | 'DR';
   status: OperationalStatus;
+  probeState?: RealVpsProbeState;
   lastCheckedAt: string | null;
-  latencyMs: number;
+  latencyMs: number | null;
   httpStatus: number | null;
   tlsStatus: string | null;
   responseSnippet: string;
+  errorReason?: string | null;
+  errorCategory?: RealVpsErrorCategory | null;
+  healthData?: Record<string, string | number | boolean> | null;
   telemetry: {
     cpuPercent: number;
     ramPercent: number;
@@ -414,16 +437,21 @@ export interface RealVpsConfig {
 }
 
 export interface RealVpsProbeResult {
-  target: string;
-  vpsType: 'main' | 'dr' | 'custom';
+  target?: string;
+  vpsType?: 'main' | 'dr' | 'custom';
   reachable: boolean;
+  probeState?: RealVpsProbeState;
   statusCode: number | null;
   latencyMs: number;
+  health?: string | null;
+  healthPath?: string;
+  healthData?: Record<string, string | number | boolean> | null;
   tlsValid?: boolean;
   tlsInfo?: string;
   headers?: Record<string, string>;
   bodySnippet?: string;
   error?: string;
+  errorCategory?: RealVpsErrorCategory | null;
   timestamp: string;
 }
 

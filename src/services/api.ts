@@ -434,6 +434,42 @@ export const api = {
           } catch {}
         });
 
+        source.addEventListener('application_update', (e) => {
+          try {
+            onEvent('application_update', JSON.parse(e.data));
+          } catch {}
+        });
+
+        source.addEventListener('real_vps_update', (e) => {
+          try {
+            onEvent('real_vps_update', JSON.parse(e.data));
+          } catch {}
+        });
+
+        source.addEventListener('real_vps_probed', (e) => {
+          try {
+            onEvent('real_vps_probed', JSON.parse(e.data));
+          } catch {}
+        });
+
+        source.addEventListener('real_vps_failover', (e) => {
+          try {
+            onEvent('real_vps_failover', JSON.parse(e.data));
+          } catch {}
+        });
+
+        source.addEventListener('mock_data_purged', (e) => {
+          try {
+            onEvent('mock_data_purged', JSON.parse(e.data));
+          } catch {}
+        });
+
+        source.addEventListener('mock_data_restored', (e) => {
+          try {
+            onEvent('mock_data_restored', JSON.parse(e.data));
+          } catch {}
+        });
+
         source.addEventListener('audit', (e) => {
           try {
             onEvent('audit', JSON.parse(e.data));
