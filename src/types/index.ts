@@ -735,3 +735,114 @@ export interface OpsUser {
   lastLoginAt?: string | null;
   createdAt?: string;
 }
+
+// ── Real VPS Testbench Types (added from remote merge) ──────────────────────
+
+export type RealVpsProbeState =
+  | 'HEALTHY'
+  | 'UNREACHABLE'
+  | 'TIMEOUT'
+  | 'CONNECTION_REFUSED'
+  | 'HTTP_ERROR'
+  | 'INVALID_HEALTH_RESPONSE'
+  | 'UNKNOWN';
+
+export type RealVpsErrorCategory =
+  | 'TIMEOUT'
+  | 'CONNECTION_REFUSED'
+  | 'NETWORK_UNREACHABLE'
+  | 'DNS_FAILURE'
+  | 'HTTP_ERROR'
+  | 'INVALID_RESPONSE';
+
+export interface RealVpsNode {
+  id: string;
+  name: string;
+  role?: string;
+  ip: string;
+  hostname: string;
+  port: number;
+  healthUrl: string;
+  healthPath?: string;
+  provider: string;
+  region: string;
+  environment: 'PRD' | 'DR';
+  status: OperationalStatus;
+  probeState?: RealVpsProbeState;
+  lastCheckedAt: string | null;
+  latencyMs: number | null;
+  httpStatus: number | null;
+  tlsStatus: string | null;
+  responseSnippet: string;
+  errorReason?: string | null;
+  errorCategory?: RealVpsErrorCategory | null;
+  healthData?: Record<string, string | number | boolean> | null;
+  telemetry: {
+    cpuPercent: number;
+    ramPercent: number;
+    diskPercent: number;
+    loadAvg?: number[];
+    observedAt: string;
+  };
+}
+
+export interface RealVpsConfig {
+  activeMode: 'real_pair' | 'sample_cluster';
+  routing: 'MAIN' | 'DR';
+  autoFailover: boolean;
+  healthCheckIntervalSec: number;
+  main: RealVpsNode;
+  dr: RealVpsNode;
+  testApp: {
+    id: string;
+    name: string;
+    codeName: string;
+    domain: string;
+    healthPath: string;
+    failoverState: 'PRIMARY_ACTIVE' | 'DR_ACTIVE';
+    mainServerId: string;
+    drServerId: string;
+    lastFailoverAt?: string;
+  };
+}
+
+export interface RealVpsProbeResult {
+  target?: string;
+  vpsType?: 'main' | 'dr' | 'custom';
+  reachable: boolean;
+  probeState?: RealVpsProbeState;
+  statusCode: number | null;
+  latencyMs: number;
+  health?: string | null;
+  healthPath?: string;
+  healthData?: Record<string, string | number | boolean> | null;
+  tlsValid?: boolean;
+  tlsInfo?: string;
+  headers?: Record<string, string>;
+  bodySnippet?: string;
+  error?: string;
+  errorCategory?: RealVpsErrorCategory | null;
+  timestamp: string;
+}
+
+export interface RealVpsTcpProbeResult {
+  host: string;
+  port: number;
+  open: boolean;
+  latencyMs: number;
+  error?: string;
+  testedAt: string;
+}
+
+export interface SyntheticTransactionResult {
+  url: string;
+  method: string;
+  reachable: boolean;
+  statusCode: number | null;
+  latencyMs: number;
+  expectedMatch: boolean;
+  matchText?: string;
+  responseSnippet: string;
+  headers?: Record<string, string>;
+  testedAt: string;
+}
