@@ -7,6 +7,8 @@ import { defineConfig } from 'vite';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// The API and the SPA are served by the same process (server.ts), so no proxy is needed:
+// in development server.ts mounts Vite as middleware; in production it serves ./dist.
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
@@ -15,28 +17,8 @@ export default defineConfig(() => {
         '@': __dirname,
       },
     },
-    // Expose env vars to the browser with VITE_ prefix
-    define: {
-      'import.meta.env.VITE_API_URL': JSON.stringify(process.env.VITE_API_URL || 'http://localhost:4000'),
-      'import.meta.env.VITE_WS_URL':  JSON.stringify(process.env.VITE_WS_URL  || 'ws://localhost:4000/ws'),
-    },
     server: {
-      port: 3000,
-      host: '0.0.0.0',
-      hmr: false,
-      watch: process.env.DISABLE_HMR === 'true' ? null : {},
-      // Proxy API + WS to the backend (avoids CORS in dev)
-      proxy: {
-        '/api': {
-          target: 'http://localhost:4000',
-          changeOrigin: true,
-        },
-        '/ws': {
-          target: 'ws://localhost:4000',
-          ws: true,
-          changeOrigin: true,
-        },
-      },
+      hmr: process.env.DISABLE_HMR === 'true' ? false : undefined,
     },
   };
 });

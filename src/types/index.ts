@@ -55,19 +55,26 @@ export interface Application {
   description: string;
   tier: 'TIER_1' | 'TIER_2' | 'TIER_3';
   status: OperationalStatus;
-  uptime24h: number;
-  uptime7d: number;
-  uptime30d: number;
+  /** null until monitors have produced checks in the window */
+  uptime24h: number | null;
+  uptime7d: number | null;
+  uptime30d: number | null;
   rtoTargetMin: number;
   rpoTargetMin: number;
-  currentReplicationLagSec: number;
+  /** null when no DB_REPLICATION monitor reports lag for this application */
+  currentReplicationLagSec: number | null;
   prdServerId: string;
   drServerId: string;
+  /** Cloudflare DNS record (e.g. app.example.com) switched between PRD and DR IPs on failover */
+  dnsRecordName?: string;
+  /** Switch DNS to DR automatically when PRD is confirmed CRITICAL and DR is healthy */
+  autoFailover?: boolean;
+  lastFailoverAt?: string;
   failoverState: 'PRIMARY_ACTIVE' | 'DR_ACTIVE' | 'FAILING_OVER';
-  p50Ms: number;
-  p95Ms: number;
-  p99Ms: number;
-  errorRatePercent: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  p99Ms: number | null;
+  errorRatePercent: number | null;
   lastChecked: string;
   cloudflareZone: string;
   dependencies: AppDependency[];
@@ -120,8 +127,8 @@ export interface VpsServer {
   ip: string;
   applicationId: string;
   environment: Environment;
-  provider: 'Hostinger';
-  region: 'Singapore' | 'Frankfurt' | 'Mumbai' | 'London';
+  provider: string;
+  region: string;
   plan: string;
   cpuCores: number;
   ramGb: number;
@@ -131,7 +138,9 @@ export interface VpsServer {
   agentVersion: string;
   agentStatus: 'CONNECTED' | 'STALE' | 'DISCONNECTED';
   uptimeDays: number;
+  /** Last agent report time; empty string when the agent has never reported */
   lastSeen: string;
+  notes?: string;
   telemetry: VpsTelemetry;
   processes: VpsProcess[];
   services: VpsService[];
@@ -172,6 +181,18 @@ export interface Monitor {
   runbookId?: string;
   enabled: boolean;
   activeMaintenance: boolean;
+  /** Server this monitor belongs to (drives server health and INFRA_* checks) */
+  serverId?: string;
+  /** HTTP checks: expected status code (default: any 2xx/3xx) */
+  expectedStatusCode?: number;
+  /** HTTP checks: response body must contain this text */
+  expectedBodyContains?: string;
+  /** Push-based monitors (heartbeats, replication lag, backup freshness): secret ping token */
+  heartbeatToken?: string;
+  /** Last time a push-based monitor received a ping */
+  lastPingAt?: string;
+  /** Last numeric value reported to a push-based monitor (e.g. replication lag seconds) */
+  lastValue?: number;
 }
 
 export interface IncidentTimelineEvent {
@@ -218,7 +239,7 @@ export interface Incident {
 
 export interface CloudflareDnsRecord {
   id: string;
-  type: 'A' | 'CNAME' | 'TXT' | 'MX';
+  type: string;
   name: string;
   target: string;
   proxied: boolean;
@@ -239,13 +260,17 @@ export interface CloudflareLoadBalancer {
 export interface CloudflareZone {
   id: string;
   domain: string;
-  status: 'ACTIVE' | 'DEGRADED';
-  sslStatus: 'ACTIVE' | 'EXPIRING_SOON' | 'ERROR';
-  sslExpiresAt: string;
+  status: 'ACTIVE' | 'DEGRADED' | 'PENDING';
+  plan?: string;
+  nameServers?: string[];
+  sslMode?: string;
+  sslStatus: 'ACTIVE' | 'EXPIRING_SOON' | 'ERROR' | 'UNKNOWN';
+  sslExpiresAt: string | null;
   tlsVersion: string;
   dnsRecords: CloudflareDnsRecord[];
   loadBalancer: CloudflareLoadBalancer;
-  wafEvents24h: number;
+  /** null when firewall analytics are unavailable for the zone plan or token */
+  wafEvents24h: number | null;
   driftDetected: boolean;
   driftDetails?: string;
   lastChecked: string;
@@ -343,7 +368,8 @@ export interface AuditLog {
   timestamp: string;
   operator: string;
   action: string;
-  category: 'INCIDENT' | 'FAILOVER' | 'MAINTENANCE' | 'MONITOR' | 'CLOUDFLARE' | 'INFRASTRUCTURE' | 'RUNBOOK';
+  category: 'INCIDENT' | 'FAILOVER' | 'MAINTENANCE' | 'MONITOR' | 'CLOUDFLARE' | 'INFRASTRUCTURE' | 'RUNBOOK'
+    | 'APPLICATION' | 'AUTH' | 'USER' | 'NOTIFICATION' | 'DEPLOYMENT' | 'BACKUP';
   targetId: string;
   details: string;
 }
@@ -356,7 +382,7 @@ export interface DeadManControlPlane {
   lastHeartbeatReceivedAt: string;
   intervalSec: number;
   toleranceSec: number;
-  status: 'HEALTHY' | 'CRITICAL_SILENCE';
+  status: 'HEALTHY' | 'CRITICAL_SILENCE' | 'NOT_CONFIGURED';
   consecutiveMisses: number;
   lastAlertSentAt?: string;
 }
@@ -368,66 +394,7 @@ export interface DrReadinessItem {
   detail: string;
 }
 
-export interface RealVpsNode {
-  id: string;
-  name: string;
-  ip: string;
-  hostname: string;
-  port: number;
-  healthUrl: string;
-  provider: string;
-  region: string;
-  environment: 'PRD' | 'DR';
-  status: OperationalStatus;
-  lastCheckedAt: string | null;
-  latencyMs: number;
-  httpStatus: number | null;
-  tlsStatus: string | null;
-  responseSnippet: string;
-  telemetry: {
-    cpuPercent: number;
-    ramPercent: number;
-    diskPercent: number;
-    loadAvg?: number[];
-    observedAt: string;
-  };
-}
-
-export interface RealVpsConfig {
-  activeMode: 'real_pair' | 'sample_cluster';
-  routing: 'MAIN' | 'DR';
-  autoFailover: boolean;
-  healthCheckIntervalSec: number;
-  main: RealVpsNode;
-  dr: RealVpsNode;
-  testApp: {
-    id: string;
-    name: string;
-    codeName: string;
-    domain: string;
-    healthPath: string;
-    failoverState: 'PRIMARY_ACTIVE' | 'DR_ACTIVE';
-    mainServerId: string;
-    drServerId: string;
-    lastFailoverAt?: string;
-  };
-}
-
-export interface RealVpsProbeResult {
-  target: string;
-  vpsType: 'main' | 'dr' | 'custom';
-  reachable: boolean;
-  statusCode: number | null;
-  latencyMs: number;
-  tlsValid?: boolean;
-  tlsInfo?: string;
-  headers?: Record<string, string>;
-  bodySnippet?: string;
-  error?: string;
-  timestamp: string;
-}
-
-export interface RealVpsTcpProbeResult {
+export interface TcpProbeResult {
   host: string;
   port: number;
   open: boolean;
@@ -447,4 +414,47 @@ export interface SyntheticTransactionResult {
   responseSnippet: string;
   headers?: Record<string, string>;
   testedAt: string;
+}
+
+export interface HttpProbeResult {
+  target: string;
+  reachable: boolean;
+  statusCode: number | null;
+  latencyMs: number;
+  resolvedIp?: string;
+  tlsInfo?: string;
+  headers?: Record<string, string>;
+  responseSnippet: string;
+  error?: string;
+  testedAt: string;
+}
+
+export interface IntegrationStatus {
+  cloudflare: { configured: boolean; lastSyncAt: string | null; lastError: string | null; zoneCount: number };
+  hostinger: { configured: boolean; lastSyncAt: string | null; lastError: string | null; vmCount: number };
+  smtp: { configured: boolean };
+  deadMan: { configured: boolean };
+  publicUrl: string;
+}
+
+export interface ServerMetricPoint {
+  t: string;
+  cpu: number;
+  ram: number;
+  disk: number;
+  load1: number;
+  netIn: number;
+  netOut: number;
+}
+
+export interface OpsUser {
+  id: string;
+  email: string;
+  fullName: string;
+  displayName?: string;
+  roleName: "viewer" | "operator" | "it_administrator" | "super_admin";
+  isActive: boolean;
+  isOnCall: boolean;
+  lastLoginAt?: string | null;
+  createdAt?: string;
 }

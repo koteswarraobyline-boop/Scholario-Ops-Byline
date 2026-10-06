@@ -79,14 +79,16 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const role = user.roleName;
     const level = ROLE_LEVEL[role] ?? 0;
 
+    // Mirrors the role checks enforced by the API (backend/routes.ts)
     const operatorActions = [
-      'acknowledge_incident', 'resolve_incident', 'add_note', 'assign_incident',
-      'run_probe', 'execute_runbook', 'create_maintenance',
+      'acknowledge_incident', 'resolve_incident', 'add_note', 'assign_incident', 'declare_incident',
+      'run_probe', 'execute_runbook', 'create_maintenance', 'test_channel', 'sync_providers',
     ];
     const adminActions = [
       'create_monitor', 'update_monitor', 'delete_monitor',
-      'create_server', 'update_server', 'manage_users',
-      'manage_communications',
+      'create_server', 'update_server', 'delete_server',
+      'create_application', 'update_application', 'delete_application',
+      'manage_users', 'manage_communications', 'manage_runbooks', 'delete_maintenance',
     ];
     const superAdminActions = ['trigger_failover', 'manage_roles', 'delete_user'];
 

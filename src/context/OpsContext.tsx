@@ -1,29 +1,19 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
-import { 
-  Application, 
-  VpsServer, 
-  Monitor, 
-  Incident, 
-  CloudflareZone, 
-  BackupRecord, 
-  Runbook, 
-  Deployment, 
-  MaintenanceWindow, 
-  CommunicationChannel, 
-  EscalationPolicy, 
-  AuditLog, 
-  DeadManControlPlane,
-  IncidentStatus,
-  IncidentSeverity,
-  MonitorType,
-  RealVpsConfig,
-  RealVpsProbeResult,
-  RealVpsTcpProbeResult,
-  SyntheticTransactionResult
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
+import {
+  Application, VpsServer, Monitor, Incident, CloudflareZone, BackupRecord, Runbook, Deployment, MaintenanceWindow,
+  CommunicationChannel, EscalationPolicy, AuditLog, DeadManControlPlane, IncidentStatus, IncidentSeverity, MonitorType,
+  IntegrationStatus,
 } from '../types';
-import { api, HealthCheckResponse } from '../services/api';
-import { RealVpsService } from '../services/realVps';
+import { useNavigate, useLocation } from 'react-router-dom';
+import { api, ApiError, HealthCheckResponse, BootstrapData } from '../services/api';
 
+export type RealtimeStatus = 'LIVE' | 'RECONNECTING' | 'OFFLINE';
+
+export interface Toast {
+  id: number;
+  type: 'success' | 'error' | 'info';
+  message: string;
+}
 
 interface OpsContextType {
   applications: Application[];
@@ -39,7 +29,13 @@ interface OpsContextType {
   escalationPolicies: EscalationPolicy[];
   auditLogs: AuditLog[];
   deadMan: DeadManControlPlane;
-  
+  integrations: IntegrationStatus | null;
+
+  isLoading: boolean;
+  loadError: string | null;
+  realtimeStatus: RealtimeStatus;
+  refreshAll: () => Promise<void>;
+
   // Navigation & selection
   activeTab: string;
   setActiveTab: (tab: string) => void;
@@ -55,29 +51,60 @@ interface OpsContextType {
   setIsCommandPaletteOpen: (open: boolean) => void;
   lastUpdatedSecondsAgo: number;
 
-  // Actions
-  triggerFailover: (appId: string, targetOrigin: 'DR' | 'PRIMARY') => void;
-  acknowledgeIncident: (incidentId: string, operatorName?: string) => void;
-  changeIncidentStatus: (incidentId: string, status: IncidentStatus) => void;
-  changeIncidentSeverity: (incidentId: string, severity: IncidentSeverity) => void;
-  assignIncidentOwner: (incidentId: string, owner: string) => void;
-  addIncidentNote: (incidentId: string, noteText: string) => void;
-  resolveIncident: (incidentId: string, resolutionSummary?: string) => void;
-  toggleRunbookStep: (runbookId: string, stepId: number) => void;
-  runProbeCheck: (monitorId: string) => void;
-  runAllProbes: () => void;
-  addMonitor: (newMon: Omit<Monitor, 'id' | 'consecutiveFailures' | 'consecutiveRecoveries' | 'lastCheck' | 'lastSuccess' | 'responseTimeMs' | 'uptimePercent' | 'history' | 'status' | 'activeMaintenance'> & Partial<Monitor>) => Monitor;
-  deleteMonitor: (monitorId: string) => void;
-  toggleMonitorStatus: (monitorId: string) => void;
+  // Incidents
+  acknowledgeIncident: (incidentId: string) => Promise<boolean>;
+  changeIncidentStatus: (incidentId: string, status: IncidentStatus) => Promise<boolean>;
+  changeIncidentSeverity: (incidentId: string, severity: IncidentSeverity) => Promise<boolean>;
+  assignIncidentOwner: (incidentId: string, owner: string) => Promise<boolean>;
+  addIncidentNote: (incidentId: string, noteText: string) => Promise<boolean>;
+  resolveIncident: (incidentId: string, resolutionSummary?: string) => Promise<boolean>;
+  createIncident: (data: { title: string; severity: IncidentSeverity; applicationId?: string; environment?: 'PRD' | 'DR'; description?: string }) => Promise<Incident | null>;
+
+  // Failover
+  triggerFailover: (appId: string, targetOrigin: 'DR' | 'PRIMARY', reason?: string) => Promise<boolean>;
+
+  // Monitors
+  runProbeCheck: (monitorId: string) => Promise<void>;
+  runAllProbes: () => Promise<void>;
+  addMonitor: (input: Partial<Monitor>) => Promise<Monitor | null>;
+  updateMonitor: (monitorId: string, input: Partial<Monitor>) => Promise<Monitor | null>;
+  deleteMonitor: (monitorId: string) => Promise<boolean>;
+  toggleMonitorStatus: (monitorId: string) => Promise<boolean>;
   isAddMonitorModalOpen: boolean;
   setIsAddMonitorModalOpen: (open: boolean) => void;
   addMonitorInitialContext: { applicationId?: string; serverId?: string; defaultType?: MonitorType } | null;
   openAddMonitorWithContext: (context?: { applicationId?: string; serverId?: string; defaultType?: MonitorType }) => void;
+
+  // Servers & applications
+  createServer: (data: Partial<VpsServer>) => Promise<VpsServer | null>;
+  updateServer: (id: string, data: Partial<VpsServer>) => Promise<VpsServer | null>;
+  deleteServer: (id: string) => Promise<boolean>;
+  createApplication: (data: Partial<Application>) => Promise<Application | null>;
+  updateApplication: (id: string, data: Partial<Application>) => Promise<Application | null>;
+  deleteApplication: (id: string) => Promise<boolean>;
+
+  // Notifications
   sendTestNotification: (channelId: string) => Promise<boolean>;
-  triggerSimulatedScenario?: never;
-  addAuditEntry: (action: string, category: AuditLog['category'], targetId: string, details: string) => void;
-  
-  // Real-time API & Reachability
+  createChannel: (data: Partial<CommunicationChannel>) => Promise<CommunicationChannel | null>;
+  updateChannel: (id: string, data: Partial<CommunicationChannel>) => Promise<CommunicationChannel | null>;
+  deleteChannel: (id: string) => Promise<boolean>;
+  saveEscalationPolicies: (policies: Partial<EscalationPolicy>[]) => Promise<boolean>;
+
+  // Maintenance & runbooks
+  createMaintenance: (data: Partial<MaintenanceWindow>) => Promise<MaintenanceWindow | null>;
+  completeMaintenance: (id: string) => Promise<boolean>;
+  deleteMaintenance: (id: string) => Promise<boolean>;
+  toggleRunbookStep: (runbookId: string, stepId: number) => Promise<void>;
+  resetRunbook: (runbookId: string) => Promise<void>;
+  createRunbook: (data: Partial<Runbook>) => Promise<Runbook | null>;
+  updateRunbook: (id: string, data: Partial<Runbook>) => Promise<Runbook | null>;
+  deleteRunbook: (id: string) => Promise<boolean>;
+
+  // Providers
+  syncCloudflare: () => Promise<boolean>;
+  syncHostinger: () => Promise<boolean>;
+
+  // API reachability
   apiHealth: {
     reachable: boolean;
     status: 'HEALTHY' | 'DEGRADED' | 'UNREACHABLE';
@@ -87,29 +114,17 @@ interface OpsContextType {
     details: HealthCheckResponse | null;
   };
   triggerHealthCheck: () => Promise<void>;
-  simulateApiOutage: (unreachable: boolean) => void;
 
-  // Theme mode
+  // Theme
   theme: 'dark' | 'light';
   setTheme: (theme: 'dark' | 'light') => void;
   toggleTheme: () => void;
 
-  // Real 2-VPS Testbench state & actions
-  realVpsConfig: RealVpsConfig | null;
-  isRealVpsOnlyMode: boolean;
-  isRealVpsProbing: boolean;
-  refreshRealVpsConfig: () => Promise<void>;
-  updateRealVpsConfig: (payload: Partial<RealVpsConfig>) => Promise<void>;
-  probeRealVps: (targetVps: 'main' | 'dr', customUrl?: string) => Promise<RealVpsProbeResult | null>;
-  probeBothRealVps: () => Promise<{ mainResult: RealVpsProbeResult; drResult: RealVpsProbeResult } | null>;
-  failoverRealVps: (target?: 'MAIN' | 'DR', reason?: string) => Promise<void>;
-  purgeMockData?: never;
-  restoreMockData?: never;
-  tcpProbe: (payload: { targetVps?: 'main' | 'dr'; host?: string; port: number }) => Promise<RealVpsTcpProbeResult | null>;
-  testSynthetic: (payload: { url: string; method?: string; body?: string; expectedStatus?: number; matchText?: string }) => Promise<SyntheticTransactionResult | null>;
-  simulateOutage: (targetVps: 'main' | 'dr', simulatedStatus: 'CRITICAL' | 'HEALTHY') => Promise<void>;
+  // Toasts
+  toasts: Toast[];
+  notify: (type: Toast['type'], message: string) => void;
+  dismissToast: (id: number) => void;
 
-  // Computed summaries
   systemSummary: {
     totalApps: number;
     healthyApps: number;
@@ -128,425 +143,223 @@ interface OpsContextType {
 
 const OpsContext = createContext<OpsContextType | undefined>(undefined);
 
+const EMPTY_DEADMAN: DeadManControlPlane = {
+  id: 'deadman-outbound',
+  name: 'External Dead-Man Heartbeat',
+  nodeLocation: 'Not configured',
+  targetControlPlane: '',
+  lastHeartbeatReceivedAt: '',
+  intervalSec: 60,
+  toleranceSec: 180,
+  status: 'NOT_CONFIGURED',
+  consecutiveMisses: 0,
+};
+
+const upsert = <T extends { id: string }>(list: T[], item: T, prepend = true): T[] =>
+  list.some(x => x.id === item.id) ? list.map(x => (x.id === item.id ? item : x)) : prepend ? [item, ...list] : [...list, item];
+
+const errMessage = (err: unknown) => (err instanceof ApiError || err instanceof Error ? err.message : 'Unexpected error');
+
 export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [applications, setApplications] = useState<Application[]>([]);
   const [servers, setServers] = useState<VpsServer[]>([]);
   const [monitors, setMonitors] = useState<Monitor[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [cloudflareZones, setCloudflareZones] = useState<CloudflareZone[]>([]);
-  const [backups] = useState<BackupRecord[]>([]);
+  const [backups, setBackups] = useState<BackupRecord[]>([]);
   const [runbooks, setRunbooks] = useState<Runbook[]>([]);
-  const [deployments] = useState<Deployment[]>([]);
-  const [maintenanceWindows] = useState<MaintenanceWindow[]>([]);
+  const [deployments, setDeployments] = useState<Deployment[]>([]);
+  const [maintenanceWindows, setMaintenanceWindows] = useState<MaintenanceWindow[]>([]);
   const [communicationChannels, setCommunicationChannels] = useState<CommunicationChannel[]>([]);
-  const [escalationPolicies] = useState<EscalationPolicy[]>([]);
+  const [escalationPolicies, setEscalationPolicies] = useState<EscalationPolicy[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [deadMan, setDeadMan] = useState<DeadManControlPlane>(EMPTY_DEADMAN);
+  const [integrations, setIntegrations] = useState<IntegrationStatus | null>(null);
 
-  const defaultDeadMan: DeadManControlPlane = {
-    id: 'deadman-external-ch',
-    name: 'External Watchdog',
-    nodeLocation: 'Zurich ZH4',
-    targetControlPlane: '/health',
-    status: 'HEALTHY',
-    intervalSec: 60,
-    toleranceSec: 30,
-    consecutiveMisses: 0,
-    lastHeartbeatReceivedAt: new Date().toISOString(),
-    lastAlertSentAt: undefined
-  };
-  const [deadMan, setDeadMan] = useState<DeadManControlPlane>(defaultDeadMan);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [realtimeStatus, setRealtimeStatus] = useState<RealtimeStatus>('RECONNECTING');
 
-  const [activeTab, setActiveTab] = useState<string>('overview');
+  const [activeTab, setActiveTabState] = useState<string>('overview');
+  const navigate = useNavigate();
+  const location = useLocation();
+  // Tabs are URL-driven: switching tab navigates, so the address bar, history and view stay in sync
+  const setActiveTab = useCallback((tab: string) => {
+    setActiveTabState(tab);
+    if (location.pathname !== `/${tab}`) navigate(`/${tab}`);
+  }, [location.pathname, navigate]);
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
   const [selectedServerId, setSelectedServerId] = useState<string | null>(null);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [selectedRunbookId, setSelectedRunbookId] = useState<string | null>(null);
-  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState<boolean>(false);
-  const [isAddMonitorModalOpen, setIsAddMonitorModalOpen] = useState<boolean>(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [isAddMonitorModalOpen, setIsAddMonitorModalOpen] = useState(false);
   const [addMonitorInitialContext, setAddMonitorInitialContext] = useState<{ applicationId?: string; serverId?: string; defaultType?: MonitorType } | null>(null);
-  const [lastUpdatedSecondsAgo, setLastUpdatedSecondsAgo] = useState<number>(0);
-  
-  // Real-time API reachability state (/health)
-  const [apiHealth, setApiHealth] = useState<{
-    reachable: boolean;
-    status: 'HEALTHY' | 'DEGRADED' | 'UNREACHABLE';
-    lastChecked: string;
-    latencyMs: number;
-    endpoint: string;
-    details: HealthCheckResponse | null;
-  }>({
-    reachable: true,
-    status: 'HEALTHY',
-    lastChecked: new Date().toISOString(),
-    latencyMs: 14,
-    endpoint: '/health',
-    details: null
-  });
+  const [lastUpdatedSecondsAgo, setLastUpdatedSecondsAgo] = useState(0);
+  const lastEventAt = useRef(Date.now());
 
-  const [simulatedOutage, setSimulatedOutage] = useState<boolean>(false);
+  const [apiHealth, setApiHealth] = useState<OpsContextType['apiHealth']>({
+    reachable: true, status: 'HEALTHY', lastChecked: '', latencyMs: 0, endpoint: '/api/health', details: null,
+  });
 
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
-    const saved = localStorage.getItem('scholario_theme');
-    return (saved === 'light' || saved === 'dark') ? saved : 'dark';
+    try {
+      const saved = localStorage.getItem('scholario_theme');
+      return saved === 'light' || saved === 'dark' ? saved : 'dark';
+    } catch {
+      return 'dark';
+    }
   });
 
   useEffect(() => {
-    localStorage.setItem('scholario_theme', theme);
-    if (theme === 'dark') {
-      document.documentElement.classList.add('dark');
-      document.documentElement.classList.remove('light');
-    } else {
-      document.documentElement.classList.add('light');
-      document.documentElement.classList.remove('dark');
-    }
+    try { localStorage.setItem('scholario_theme', theme); } catch { /* storage unavailable */ }
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    document.documentElement.classList.toggle('light', theme === 'light');
   }, [theme]);
+  const toggleTheme = useCallback(() => setTheme(prev => (prev === 'dark' ? 'light' : 'dark')), []);
 
-  const toggleTheme = useCallback(() => {
-    setTheme(prev => prev === 'dark' ? 'light' : 'dark');
+  // ── Toasts ────────────────────────────────────────────────────────────────
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const toastSeq = useRef(0);
+  const dismissToast = useCallback((id: number) => setToasts(prev => prev.filter(t => t.id !== id)), []);
+  const notify = useCallback((type: Toast['type'], message: string) => {
+    const id = ++toastSeq.current;
+    setToasts(prev => [...prev.slice(-4), { id, type, message }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), type === 'error' ? 8000 : 4000);
   }, []);
 
-  // Sync audit logs to localStorage
-  useEffect(() => {
-    localStorage.setItem('scholario_audit', JSON.stringify(auditLogs));
-  }, [auditLogs]);
-
-
-  // Real 2-VPS Testbench State & Actions
-  const [realVpsConfig, setRealVpsConfig] = useState<RealVpsConfig | null>(null);
-  const [isRealVpsOnlyMode, setIsRealVpsOnlyMode] = useState<boolean>(false);
-  const [isRealVpsProbing, setIsRealVpsProbing] = useState<boolean>(false);
-
-  const refreshRealVpsConfig = useCallback(async () => {
+  /** Runs an API action and reports failures to the operator instead of swallowing them. */
+  const run = useCallback(async <T,>(action: () => Promise<T>, successMessage?: string): Promise<T | null> => {
     try {
-      const res = await RealVpsService.getConfig();
-      if (res?.data) {
-        setRealVpsConfig(res.data);
-        setIsRealVpsOnlyMode(Boolean(res.isRealVpsOnlyMode));
-        if (res.isRealVpsOnlyMode) {
-          const [apps, srvs, mons] = await Promise.all([
-            api.getApplications(),
-            api.getServers(),
-            api.getMonitors()
-          ]);
-          if (apps?.length) {
-            setApplications(apps);
-            localStorage.setItem('scholario_apps', JSON.stringify(apps));
-          }
-          if (srvs?.length) {
-            setServers(srvs);
-            localStorage.setItem('scholario_servers', JSON.stringify(srvs));
-          }
-          if (mons?.length) {
-            setMonitors(mons);
-            localStorage.setItem('scholario_monitors', JSON.stringify(mons));
-          }
-        }
-      }
-    } catch {}
-  }, []);
-
-  const updateRealVpsConfig = useCallback(async (payload: Partial<RealVpsConfig>) => {
-    try {
-      const res = await RealVpsService.updateConfig(payload);
-      if (res?.data) {
-        setRealVpsConfig(res.data);
-        setIsRealVpsOnlyMode(Boolean(res.isRealVpsOnlyMode));
-      }
-      const [apps, srvs, mons] = await Promise.all([
-        api.getApplications(),
-        api.getServers(),
-        api.getMonitors()
-      ]);
-      if (apps?.length) {
-        setApplications(apps);
-        localStorage.setItem('scholario_apps', JSON.stringify(apps));
-      }
-      if (srvs?.length) {
-        setServers(srvs);
-        localStorage.setItem('scholario_servers', JSON.stringify(srvs));
-      }
-      if (mons?.length) {
-        setMonitors(mons);
-        localStorage.setItem('scholario_monitors', JSON.stringify(mons));
-      }
+      const result = await action();
+      if (successMessage) notify('success', successMessage);
+      return result;
     } catch (err) {
-      console.error('Failed to update Real VPS config:', err);
-    }
-  }, []);
-
-  const probeRealVps = useCallback(async (targetVps: 'main' | 'dr', customUrl?: string) => {
-    setIsRealVpsProbing(true);
-    try {
-      const res = await RealVpsService.probe(targetVps, customUrl);
-      if (res?.data) {
-        setRealVpsConfig(res.data);
-      }
-      const [apps, srvs, mons] = await Promise.all([
-        api.getApplications(),
-        api.getServers(),
-        api.getMonitors()
-      ]);
-      if (apps?.length) setApplications(apps);
-      if (srvs?.length) setServers(srvs);
-      if (mons?.length) setMonitors(mons);
-      return res.probeResult;
-    } catch (err) {
-      console.error('Probe failed:', err);
+      notify('error', errMessage(err));
       return null;
+    }
+  }, [notify]);
+
+  // ── Loading ───────────────────────────────────────────────────────────────
+  const applyBootstrap = useCallback((d: BootstrapData) => {
+    setApplications(d.applications);
+    setServers(d.servers);
+    setMonitors(d.monitors);
+    setIncidents(d.incidents);
+    setCommunicationChannels(d.channels);
+    setEscalationPolicies(d.escalationPolicies);
+    setMaintenanceWindows(d.maintenanceWindows);
+    setRunbooks(d.runbooks);
+    setDeployments(d.deployments);
+    setBackups(d.backups);
+    setAuditLogs(d.auditLogs);
+    setCloudflareZones(d.cloudflareZones);
+    setDeadMan(d.deadMan);
+    setIntegrations(d.integrations);
+    lastEventAt.current = Date.now();
+  }, []);
+
+  const refreshAll = useCallback(async () => {
+    try {
+      applyBootstrap(await api.bootstrap());
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(errMessage(err));
     } finally {
-      setIsRealVpsProbing(false);
+      setIsLoading(false);
     }
+  }, [applyBootstrap]);
+
+  // Debounced per-collection refetch used by "x_changed" realtime events
+  const pending = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const refetch = useCallback((key: string, fn: () => Promise<void>) => {
+    clearTimeout(pending.current[key]);
+    pending.current[key] = setTimeout(() => { fn().catch(() => {}); }, 300);
   }, []);
 
-  const probeBothRealVps = useCallback(async () => {
-    setIsRealVpsProbing(true);
-    try {
-      const res = await RealVpsService.probeBoth();
-      if (res?.data) {
-        setRealVpsConfig(res.data);
-      }
-      const [apps, srvs, mons] = await Promise.all([
-        api.getApplications(),
-        api.getServers(),
-        api.getMonitors()
-      ]);
-      if (apps?.length) setApplications(apps);
-      if (srvs?.length) setServers(srvs);
-      if (mons?.length) setMonitors(mons);
-      return { mainResult: res.mainResult, drResult: res.drResult };
-    } catch (err) {
-      console.error('Probe both failed:', err);
-      return null;
-    } finally {
-      setIsRealVpsProbing(false);
-    }
-  }, []);
-
-  const failoverRealVps = useCallback(async (target?: 'MAIN' | 'DR', reason?: string) => {
-    try {
-      const res = await RealVpsService.failover(target, reason);
-      if (res?.data) {
-        setRealVpsConfig(res.data);
-      }
-      const [apps, srvs] = await Promise.all([
-        api.getApplications(),
-        api.getServers()
-      ]);
-      if (apps?.length) setApplications(apps);
-      if (srvs?.length) setServers(srvs);
-    } catch (err) {
-      console.error('Failover failed:', err);
-    }
-  }, []);
-
-  // purgeMockData and restoreMockData removed (production build — no mock data)
-
-
-  const tcpProbe = useCallback(async (payload: { targetVps?: 'main' | 'dr'; host?: string; port: number }) => {
-    try {
-      const res = await RealVpsService.tcpProbe(payload);
-      return res.result;
-    } catch (err) {
-      console.error('TCP probe error:', err);
-      return null;
-    }
-  }, []);
-
-  const testSynthetic = useCallback(async (payload: { url: string; method?: string; body?: string; expectedStatus?: number; matchText?: string }) => {
-    try {
-      const res = await RealVpsService.testSynthetic(payload);
-      return res.result;
-    } catch (err) {
-      console.error('Synthetic test error:', err);
-      return null;
-    }
-  }, []);
-
-  const simulateOutage = useCallback(async (targetVps: 'main' | 'dr', simulatedStatus: 'CRITICAL' | 'HEALTHY') => {
-    try {
-      const res = await RealVpsService.simulateOutage(targetVps, simulatedStatus);
-      if (res?.data) {
-        setRealVpsConfig(res.data);
-      }
-      const [apps, srvs, mons] = await Promise.all([
-        api.getApplications(),
-        api.getServers(),
-        api.getMonitors()
-      ]);
-      if (apps?.length) setApplications(apps);
-      if (srvs?.length) setServers(srvs);
-      if (mons?.length) setMonitors(mons);
-    } catch (err) {
-      console.error('Simulate outage error:', err);
-    }
-  }, []);
-
-  useEffect(() => {
-    refreshRealVpsConfig();
-  }, [refreshRealVpsConfig]);
-
-  // Audit logger
-  const addAuditEntry = useCallback((action: string, category: AuditLog['category'], targetId: string, details: string) => {
-    const newLog: AuditLog = {
-      id: `aud-${Date.now()}`,
-      timestamp: new Date().toISOString(),
-      operator: 'IT Operations (You)',
-      action,
-      category,
-      targetId,
-      details
-    };
-    setAuditLogs(prev => [newLog, ...prev.slice(0, 99)]);
-  }, []);
-
-  // Real-time /health check execution
   const triggerHealthCheck = useCallback(async () => {
-    if (simulatedOutage) {
-      setApiHealth(prev => ({
-        ...prev,
-        reachable: false,
-        status: 'UNREACHABLE',
-        lastChecked: new Date().toISOString(),
-        latencyMs: 3000
-      }));
-      return;
-    }
-    const start = Date.now();
+    const start = performance.now();
     try {
       const data = await api.checkHealth();
-      const latency = Math.max(6, Date.now() - start);
       setApiHealth({
         reachable: true,
         status: data.status === 'ok' ? 'HEALTHY' : 'DEGRADED',
         lastChecked: new Date().toISOString(),
-        latencyMs: latency,
-        endpoint: '/health',
-        details: data
+        latencyMs: Math.round(performance.now() - start),
+        endpoint: '/api/health',
+        details: data,
       });
     } catch {
-      setApiHealth(prev => ({
-        ...prev,
-        reachable: false,
-        status: 'UNREACHABLE',
-        lastChecked: new Date().toISOString(),
-        latencyMs: 3500
-      }));
+      setApiHealth(prev => ({ ...prev, reachable: false, status: 'UNREACHABLE', lastChecked: new Date().toISOString(), latencyMs: Math.round(performance.now() - start) }));
     }
-  }, [simulatedOutage]);
-
-  const simulateApiOutage = useCallback((unreachable: boolean) => {
-    setSimulatedOutage(unreachable);
-    if (unreachable) {
-      setApiHealth(prev => ({
-        ...prev,
-        reachable: false,
-        status: 'UNREACHABLE',
-        lastChecked: new Date().toISOString(),
-        latencyMs: 3000
-      }));
-      addAuditEntry('API_HEALTH_CHECK_FAILED', 'INCIDENT', 'API_SERVICE', 'CRITICAL: Scholario Ops API /health endpoint became UNREACHABLE. Automated alert triggered.');
-    } else {
-      triggerHealthCheck();
-      addAuditEntry('API_HEALTH_CHECK_RESTORED', 'INCIDENT', 'API_SERVICE', 'RECOVERY: Scholario Ops API /health endpoint nominal. Service restored.');
-    }
-  }, [addAuditEntry, triggerHealthCheck]);
-
-  // Real-time Health Check interval & initial hydration from API
-  useEffect(() => {
-    triggerHealthCheck();
-    const interval = setInterval(triggerHealthCheck, 4000);
-
-    // Initial fetch from real API if available
-    api.getApplications().then(apps => { if (apps?.length) setApplications(apps); }).catch(() => {});
-    api.getServers().then(srvs => { if (srvs?.length) setServers(srvs); }).catch(() => {});
-    api.getMonitors().then(mons => { if (mons?.length) setMonitors(mons); }).catch(() => {});
-    api.getIncidents().then(incs => { if (incs?.length) setIncidents(incs); }).catch(() => {});
-
-    // Realtime SSE stream
-    const unsubscribe = api.connectRealtimeStream((event, data) => {
-      if (event === 'telemetry_tick' && data?.servers) {
-        setServers(prev => prev.map(s => {
-          const update = data.servers.find((u: any) => u.id === s.id);
-          if (update) {
-            return {
-              ...s,
-              status: update.status,
-              lastSeen: update.lastSeen,
-              telemetry: {
-                ...s.telemetry,
-                cpuPercent: update.cpuPercent,
-                ramPercent: update.ramPercent,
-                observedAt: new Date().toISOString()
-              }
-            };
-          }
-          return s;
-        }));
-      } else if (event === 'monitor_created' && data?.id) {
-        setMonitors(prev => prev.some(m => m.id === data.id) ? prev : [data, ...prev]);
-      } else if (event === 'monitor_probed' && data?.id) {
-        setMonitors(prev => prev.map(m => m.id === data.id ? data : m));
-      } else if (event === 'monitor_deleted' && data?.id) {
-        setMonitors(prev => prev.filter(m => m.id !== data.id));
-      } else if (event === 'incident_update' && data?.id) {
-        setIncidents(prev => prev.map(i => i.id === data.id ? data : i));
-      } else if (event === 'application_update' && data?.id) {
-        setApplications(prev => prev.map(a => a.id === data.id ? data : a));
-      } else if (event === 'real_vps_update' && data) {
-        setRealVpsConfig(data);
-      } else if (event === 'real_vps_probed' && data?.config) {
-        setRealVpsConfig(data.config);
-      } else if (event === 'real_vps_failover' && data?.config) {
-        setRealVpsConfig(data.config);
-      } else if (event === 'mock_data_purged') {
-        setIsRealVpsOnlyMode(true);
-        api.getApplications().then(apps => { if (apps?.length) setApplications(apps); });
-        api.getServers().then(srvs => { if (srvs?.length) setServers(srvs); });
-        api.getMonitors().then(mons => { if (mons?.length) setMonitors(mons); });
-      } else if (event === 'mock_data_restored') {
-        setIsRealVpsOnlyMode(false);
-        api.getApplications().then(apps => { if (apps?.length) setApplications(apps); });
-        api.getServers().then(srvs => { if (srvs?.length) setServers(srvs); });
-        api.getMonitors().then(mons => { if (mons?.length) setMonitors(mons); });
-      }
-    });
-
-    return () => {
-      clearInterval(interval);
-      unsubscribe();
-    };
-  }, [triggerHealthCheck]);
-
-  // Periodic dead-man heartbeat update
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setLastUpdatedSecondsAgo(0);
-
-      // Update dead-man heartbeat if healthy
-      setDeadMan(prev => {
-        if (prev.status === 'HEALTHY') {
-          return {
-            ...prev,
-            lastHeartbeatReceivedAt: new Date().toISOString(),
-            consecutiveMisses: 0
-          };
-        }
-        return prev;
-      });
-    }, 5000);
-
-    return () => clearInterval(interval);
   }, []);
 
-  // Counter ticker
   useEffect(() => {
-    const timer = setInterval(() => {
-      setLastUpdatedSecondsAgo(prev => prev + 1);
-    }, 1000);
+    void refreshAll();
+    void triggerHealthCheck();
+    const healthTimer = setInterval(triggerHealthCheck, 15_000);
+    let firstConnect = true;
+
+    const unsubscribe = api.connectRealtimeStream((event, raw) => {
+      lastEventAt.current = Date.now();
+      const data = raw as never;
+      switch (event) {
+        case 'connected':
+          // Resync after a reconnect so nothing missed while offline is lost
+          if (!firstConnect) void refreshAll();
+          firstConnect = false;
+          break;
+        case 'telemetry_tick': {
+          const tick = raw as { deadManStatus: DeadManControlPlane['status']; servers: Array<Pick<VpsServer, 'id' | 'status' | 'agentStatus' | 'lastSeen' | 'telemetry'>> };
+          setServers(prev => prev.map(s => {
+            const u = tick.servers.find(x => x.id === s.id);
+            return u ? { ...s, status: u.status, agentStatus: u.agentStatus, lastSeen: u.lastSeen, telemetry: u.telemetry } : s;
+          }));
+          break;
+        }
+        case 'server_update': setServers(prev => upsert(prev, data, false)); break;
+        case 'servers_changed': refetch('servers', async () => setServers(await api.getServers())); break;
+        case 'application_update': setApplications(prev => upsert(prev, data, false)); break;
+        case 'applications_changed': refetch('apps', async () => setApplications(await api.getApplications())); break;
+        case 'monitor_update': setMonitors(prev => upsert(prev, data)); break;
+        case 'monitor_deleted': setMonitors(prev => prev.filter(m => m.id !== (raw as { id: string }).id)); break;
+        case 'monitors_changed': refetch('monitors', async () => setMonitors(await api.getMonitors())); break;
+        case 'incident_created':
+        case 'incident_update': setIncidents(prev => upsert(prev, data)); break;
+        case 'audit': setAuditLogs(prev => [raw as AuditLog, ...prev.filter(a => a.id !== (raw as AuditLog).id)].slice(0, 500)); break;
+        case 'channel_update': setCommunicationChannels(prev => upsert(prev, data, false)); break;
+        case 'channels_changed': refetch('channels', async () => {
+          const [c, p] = await Promise.all([api.getChannels(), api.getEscalationPolicies()]);
+          setCommunicationChannels(c); setEscalationPolicies(p);
+        }); break;
+        case 'maintenance_update': setMaintenanceWindows(prev => upsert(prev, data)); break;
+        case 'maintenance_deleted': setMaintenanceWindows(prev => prev.filter(w => w.id !== (raw as { id: string }).id)); break;
+        case 'runbooks_changed': refetch('runbooks', async () => setRunbooks(await api.getRunbooks())); break;
+        case 'deployments_changed': refetch('deployments', async () => setDeployments(await api.getDeployments())); break;
+        case 'backups_changed': refetch('backups', async () => setBackups(await api.getBackups())); break;
+        case 'cloudflare_update': setCloudflareZones(raw as CloudflareZone[]); refetch('integrations', async () => setIntegrations(await api.integrations())); break;
+        case 'deadman_update': setDeadMan(raw as DeadManControlPlane); break;
+        default: break;
+      }
+    }, connected => setRealtimeStatus(connected ? 'LIVE' : 'RECONNECTING'));
+
+    return () => {
+      clearInterval(healthTimer);
+      unsubscribe();
+      Object.values(pending.current).forEach(clearTimeout);
+    };
+  }, [refreshAll, triggerHealthCheck, refetch]);
+
+  // Mark realtime OFFLINE when the API itself is unreachable
+  useEffect(() => {
+    if (!apiHealth.reachable) setRealtimeStatus('OFFLINE');
+  }, [apiHealth.reachable]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setLastUpdatedSecondsAgo(Math.floor((Date.now() - lastEventAt.current) / 1000)), 1000);
     return () => clearInterval(timer);
   }, []);
 
-  // Keyboard shortcut Ctrl+K
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
@@ -558,482 +371,246 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Failover Trigger action
-  const triggerFailover = useCallback((appId: string, targetOrigin: 'DR' | 'PRIMARY') => {
-    const app = applications.find(a => a.id === appId);
-    if (!app) return;
+  // ── Incident actions ──────────────────────────────────────────────────────
+  const incidentAction = useCallback(async (fn: () => Promise<Incident>, msg?: string) => {
+    const inc = await run(fn, msg);
+    if (inc) setIncidents(prev => upsert(prev, inc));
+    return Boolean(inc);
+  }, [run]);
 
-    const targetServerId = targetOrigin === 'DR' ? app.drServerId : app.prdServerId;
-    const targetServer = servers.find(s => s.id === targetServerId);
+  const acknowledgeIncident = useCallback((id: string) => incidentAction(() => api.acknowledgeIncident(id), `${id} acknowledged`), [incidentAction]);
+  const changeIncidentStatus = useCallback((id: string, status: IncidentStatus) => incidentAction(() => api.updateIncidentStatus(id, status), `${id} → ${status}`), [incidentAction]);
+  const changeIncidentSeverity = useCallback((id: string, severity: IncidentSeverity) => incidentAction(() => api.updateIncidentSeverity(id, severity), `${id} severity → ${severity}`), [incidentAction]);
+  const assignIncidentOwner = useCallback((id: string, owner: string) => incidentAction(() => api.assignIncident(id, owner), `${id} assigned to ${owner}`), [incidentAction]);
+  const addIncidentNote = useCallback((id: string, note: string) => {
+    if (!note.trim()) return Promise.resolve(false);
+    return incidentAction(() => api.addIncidentNote(id, note.trim()));
+  }, [incidentAction]);
+  const resolveIncident = useCallback((id: string, summary?: string) => incidentAction(() => api.resolveIncident(id, summary), `${id} resolved`), [incidentAction]);
+  const createIncident = useCallback(async (data: Parameters<OpsContextType['createIncident']>[0]) => {
+    const inc = await run(() => api.createIncident(data), 'Incident declared');
+    if (inc) setIncidents(prev => upsert(prev, inc));
+    return inc;
+  }, [run]);
 
-    // Update Application state
-    setApplications(prev => prev.map(a => {
-      if (a.id === appId) {
-        return {
-          ...a,
-          failoverState: targetOrigin === 'DR' ? 'DR_ACTIVE' : 'PRIMARY_ACTIVE',
-          lastChecked: new Date().toISOString()
-        };
-      }
-      return a;
-    }));
+  // ── Failover ──────────────────────────────────────────────────────────────
+  const triggerFailover = useCallback(async (appId: string, target: 'DR' | 'PRIMARY', reason?: string) => {
+    const res = await run(() => api.triggerFailover(appId, target, reason));
+    if (!res) return false;
+    setApplications(prev => upsert(prev, res.app, false));
+    notify('success', res.changed.length
+      ? `${res.app.name}: DNS switched ${res.changed.map(c => `${c.from} → ${c.to}`).join(', ')}`
+      : `${res.app.name}: DNS already pointed at the ${target === 'DR' ? 'DR' : 'PRD'} server`);
+    return true;
+  }, [run, notify]);
 
-    // Update Cloudflare Zone
-    setCloudflareZones(prev => prev.map(zone => {
-      if (zone.domain === app.cloudflareZone) {
-        return {
-          ...zone,
-          loadBalancer: {
-            ...zone.loadBalancer,
-            activeOrigin: `${targetServer?.ip || 'Target'} (${targetOrigin} Active)`,
-            lastReroutedAt: new Date().toISOString()
-          },
-          dnsRecords: zone.dnsRecords.map(rec => {
-            if (rec.name === zone.domain) {
-              return {
-                ...rec,
-                target: targetServer?.ip || rec.target,
-                lastModified: 'Just now'
-              };
-            }
-            return rec;
-          })
-        };
-      }
-      return zone;
-    }));
-
-    addAuditEntry(
-      `CLOUDFLARE_FAILOVER_${targetOrigin}`,
-      'FAILOVER',
-      appId,
-      `Operator diverted ${app.name} traffic to ${targetOrigin} node (${targetServer?.hostname || targetServerId}).`
-    );
-  }, [applications, servers, addAuditEntry]);
-
-  // Incident Actions
-  const acknowledgeIncident = useCallback((incidentId: string, operatorName = 'Arjun Mehta (Lead On-Call)') => {
-    setIncidents(prev => prev.map(inc => {
-      if (inc.id === incidentId) {
-        return {
-          ...inc,
-          acknowledged: true,
-          acknowledgedAt: new Date().toISOString(),
-          acknowledgedBy: operatorName,
-          status: inc.status === 'OPEN' ? 'ACKNOWLEDGED' : inc.status,
-          timeline: [
-            ...inc.timeline,
-            {
-              id: `ev-${Date.now()}`,
-              timestamp: new Date().toISOString(),
-              source: operatorName,
-              level: 'INFO',
-              message: `Incident acknowledged by ${operatorName}.`
-            }
-          ]
-        };
-      }
-      return inc;
-    }));
-
-    addAuditEntry('INCIDENT_ACKNOWLEDGED', 'INCIDENT', incidentId, `Acknowledged by ${operatorName}`);
-  }, [addAuditEntry]);
-
-  const changeIncidentStatus = useCallback((incidentId: string, status: IncidentStatus) => {
-    setIncidents(prev => prev.map(inc => {
-      if (inc.id === incidentId) {
-        return {
-          ...inc,
-          status,
-          timeline: [
-            ...inc.timeline,
-            {
-              id: `ev-${Date.now()}`,
-              timestamp: new Date().toISOString(),
-              source: 'IT Operations',
-              level: 'INFO',
-              message: `Status updated to ${status}.`
-            }
-          ]
-        };
-      }
-      return inc;
-    }));
-
-    addAuditEntry('INCIDENT_STATUS_CHANGE', 'INCIDENT', incidentId, `Status transitioned to ${status}`);
-  }, [addAuditEntry]);
-
-  const changeIncidentSeverity = useCallback((incidentId: string, severity: IncidentSeverity) => {
-    setIncidents(prev => prev.map(inc => {
-      if (inc.id === incidentId) {
-        return {
-          ...inc,
-          severity,
-          timeline: [
-            ...inc.timeline,
-            {
-              id: `ev-${Date.now()}`,
-              timestamp: new Date().toISOString(),
-              source: 'IT Operations',
-              level: 'WARN',
-              message: `Severity modified to ${severity}.`
-            }
-          ]
-        };
-      }
-      return inc;
-    }));
-
-    addAuditEntry('INCIDENT_SEVERITY_CHANGE', 'INCIDENT', incidentId, `Severity changed to ${severity}`);
-  }, [addAuditEntry]);
-
-  const assignIncidentOwner = useCallback((incidentId: string, owner: string) => {
-    setIncidents(prev => prev.map(inc => {
-      if (inc.id === incidentId) {
-        return {
-          ...inc,
-          owner,
-          timeline: [
-            ...inc.timeline,
-            {
-              id: `ev-${Date.now()}`,
-              timestamp: new Date().toISOString(),
-              source: 'IT Operations',
-              level: 'INFO',
-              message: `Assigned incident ownership to ${owner}.`
-            }
-          ]
-        };
-      }
-      return inc;
-    }));
-
-    addAuditEntry('INCIDENT_REASSIGNED', 'INCIDENT', incidentId, `Owner assigned to ${owner}`);
-  }, [addAuditEntry]);
-
-  const addIncidentNote = useCallback((incidentId: string, noteText: string) => {
-    if (!noteText.trim()) return;
-    const newNote = {
-      id: `note-${Date.now()}`,
-      author: 'IT Operations (You)',
-      role: 'Operations Engineer',
-      timestamp: new Date().toISOString(),
-      content: noteText.trim()
-    };
-    setIncidents(prev => prev.map(inc => {
-      if (inc.id === incidentId) {
-        return {
-          ...inc,
-          notes: [...inc.notes, newNote],
-          timeline: [
-            ...inc.timeline,
-            {
-              id: `ev-${Date.now()}`,
-              timestamp: new Date().toISOString(),
-              source: 'IT Operations',
-              level: 'INFO',
-              message: `Added investigation note: "${noteText.slice(0, 45)}..."`
-            }
-          ]
-        };
-      }
-      return inc;
-    }));
-  }, []);
-
-  const resolveIncident = useCallback((incidentId: string, resolutionSummary?: string) => {
-    setIncidents(prev => prev.map(inc => {
-      if (inc.id === incidentId) {
-        return {
-          ...inc,
-          status: 'RESOLVED',
-          resolvedAt: new Date().toISOString(),
-          recoveryStatus: resolutionSummary || 'All systems recovered. 3 consecutive health checks passed.',
-          timeline: [
-            ...inc.timeline,
-            {
-              id: `ev-${Date.now()}`,
-              timestamp: new Date().toISOString(),
-              source: 'IT Operations',
-              level: 'SUCCESS',
-              message: `Incident resolved: ${resolutionSummary || 'Consecutive recovery confirmation completed.'}`
-            }
-          ]
-        };
-      }
-      return inc;
-    }));
-
-    addAuditEntry('INCIDENT_RESOLVED', 'INCIDENT', incidentId, `Incident resolved by operator.`);
-  }, [addAuditEntry]);
-
-  const toggleRunbookStep = useCallback((runbookId: string, stepId: number) => {
-    setRunbooks(prev => prev.map(rb => {
-      if (rb.id === runbookId) {
-        return {
-          ...rb,
-          steps: rb.steps.map(step => {
-            if (step.id === stepId) {
-              const nextState = !step.completed;
-              return {
-                ...step,
-                completed: nextState,
-                completedAt: nextState ? 'Just now' : undefined,
-                completedBy: nextState ? 'IT Operations (You)' : undefined
-              };
-            }
-            return step;
-          })
-        };
-      }
-      return rb;
-    }));
-
-    addAuditEntry('RUNBOOK_STEP_UPDATE', 'RUNBOOK', runbookId, `Step #${stepId} updated.`);
-  }, [addAuditEntry]);
-
-  // Run Probe Check on a Monitor
-  const runProbeCheck = useCallback((monitorId: string) => {
-    setMonitors(prev => prev.map(mon => {
-      if (mon.id === monitorId) {
-        // If it's the failing mosaic monitor and still in failure state
-        const isFailing = mon.status === 'CRITICAL';
-        const simulatedMs = isFailing ? Math.floor(4000 + Math.random() * 1200) : Math.floor(60 + Math.random() * 120);
-        const newHistory = [
-          {
-            timestamp: new Date().toISOString(),
-            status: mon.status,
-            responseTimeMs: simulatedMs,
-            statusCode: isFailing ? 504 : 200,
-            detail: isFailing ? 'Simulated probe check: Upstream timeout' : 'OK'
-          },
-          ...mon.history.slice(0, 19)
-        ];
-
-        return {
-          ...mon,
-          lastCheck: new Date().toISOString(),
-          lastSuccess: isFailing ? mon.lastSuccess : new Date().toISOString(),
-          lastFailure: isFailing ? new Date().toISOString() : mon.lastFailure,
-          responseTimeMs: simulatedMs,
-          history: newHistory
-        };
-      }
-      return mon;
-    }));
-  }, []);
-
-  const runAllProbes = useCallback(() => {
-    monitors.forEach(m => runProbeCheck(m.id));
-  }, [monitors, runProbeCheck]);
-
+  // ── Monitors ──────────────────────────────────────────────────────────────
+  const runProbeCheck = useCallback(async (id: string) => {
+    const m = await run(() => api.probeMonitor(id));
+    if (m) setMonitors(prev => upsert(prev, m));
+  }, [run]);
+  const runAllProbes = useCallback(async () => {
+    const list = await run(() => api.probeAllMonitors());
+    if (list) {
+      setMonitors(list);
+      notify('info', `Ran ${list.filter(m => m.enabled).length} monitor check(s)`);
+    }
+  }, [run, notify]);
+  const addMonitor = useCallback(async (input: Partial<Monitor>) => {
+    const m = await run(() => api.createMonitor(input), `Monitor "${input.name}" created`);
+    if (m) setMonitors(prev => upsert(prev, m));
+    return m;
+  }, [run]);
+  const updateMonitor = useCallback(async (id: string, input: Partial<Monitor>) => {
+    const m = await run(() => api.updateMonitor(id, input), 'Monitor updated');
+    if (m) setMonitors(prev => upsert(prev, m));
+    return m;
+  }, [run]);
+  const deleteMonitor = useCallback(async (id: string) => {
+    const r = await run(() => api.deleteMonitor(id), 'Monitor deleted');
+    if (r) setMonitors(prev => prev.filter(m => m.id !== id));
+    return Boolean(r);
+  }, [run]);
+  const toggleMonitorStatus = useCallback(async (id: string) => {
+    const m = await run(() => api.toggleMonitor(id));
+    if (m) setMonitors(prev => upsert(prev, m));
+    return Boolean(m);
+  }, [run]);
   const openAddMonitorWithContext = useCallback((context?: { applicationId?: string; serverId?: string; defaultType?: MonitorType }) => {
     setAddMonitorInitialContext(context || null);
     setIsAddMonitorModalOpen(true);
   }, []);
 
-  const addMonitor = useCallback((input: Omit<Monitor, 'id' | 'consecutiveFailures' | 'consecutiveRecoveries' | 'lastCheck' | 'lastSuccess' | 'responseTimeMs' | 'uptimePercent' | 'history' | 'status' | 'activeMaintenance'> & Partial<Monitor>): Monitor => {
-    const id = input.id || `mon-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-    const now = new Date().toISOString();
-    const initialLatency = Math.floor(35 + Math.random() * 55);
+  // ── Servers & applications ────────────────────────────────────────────────
+  const createServer = useCallback(async (data: Partial<VpsServer>) => {
+    const s = await run(() => api.createServer(data), `Server ${data.hostname} registered`);
+    if (s) setServers(prev => upsert(prev, s, false));
+    return s;
+  }, [run]);
+  const updateServer = useCallback(async (id: string, data: Partial<VpsServer>) => {
+    const s = await run(() => api.updateServer(id, data), 'Server updated');
+    if (s) setServers(prev => upsert(prev, s, false));
+    return s;
+  }, [run]);
+  const deleteServer = useCallback(async (id: string) => {
+    const r = await run(() => api.deleteServer(id), 'Server removed');
+    if (r) {
+      setServers(prev => prev.filter(s => s.id !== id));
+      setMonitors(prev => prev.filter(m => m.serverId !== id));
+    }
+    return Boolean(r);
+  }, [run]);
+  const createApplication = useCallback(async (data: Partial<Application>) => {
+    const a = await run(() => api.createApplication(data), `Application ${data.name} created`);
+    if (a) setApplications(prev => upsert(prev, a, false));
+    return a;
+  }, [run]);
+  const updateApplication = useCallback(async (id: string, data: Partial<Application>) => {
+    const a = await run(() => api.updateApplication(id, data), 'Application updated');
+    if (a) setApplications(prev => upsert(prev, a, false));
+    return a;
+  }, [run]);
+  const deleteApplication = useCallback(async (id: string) => {
+    const r = await run(() => api.deleteApplication(id), 'Application deleted');
+    if (r) {
+      setApplications(prev => prev.filter(a => a.id !== id));
+      setMonitors(prev => prev.filter(m => m.applicationId !== id));
+    }
+    return Boolean(r);
+  }, [run]);
 
-    const newMonitor: Monitor = {
-      id,
-      name: input.name,
-      type: input.type,
-      target: input.target,
-      applicationId: input.applicationId,
-      environment: input.environment,
-      intervalSec: input.intervalSec || 30,
-      timeoutSec: input.timeoutSec || 5,
-      retries: input.retries || 3,
-      warningThresholdMs: input.warningThresholdMs || 300,
-      criticalThresholdMs: input.criticalThresholdMs || 1000,
-      failureConfirmationThreshold: input.failureConfirmationThreshold || 3,
-      recoveryConfirmationThreshold: input.recoveryConfirmationThreshold || 3,
-      consecutiveFailures: 0,
-      consecutiveRecoveries: 1,
-      status: 'HEALTHY',
-      lastCheck: now,
-      lastSuccess: now,
-      responseTimeMs: initialLatency,
-      uptimePercent: 100.0,
-      enabled: input.enabled !== undefined ? input.enabled : true,
-      activeMaintenance: false,
-      runbookId: input.runbookId,
-      history: [
-        {
-          timestamp: now,
-          status: 'HEALTHY',
-          responseTimeMs: initialLatency,
-          statusCode: 200,
-          detail: 'Initial synthetic check verified nominal'
-        }
-      ]
-    };
+  // ── Notifications ─────────────────────────────────────────────────────────
+  const sendTestNotification = useCallback(async (channelId: string) => {
+    const ch = await run(() => api.testChannel(channelId), 'Test notification delivered');
+    if (ch) setCommunicationChannels(prev => upsert(prev, ch, false));
+    return Boolean(ch);
+  }, [run]);
+  const createChannel = useCallback(async (data: Partial<CommunicationChannel>) => {
+    const ch = await run(() => api.createChannel(data), `Channel ${data.name} added`);
+    if (ch) setCommunicationChannels(prev => upsert(prev, ch, false));
+    return ch;
+  }, [run]);
+  const updateChannel = useCallback(async (id: string, data: Partial<CommunicationChannel>) => {
+    const ch = await run(() => api.updateChannel(id, data), 'Channel updated');
+    if (ch) setCommunicationChannels(prev => upsert(prev, ch, false));
+    return ch;
+  }, [run]);
+  const deleteChannel = useCallback(async (id: string) => {
+    const r = await run(() => api.deleteChannel(id), 'Channel deleted');
+    if (r) setCommunicationChannels(prev => prev.filter(c => c.id !== id));
+    return Boolean(r);
+  }, [run]);
+  const saveEscalationPolicies = useCallback(async (policies: Partial<EscalationPolicy>[]) => {
+    const p = await run(() => api.saveEscalationPolicies(policies), 'Escalation policies saved');
+    if (p) setEscalationPolicies(p);
+    return Boolean(p);
+  }, [run]);
 
-    setMonitors(prev => [newMonitor, ...prev]);
+  // ── Maintenance & runbooks ────────────────────────────────────────────────
+  const createMaintenance = useCallback(async (data: Partial<MaintenanceWindow>) => {
+    const w = await run(() => api.createMaintenance(data), 'Maintenance window scheduled');
+    if (w) setMaintenanceWindows(prev => upsert(prev, w));
+    return w;
+  }, [run]);
+  const completeMaintenance = useCallback(async (id: string) => {
+    const w = await run(() => api.completeMaintenance(id), 'Maintenance completed');
+    if (w) setMaintenanceWindows(prev => upsert(prev, w));
+    return Boolean(w);
+  }, [run]);
+  const deleteMaintenance = useCallback(async (id: string) => {
+    const r = await run(() => api.deleteMaintenance(id), 'Maintenance window deleted');
+    if (r) setMaintenanceWindows(prev => prev.filter(w => w.id !== id));
+    return Boolean(r);
+  }, [run]);
+  const toggleRunbookStep = useCallback(async (runbookId: string, stepId: number) => {
+    const rb = await run(() => api.toggleRunbookStep(runbookId, stepId));
+    if (rb) setRunbooks(prev => upsert(prev, rb, false));
+  }, [run]);
+  const resetRunbook = useCallback(async (runbookId: string) => {
+    const rb = await run(() => api.resetRunbook(runbookId), 'Runbook progress reset');
+    if (rb) setRunbooks(prev => upsert(prev, rb, false));
+  }, [run]);
+  const createRunbook = useCallback(async (data: Partial<Runbook>) => {
+    const rb = await run(() => api.createRunbook(data), 'Runbook created');
+    if (rb) setRunbooks(prev => upsert(prev, rb, false));
+    return rb;
+  }, [run]);
+  const updateRunbook = useCallback(async (id: string, data: Partial<Runbook>) => {
+    const rb = await run(() => api.updateRunbook(id, data), 'Runbook updated');
+    if (rb) setRunbooks(prev => upsert(prev, rb, false));
+    return rb;
+  }, [run]);
+  const deleteRunbook = useCallback(async (id: string) => {
+    const r = await run(() => api.deleteRunbook(id), 'Runbook deleted');
+    if (r) setRunbooks(prev => prev.filter(x => x.id !== id));
+    return Boolean(r);
+  }, [run]);
 
-    addAuditEntry(
-      'MONITOR_CREATED',
-      'MONITOR',
-      id,
-      `Operator created continuous probe ${newMonitor.name} (${newMonitor.type}) targeting ${newMonitor.target} on ${newMonitor.applicationId} [${newMonitor.environment}]`
-    );
+  // ── Providers ─────────────────────────────────────────────────────────────
+  const syncCloudflare = useCallback(async () => {
+    const zones = await run(() => api.syncCloudflare(), 'Cloudflare synced');
+    if (zones) setCloudflareZones(zones);
+    setIntegrations(await api.integrations().catch(() => null));
+    return Boolean(zones);
+  }, [run]);
+  const syncHostinger = useCallback(async () => {
+    const vms = await run(() => api.syncHostinger(), 'Hostinger synced');
+    setIntegrations(await api.integrations().catch(() => null));
+    if (vms) setServers(await api.getServers());
+    return Boolean(vms);
+  }, [run]);
 
-    return newMonitor;
-  }, [addAuditEntry]);
-
-  const deleteMonitor = useCallback((monitorId: string) => {
-    setMonitors(prev => {
-      const mon = prev.find(m => m.id === monitorId);
-      if (mon) {
-        addAuditEntry('MONITOR_DELETED', 'MONITOR', monitorId, `Deleted monitor: ${mon.name} (${mon.target})`);
-      }
-      return prev.filter(m => m.id !== monitorId);
-    });
-  }, [addAuditEntry]);
-
-  const toggleMonitorStatus = useCallback((monitorId: string) => {
-    setMonitors(prev => prev.map(m => {
-      if (m.id === monitorId) {
-        const nextState = !m.enabled;
-        addAuditEntry('MONITOR_STATUS_TOGGLE', 'MONITOR', monitorId, `Monitor ${m.name} is now ${nextState ? 'ENABLED' : 'PAUSED'}`);
-        return { ...m, enabled: nextState };
-      }
-      return m;
-    }));
-  }, [addAuditEntry]);
-
-  const sendTestNotification = useCallback(async (channelId: string): Promise<boolean> => {
-    await new Promise(r => setTimeout(r, 600));
-    setCommunicationChannels(prev => prev.map(ch => {
-      if (ch.id === channelId) {
-        return {
-          ...ch,
-          lastDeliveryAt: new Date().toISOString(),
-          lastDeliveryStatus: 'DELIVERED',
-          failureCount: 0
-        };
-      }
-      return ch;
-    }));
-    addAuditEntry('TEST_NOTIFICATION_SENT', 'INCIDENT', channelId, `Dispatched manual test payload to channel`);
-    return true;
-  }, [addAuditEntry]);
-
-  // triggerSimulatedScenario removed — production build, no mock scenarios
-
-
-  // System Summaries
-  const totalApps = applications.length;
+  // ── Summary ───────────────────────────────────────────────────────────────
+  const openIncidentList = incidents.filter(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED');
+  const criticalIncidents = openIncidentList.filter(i => i.severity === 'CRITICAL' || i.severity === 'EMERGENCY').length;
   const healthyApps = applications.filter(a => a.status === 'HEALTHY').length;
-  const totalServers = servers.length;
-  const healthyServers = servers.filter(s => s.status === 'HEALTHY').length;
-  const totalMonitors = monitors.length;
-  const healthyMonitors = monitors.filter(m => m.status === 'HEALTHY').length;
-  const openIncidents = incidents.filter(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED').length;
-  const criticalIncidents = incidents.filter(i => i.severity === 'CRITICAL' && i.status !== 'RESOLVED' && i.status !== 'CLOSED').length;
-  const backupsCurrentCount = backups.filter(b => b.status === 'SUCCESS').length;
-  
-  // DR readiness count: apps where replication lag is <= target and DR server is HEALTHY
+  const dayAgo = Date.now() - 26 * 3600 * 1000;
   const drReadinessCount = applications.filter(a => {
-    const drServer = servers.find(s => s.id === a.drServerId);
-    return (drServer?.status === 'HEALTHY') && (a.currentReplicationLagSec <= a.rpoTargetMin * 60);
+    const dr = servers.find(s => s.id === a.drServerId);
+    const drMonitors = monitors.filter(m => m.applicationId === a.id && m.environment === 'DR' && m.enabled);
+    return Boolean(dr && dr.status !== 'CRITICAL' && a.dnsRecordName && drMonitors.length > 0 && drMonitors.every(m => m.status === 'HEALTHY'));
   }).length;
-
-  const cloudflareDegraded = cloudflareZones.some(z => z.status === 'DEGRADED');
-  const cloudflareStatus: 'HEALTHY' | 'DEGRADED' = cloudflareDegraded ? 'DEGRADED' : 'HEALTHY';
-
-  const overallHealth: 'OPERATIONAL' | 'CRITICAL' | 'WARNING' = 
-    criticalIncidents > 0 || deadMan.status === 'CRITICAL_SILENCE' 
-      ? 'CRITICAL' 
-      : openIncidents > 0 || healthyApps < totalApps 
-        ? 'WARNING' 
+  const cloudflareStatus: 'HEALTHY' | 'DEGRADED' = cloudflareZones.some(z => z.status !== 'ACTIVE') || Boolean(integrations?.cloudflare.lastError) ? 'DEGRADED' : 'HEALTHY';
+  const overallHealth: 'OPERATIONAL' | 'CRITICAL' | 'WARNING' =
+    criticalIncidents > 0 || deadMan.status === 'CRITICAL_SILENCE' ? 'CRITICAL'
+      : openIncidentList.length > 0 || applications.some(a => a.status === 'CRITICAL' || a.status === 'WARNING') ? 'WARNING'
         : 'OPERATIONAL';
 
   return (
     <OpsContext.Provider
       value={{
-        applications,
-        servers,
-        monitors,
-        incidents,
-        cloudflareZones,
-        backups,
-        runbooks,
-        deployments,
-        maintenanceWindows,
-        communicationChannels,
-        escalationPolicies,
-        auditLogs,
-        deadMan,
-        activeTab,
-        setActiveTab,
-        selectedAppId,
-        setSelectedAppId,
-        selectedServerId,
-        setSelectedServerId,
-        selectedIncidentId,
-        setSelectedIncidentId,
-        selectedRunbookId,
-        setSelectedRunbookId,
-        isCommandPaletteOpen,
-        setIsCommandPaletteOpen,
-        lastUpdatedSecondsAgo,
+        applications, servers, monitors, incidents, cloudflareZones, backups, runbooks, deployments,
+        maintenanceWindows, communicationChannels, escalationPolicies, auditLogs, deadMan, integrations,
+        isLoading, loadError, realtimeStatus, refreshAll,
+        activeTab, setActiveTab, selectedAppId, setSelectedAppId, selectedServerId, setSelectedServerId,
+        selectedIncidentId, setSelectedIncidentId, selectedRunbookId, setSelectedRunbookId,
+        isCommandPaletteOpen, setIsCommandPaletteOpen, lastUpdatedSecondsAgo,
+        acknowledgeIncident, changeIncidentStatus, changeIncidentSeverity, assignIncidentOwner, addIncidentNote, resolveIncident, createIncident,
         triggerFailover,
-        acknowledgeIncident,
-        changeIncidentStatus,
-        changeIncidentSeverity,
-        assignIncidentOwner,
-        addIncidentNote,
-        resolveIncident,
-        toggleRunbookStep,
-        runProbeCheck,
-        runAllProbes,
-        addMonitor,
-        deleteMonitor,
-        toggleMonitorStatus,
-        isAddMonitorModalOpen,
-        setIsAddMonitorModalOpen,
-        addMonitorInitialContext,
-        openAddMonitorWithContext,
-        sendTestNotification,
-        triggerSimulatedScenario: undefined,
-        addAuditEntry,
-        apiHealth,
-        triggerHealthCheck,
-        simulateApiOutage,
-        theme,
-        setTheme,
-        toggleTheme,
-        realVpsConfig,
-        isRealVpsOnlyMode,
-        isRealVpsProbing,
-        refreshRealVpsConfig,
-        updateRealVpsConfig,
-        probeRealVps,
-        probeBothRealVps,
-        failoverRealVps,
-        purgeMockData: undefined,
-        restoreMockData: undefined,
-        tcpProbe,
-        testSynthetic,
-        simulateOutage,
+        runProbeCheck, runAllProbes, addMonitor, updateMonitor, deleteMonitor, toggleMonitorStatus,
+        isAddMonitorModalOpen, setIsAddMonitorModalOpen, addMonitorInitialContext, openAddMonitorWithContext,
+        createServer, updateServer, deleteServer, createApplication, updateApplication, deleteApplication,
+        sendTestNotification, createChannel, updateChannel, deleteChannel, saveEscalationPolicies,
+        createMaintenance, completeMaintenance, deleteMaintenance,
+        toggleRunbookStep, resetRunbook, createRunbook, updateRunbook, deleteRunbook,
+        syncCloudflare, syncHostinger,
+        apiHealth, triggerHealthCheck,
+        theme, setTheme, toggleTheme,
+        toasts, notify, dismissToast,
         systemSummary: {
-          totalApps,
+          totalApps: applications.length,
           healthyApps,
-          totalServers,
-          healthyServers,
-          totalMonitors,
-          healthyMonitors,
-          openIncidents,
+          totalServers: servers.length,
+          healthyServers: servers.filter(s => s.status === 'HEALTHY').length,
+          totalMonitors: monitors.length,
+          healthyMonitors: monitors.filter(m => m.status === 'HEALTHY').length,
+          openIncidents: openIncidentList.length,
           criticalIncidents,
           drReadinessCount,
-          backupsCurrentCount,
+          backupsCurrentCount: backups.filter(b => b.status === 'SUCCESS' && Date.parse(b.completedAt) > dayAgo).length,
           cloudflareStatus,
-          overallHealth
-        }
+          overallHealth,
+        },
       }}
     >
       {children}
@@ -1043,8 +620,6 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
 export const useOps = () => {
   const context = useContext(OpsContext);
-  if (!context) {
-    throw new Error('useOps must be used within an OpsProvider');
-  }
+  if (!context) throw new Error('useOps must be used within an OpsProvider');
   return context;
 };

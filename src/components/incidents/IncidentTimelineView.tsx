@@ -1,86 +1,85 @@
 import React, { useState, useMemo } from 'react';
 import { useOps } from '../../context/OpsContext';
 import { Incident } from '../../types';
-import { 
-  Clock, 
-  CheckCircle2, 
-  AlertTriangle, 
-  Activity, 
-  Calendar, 
-  ArrowRight, 
-  ShieldCheck, 
-  Layers, 
-  Eye, 
-  Filter,
-  Check,
-  ChevronRight,
-  Sparkles,
-  GitBranch,
-  Terminal
-} from 'lucide-react';
+import { Clock, Eye, Check, ChevronRight } from 'lucide-react';
 
 interface IncidentTimelineViewProps {
   onSelectIncident?: (incidentId: string) => void;
 }
 
+/** Parses an ISO string; returns null for empty/invalid values. */
+const parseTs = (iso?: string): number | null => {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : t;
+};
+
+const fmtDateTime = (iso?: string) => {
+  const t = parseTs(iso);
+  return t === null ? '—' : new Date(t).toLocaleString();
+};
+
+const fmtMinutes = (ms: number) => {
+  const min = Math.max(0, Math.round(ms / 60000));
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60);
+  return `${h}h ${min % 60}m`;
+};
+
+const isClosed = (inc: Incident) => inc.status === 'RESOLVED' || inc.status === 'CLOSED';
+
+type StageStatus = 'COMPLETED' | 'IN_PROGRESS' | 'PENDING';
+
 export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSelectIncident }) => {
-  const { incidents, applications, setSelectedIncidentId, theme } = useOps();
+  const { incidents, applications, runbooks, setSelectedIncidentId, theme } = useOps();
   const isDark = theme === 'dark';
 
   const [timeWindowHours, setTimeWindowHours] = useState<number>(48);
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'RESOLVED'>('ALL');
-  const [activeIncidentId, setActiveIncidentId] = useState<string>(() => {
-    const active = incidents.find(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED');
-    return active ? active.id : incidents[0]?.id || '';
-  });
+  const [activeIncidentId, setActiveIncidentId] = useState<string>('');
 
   const now = Date.now();
   const windowStart = now - timeWindowHours * 60 * 60 * 1000;
 
-  // Filter incidents matching time window and status
   const displayedIncidents = useMemo(() => {
     return incidents.filter(inc => {
-      const startTime = new Date(inc.startedAt).getTime();
-      const endTime = inc.resolvedAt ? new Date(inc.resolvedAt).getTime() : now;
+      const startTime = parseTs(inc.startedAt);
+      if (startTime === null) return false;
+      const endTime = parseTs(inc.resolvedAt) ?? now;
+      if (endTime < windowStart) return false;
 
-      // Check if overlaps with window
-      const inWindow = endTime >= windowStart;
-      if (!inWindow) return false;
-
-      const isActive = inc.status !== 'RESOLVED' && inc.status !== 'CLOSED';
-      if (statusFilter === 'ACTIVE') return isActive;
-      if (statusFilter === 'RESOLVED') return !isActive;
+      const active = !isClosed(inc);
+      if (statusFilter === 'ACTIVE') return active;
+      if (statusFilter === 'RESOLVED') return !active;
       return true;
     });
-  }, [incidents, timeWindowHours, statusFilter, now, windowStart]);
+  }, [incidents, statusFilter, now, windowStart]);
 
-  // Selected incident for the detailed lifecycle inspector
   const currentIncident = useMemo(() => {
-    return incidents.find(i => i.id === activeIncidentId) || displayedIncidents[0] || incidents[0];
+    return incidents.find(i => i.id === activeIncidentId)
+      || displayedIncidents.find(i => !isClosed(i))
+      || displayedIncidents[0];
   }, [incidents, activeIncidentId, displayedIncidents]);
 
   const currentApp = applications.find(a => a.id === currentIncident?.applicationId);
+  const currentRunbook = runbooks.find(r => r.id === currentIncident?.runbookId);
 
-  // Time markers along the axis (e.g. 5 intervals)
   const timeTicks = useMemo(() => {
     const ticks = [];
     const stepHours = timeWindowHours / 4;
     for (let i = 4; i >= 0; i--) {
       const hoursAgo = Math.round(i * stepHours);
-      const timestamp = new Date(now - hoursAgo * 60 * 60 * 1000);
       ticks.push({
-        label: hoursAgo === 0 ? 'NOW (Live)' : `${hoursAgo}h ago`,
-        timeStr: timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        label: hoursAgo === 0 ? 'NOW' : `${hoursAgo}h ago`,
         positionPercent: ((timeWindowHours - hoursAgo) / timeWindowHours) * 100
       });
     }
     return ticks;
-  }, [timeWindowHours, now]);
+  }, [timeWindowHours]);
 
-  // Calculate position and width of an incident on the timeline bar
   const calculateBarPosition = (inc: Incident) => {
-    const startTime = new Date(inc.startedAt).getTime();
-    const endTime = inc.resolvedAt ? new Date(inc.resolvedAt).getTime() : now;
+    const startTime = parseTs(inc.startedAt) ?? now;
+    const endTime = parseTs(inc.resolvedAt) ?? now;
 
     const clampedStart = Math.max(startTime, windowStart);
     const clampedEnd = Math.min(endTime, now);
@@ -94,96 +93,55 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
     };
   };
 
-  // Lifecycle stage progression definition
+  /** Lifecycle derived purely from the incident's recorded status and timestamps. */
   const getLifecycleStages = (inc: Incident) => {
-    const isResolved = inc.status === 'RESOLVED' || inc.status === 'CLOSED';
-    const isMitigating = inc.status === 'MITIGATING' || inc.status === 'MONITORING' || isResolved;
-    const isInvestigating = inc.status === 'INVESTIGATING' || isMitigating;
-    const isAck = inc.acknowledged || isInvestigating;
+    const resolved = isClosed(inc);
+    const order = ['OPEN', 'ACKNOWLEDGED', 'INVESTIGATING', 'MITIGATING', 'MONITORING', 'RESOLVED', 'CLOSED'];
+    const idx = order.indexOf(inc.status);
+    const reached = (s: string) => idx >= order.indexOf(s);
+    const stage = (done: boolean, current: boolean): StageStatus => done ? 'COMPLETED' : current ? 'IN_PROGRESS' : 'PENDING';
+    const acked = inc.acknowledged || reached('ACKNOWLEDGED');
 
     return [
+      { stage: 1, title: 'Detected / Declared', subtitle: fmtDateTime(inc.startedAt), status: 'COMPLETED' as StageStatus, badge: 'OPENED' },
       {
-        stage: 1,
-        title: 'Consecutive Probe Failure',
-        subtitle: '3/3 check threshold confirmed',
-        status: 'COMPLETED',
-        time: inc.startedAt,
-        badge: 'CONFIRMED'
+        stage: 2, title: 'Acknowledged',
+        subtitle: acked ? (inc.acknowledgedBy ? `By ${inc.acknowledgedBy}` : fmtDateTime(inc.acknowledgedAt)) : 'Awaiting acknowledgement',
+        status: stage(acked, !acked), badge: acked ? 'DONE' : 'PENDING',
       },
-      {
-        stage: 2,
-        title: 'Escalation Alert Paged',
-        subtitle: 'Teams webhook & on-call alert',
-        status: 'COMPLETED',
-        time: inc.startedAt,
-        badge: 'DISPATCHED'
-      },
-      {
-        stage: 3,
-        title: 'Operator Triage & Ack',
-        subtitle: inc.acknowledgedBy ? `By ${inc.acknowledgedBy}` : 'Pending triage',
-        status: isAck ? 'COMPLETED' : 'IN_PROGRESS',
-        time: inc.acknowledgedAt || inc.startedAt,
-        badge: isAck ? 'ACKNOWLEDGED' : 'PENDING'
-      },
-      {
-        stage: 4,
-        title: 'Mitigation & Blast Isolation',
-        subtitle: inc.mitigationActionTaken ? 'Runbook execution & DR reroute' : 'Diagnosing root cause',
-        status: isMitigating ? 'COMPLETED' : (isInvestigating ? 'IN_PROGRESS' : 'PENDING'),
-        time: inc.acknowledgedAt,
-        badge: isMitigating ? 'ISOLATED' : 'ACTIVE'
-      },
-      {
-        stage: 5,
-        title: '3-Pass Health Verification',
-        subtitle: isResolved ? '3 consecutive clean probes confirmed' : 'Requires 3 consecutive health passes',
-        status: isResolved ? 'COMPLETED' : (inc.status === 'MONITORING' ? 'IN_PROGRESS' : 'PENDING'),
-        time: inc.resolvedAt,
-        badge: isResolved ? '3/3 PASS' : 'VERIFYING'
-      },
-      {
-        stage: 6,
-        title: 'Resolution Sign-off',
-        subtitle: isResolved ? 'Incident verified & closed' : 'Awaiting sign-off',
-        status: isResolved ? 'COMPLETED' : 'PENDING',
-        time: inc.resolvedAt,
-        badge: isResolved ? 'RESOLVED' : 'UNRESOLVED'
-      }
+      { stage: 3, title: 'Investigating', subtitle: inc.status === 'INVESTIGATING' ? 'Current status' : reached('INVESTIGATING') ? 'Passed' : 'Not reached', status: stage(reached('MITIGATING'), inc.status === 'INVESTIGATING'), badge: inc.status === 'INVESTIGATING' ? 'ACTIVE' : reached('MITIGATING') ? 'DONE' : '—' },
+      { stage: 4, title: 'Mitigating', subtitle: inc.mitigationActionTaken ? 'Mitigation recorded' : inc.status === 'MITIGATING' ? 'Current status' : 'Not reached', status: stage(reached('MONITORING'), inc.status === 'MITIGATING'), badge: inc.status === 'MITIGATING' ? 'ACTIVE' : reached('MONITORING') ? 'DONE' : '—' },
+      { stage: 5, title: 'Monitoring', subtitle: inc.status === 'MONITORING' ? 'Watching for recovery' : resolved ? 'Passed' : 'Not reached', status: stage(resolved, inc.status === 'MONITORING'), badge: inc.status === 'MONITORING' ? 'ACTIVE' : resolved ? 'DONE' : '—' },
+      { stage: 6, title: 'Resolved', subtitle: resolved ? fmtDateTime(inc.resolvedAt) : 'Not resolved', status: stage(resolved, false), badge: resolved ? inc.status : 'OPEN' },
     ];
+  };
+
+  const ackDelay = (inc: Incident) => {
+    const s = parseTs(inc.startedAt);
+    const a = parseTs(inc.acknowledgedAt);
+    return s !== null && a !== null ? fmtMinutes(a - s) : null;
   };
 
   return (
     <div className={`rounded-lg border space-y-4 p-4 sm:p-5 transition-colors ${
       isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
     }`}>
-      
-      {/* 1. Header with Title & Filter Controls */}
+
+      {/* Header & filters */}
       <div className={`flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b ${
         isDark ? 'border-[#1E293B]' : 'border-slate-100'
       }`}>
         <div>
-          <div className="flex items-center gap-2">
-            <h2 className="text-sm font-bold font-mono tracking-tight flex items-center gap-1.5">
-              <Clock className="w-4 h-4 text-blue-500" />
-              <span>INCIDENT LIFECYCLE &amp; HISTORICAL TIMELINE</span>
-            </h2>
-            <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold ${
-              isDark 
-                ? 'bg-blue-950/80 text-blue-300 border border-blue-800/80' 
-                : 'bg-blue-50 text-blue-700 border border-blue-200'
-            }`}>
-              INTERACTIVE CHRONOLOGY
-            </span>
-          </div>
+          <h2 className="text-sm font-bold font-mono tracking-tight flex items-center gap-1.5">
+            <Clock className="w-4 h-4 text-blue-500" />
+            <span>INCIDENT TIMELINE</span>
+          </h2>
           <p className={`text-xs mt-0.5 font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Multi-stage incident progression from continuous probe detection through failover, mitigation &amp; sign-off
+            When each incident started and how long it lasted, with its recorded lifecycle
           </p>
         </div>
 
-        {/* Filter Controls */}
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
-          {/* Time Window Selector */}
           <div className={`flex items-center p-0.5 rounded border ${
             isDark ? 'bg-[#0B0F17] border-[#1E293B]' : 'bg-slate-100 border-slate-300'
           }`}>
@@ -206,7 +164,6 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
             ))}
           </div>
 
-          {/* Status Filter */}
           <div className={`flex items-center p-0.5 rounded border ${
             isDark ? 'bg-[#0B0F17] border-[#1E293B]' : 'bg-slate-100 border-slate-300'
           }`}>
@@ -227,26 +184,23 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
         </div>
       </div>
 
-      {/* 2. Interactive Horizontal Timeline Track */}
+      {/* Timeline track */}
       <div className="space-y-2">
         <div className="flex items-center justify-between text-[11px] font-mono text-slate-400 px-1">
-          <span>Click any incident to scrub through lifecycle milestones</span>
+          <span>Click an incident to inspect its lifecycle</span>
           <span className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
-            <span className={isDark ? 'text-slate-300' : 'text-slate-700'}>Live Active</span>
+            <span className="w-2 h-2 rounded-full bg-rose-500" />
+            <span className={isDark ? 'text-slate-300' : 'text-slate-700'}>Active</span>
             <span className="mx-1 text-slate-500">·</span>
             <span className="w-2 h-2 rounded-full bg-emerald-500" />
             <span className={isDark ? 'text-slate-300' : 'text-slate-700'}>Resolved</span>
           </span>
         </div>
 
-        {/* Scrollable Timeline Box */}
         <div className={`w-full min-w-0 rounded-lg border p-3.5 space-y-3 overflow-x-auto ${
           isDark ? 'bg-[#070B12] border-[#182338]' : 'bg-slate-50 border-slate-200'
         }`}>
           <div className="min-w-[680px] space-y-2.5">
-            
-            {/* Top Time Scale Axis */}
             <div className="relative h-6 border-b border-dashed border-slate-700/60 pb-1">
               {timeTicks.map((tick, i) => (
                 <div
@@ -255,7 +209,7 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
                   className="absolute -translate-x-1/2 flex flex-col items-center pointer-events-none"
                 >
                   <span className={`text-[10px] font-mono font-medium ${
-                    tick.label.includes('NOW') ? 'text-emerald-500 font-bold' : isDark ? 'text-slate-400' : 'text-slate-600'
+                    tick.label === 'NOW' ? 'text-emerald-500 font-bold' : isDark ? 'text-slate-400' : 'text-slate-600'
                   }`}>
                     {tick.label}
                   </span>
@@ -264,15 +218,14 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
               ))}
             </div>
 
-            {/* Incident Timeline Rows */}
             <div className="space-y-2 pt-1">
               {displayedIncidents.length === 0 ? (
                 <div className="py-6 text-center text-xs font-mono text-slate-400">
-                  No incidents recorded in the selected {timeWindowHours}h window.
+                  No incidents in the selected {timeWindowHours >= 168 ? '7-day' : `${timeWindowHours}h`} window.
                 </div>
               ) : (
                 displayedIncidents.map(inc => {
-                  const isActive = inc.status !== 'RESOLVED' && inc.status !== 'CLOSED';
+                  const active = !isClosed(inc);
                   const isSelected = currentIncident?.id === inc.id;
                   const barStyle = calculateBarPosition(inc);
                   const app = applications.find(a => a.id === inc.applicationId);
@@ -287,17 +240,12 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
                           : (isDark ? 'bg-[#0E1524] border-[#1A263C] hover:border-slate-600' : 'bg-white border-slate-200 hover:border-slate-300 shadow-2xs')
                       }`}
                     >
-                      {/* Left Metadata Tag */}
                       <div className="w-48 shrink-0 flex items-center gap-2 pr-2 border-r border-inherit font-mono z-10">
-                        <span className={`w-2 h-2 rounded-full shrink-0 ${
-                          isActive 
-                            ? 'bg-rose-500 animate-pulse' 
-                            : 'bg-emerald-500'
-                        }`} />
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${active ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500'}`} />
                         <span className="font-bold text-xs">{inc.id}</span>
                         <span className={`text-[10px] px-1.5 py-0.2 rounded font-semibold ${
                           inc.severity === 'CRITICAL' || inc.severity === 'EMERGENCY'
-                            ? (isDark ? 'bg-rose-950/80 text-rose-300 border border-rose-800' : 'bg-rose-100 text-rose-800') 
+                            ? (isDark ? 'bg-rose-950/80 text-rose-300 border border-rose-800' : 'bg-rose-100 text-rose-800')
                             : inc.severity === 'HIGH'
                               ? (isDark ? 'bg-amber-950/80 text-amber-300 border border-amber-800' : 'bg-amber-100 text-amber-800')
                               : (isDark ? 'bg-blue-950/80 text-blue-300 border border-blue-800' : 'bg-blue-100 text-blue-800')
@@ -305,43 +253,36 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
                           {inc.severity}
                         </span>
                         <span className={`text-[10px] truncate ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                          {app?.name || inc.applicationId}
+                          {app?.name ?? '—'}
                         </span>
                       </div>
 
-                      {/* Right Timeline Bar Track */}
                       <div className="flex-1 relative h-6 mx-2 overflow-hidden">
-                        {/* Background guide line */}
-                        <div className={`absolute inset-x-0 top-1/2 -translate-y-1/2 h-px ${
-                          isDark ? 'bg-slate-800' : 'bg-slate-200'
-                        }`} />
-
-                        {/* Interactive Duration Bar */}
+                        <div className={`absolute inset-x-0 top-1/2 -translate-y-1/2 h-px ${isDark ? 'bg-slate-800' : 'bg-slate-200'}`} />
                         <div
                           style={{ left: barStyle.left, width: barStyle.width }}
                           className={`absolute top-1/2 -translate-y-1/2 h-5 rounded flex items-center justify-between px-2 text-[10px] font-mono font-semibold transition-all ${
-                            isActive
-                              ? 'bg-gradient-to-r from-rose-600 via-rose-500 to-amber-500 text-white shadow-xs animate-pulse ring-1 ring-rose-400'
+                            active
+                              ? 'bg-gradient-to-r from-rose-600 via-rose-500 to-amber-500 text-white shadow-xs ring-1 ring-rose-400'
                               : inc.severity === 'CRITICAL' || inc.severity === 'EMERGENCY'
                                 ? 'bg-rose-800/80 text-rose-100 border border-rose-600'
                                 : inc.severity === 'HIGH'
                                   ? 'bg-amber-700/80 text-amber-100 border border-amber-500'
                                   : 'bg-blue-700/80 text-blue-100 border border-blue-500'
                           }`}
-                          title={`${inc.id}: Started ${new Date(inc.startedAt).toLocaleTimeString()} · ${inc.durationMinutes} min`}
+                          title={`${inc.id}: started ${fmtDateTime(inc.startedAt)} · ${inc.durationMinutes ?? 0} min`}
                         >
                           <span className="truncate pr-1">
-                            {isActive ? `LIVE: ${inc.durationMinutes}m` : `${inc.durationMinutes}m duration`}
+                            {active ? `OPEN: ${inc.durationMinutes ?? 0}m` : `${inc.durationMinutes ?? 0}m`}
                           </span>
-                          {isActive ? (
-                            <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping shrink-0" />
+                          {active ? (
+                            <span className="w-1.5 h-1.5 rounded-full bg-white shrink-0" />
                           ) : (
                             <Check className="w-3 h-3 text-white shrink-0" />
                           )}
                         </div>
                       </div>
 
-                      {/* Hover Arrow indicator */}
                       <ChevronRight className={`w-3.5 h-3.5 shrink-0 transition-transform ${
                         isSelected ? 'text-blue-500 translate-x-0.5' : 'text-slate-500 group-hover:text-slate-300'
                       }`} />
@@ -354,33 +295,32 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
         </div>
       </div>
 
-      {/* 3. Selected Incident Lifecycle Deep-Dive Inspector */}
+      {/* Selected incident inspector */}
       {currentIncident && (
         <div className={`rounded-lg border p-4 sm:p-5 space-y-4 transition-colors ${
           isDark ? 'bg-[#0B0F17] border-[#1C273C]' : 'bg-slate-50/70 border-slate-200'
         }`}>
-          {/* Header Row */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b pb-3 border-inherit">
             <div className="space-y-1 min-w-0">
               <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
                 <span className="font-bold text-sm text-blue-500">{currentIncident.id}</span>
                 <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
                 <span className={`font-semibold ${
-                  currentIncident.severity === 'CRITICAL' ? 'text-rose-500 font-bold' : 'text-amber-500'
+                  currentIncident.severity === 'CRITICAL' || currentIncident.severity === 'EMERGENCY' ? 'text-rose-500 font-bold' : 'text-amber-500'
                 }`}>
                   {currentIncident.severity}
                 </span>
                 <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
                 <span className={`px-2 py-0.2 rounded text-[10px] font-semibold ${
-                  currentIncident.status === 'RESOLVED' || currentIncident.status === 'CLOSED'
+                  isClosed(currentIncident)
                     ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/30'
-                    : 'bg-rose-500/10 text-rose-500 border border-rose-500/30 animate-pulse'
+                    : 'bg-rose-500/10 text-rose-500 border border-rose-500/30'
                 }`}>
                   {currentIncident.status}
                 </span>
                 <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
                 <span className={isDark ? 'text-slate-400' : 'text-slate-600'}>
-                  Target: <strong>{currentApp?.name} ({currentIncident.environment})</strong>
+                  Target: <strong>{currentApp?.name ?? '—'} ({currentIncident.environment})</strong>
                 </span>
               </div>
               <h3 className="font-bold font-sans text-sm truncate">{currentIncident.title}</h3>
@@ -395,66 +335,56 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded text-white bg-blue-600 hover:bg-blue-700 transition-colors shadow-xs cursor-pointer font-semibold"
               >
                 <Eye className="w-3.5 h-3.5" />
-                <span>OPEN INVESTIGATION MODAL</span>
+                <span>OPEN INCIDENT</span>
               </button>
             </div>
           </div>
 
-          {/* Micro-Metrics Bar */}
+          {/* Metrics derived from recorded timestamps */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono text-xs">
-            <div className={`p-2.5 rounded border ${
-              isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200'
-            }`}>
-              <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Detection Window</div>
-              <div className="font-bold text-emerald-500 mt-0.5">&lt; 45s (3 Probes)</div>
-              <div className={`text-[10px] font-sans ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>MTTD Zero false alarms</div>
+            <div className={`p-2.5 rounded border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200'}`}>
+              <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Started</div>
+              <div className="font-bold mt-0.5">{fmtDateTime(currentIncident.startedAt)}</div>
+              <div className={`text-[10px] font-sans ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                {(currentIncident.affectedMonitors ?? []).length > 0 ? `${currentIncident.affectedMonitors.length} monitor(s) involved` : 'Declared manually'}
+              </div>
             </div>
 
-            <div className={`p-2.5 rounded border ${
-              isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200'
-            }`}>
-              <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Triage / Acknowledge</div>
+            <div className={`p-2.5 rounded border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200'}`}>
+              <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Time to Acknowledge</div>
               <div className="font-bold mt-0.5">
-                {currentIncident.acknowledged ? '2 min' : 'Pending'}
+                {currentIncident.acknowledged ? (ackDelay(currentIncident) ?? '—') : 'Pending'}
               </div>
-              <div className={`text-[10px] font-sans ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-                {currentIncident.acknowledgedBy ? `By ${currentIncident.acknowledgedBy.split(' ')[0]}` : 'On-call paged'}
-              </div>
-            </div>
-
-            <div className={`p-2.5 rounded border ${
-              isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200'
-            }`}>
-              <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Total Duration / MTTR</div>
-              <div className={`font-bold mt-0.5 tabular-nums ${
-                currentIncident.status !== 'RESOLVED' ? 'text-rose-500' : 'text-emerald-500'
-              }`}>
-                {currentIncident.durationMinutes} min {currentIncident.status !== 'RESOLVED' ? '(Active)' : '(Resolved)'}
-              </div>
-              <div className={`text-[10px] font-sans ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-                {currentIncident.resolvedAt ? `Resolved ${new Date(currentIncident.resolvedAt).toLocaleTimeString()}` : 'In progress'}
+              <div className={`text-[10px] font-sans truncate ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                {currentIncident.acknowledgedBy ? `By ${currentIncident.acknowledgedBy}` : 'Not acknowledged'}
               </div>
             </div>
 
-            <div className={`p-2.5 rounded border ${
-              isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200'
-            }`}>
-              <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Mitigation SOP</div>
+            <div className={`p-2.5 rounded border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200'}`}>
+              <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Duration</div>
+              <div className={`font-bold mt-0.5 tabular-nums ${isClosed(currentIncident) ? 'text-emerald-500' : 'text-rose-500'}`}>
+                {currentIncident.durationMinutes ?? 0} min {isClosed(currentIncident) ? '' : '(ongoing)'}
+              </div>
+              <div className={`text-[10px] font-sans ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                {currentIncident.resolvedAt ? `Resolved ${fmtDateTime(currentIncident.resolvedAt)}` : 'Not resolved'}
+              </div>
+            </div>
+
+            <div className={`p-2.5 rounded border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200'}`}>
+              <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Runbook</div>
               <div className="font-bold text-blue-500 mt-0.5 truncate">
-                {currentIncident.runbookId || 'Automated Protocol'}
+                {currentRunbook?.title ?? 'None attached'}
               </div>
               <div className={`text-[10px] font-sans ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-                {currentIncident.affectedServices.length} services protected
+                Owner: {currentIncident.owner || 'Unassigned'}
               </div>
             </div>
           </div>
 
-          {/* 6-Stage Visual Lifecycle Stepper */}
+          {/* Lifecycle stepper */}
           <div className="space-y-2">
-            <span className={`text-[10px] font-mono font-semibold uppercase tracking-wider ${
-              isDark ? 'text-slate-400' : 'text-slate-500'
-            }`}>
-              SRE Lifecycle Stage Progression
+            <span className={`text-[10px] font-mono font-semibold uppercase tracking-wider ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+              Lifecycle
             </span>
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
               {getLifecycleStages(currentIncident).map(st => {
@@ -478,11 +408,7 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
                           0{st.stage}
                         </span>
                         <span className={`text-[9px] px-1 py-0.2 rounded font-semibold ${
-                          isDone 
-                            ? 'bg-emerald-500/10 text-emerald-400' 
-                            : isCurrent 
-                              ? 'bg-amber-500/10 text-amber-400 animate-pulse' 
-                              : 'text-slate-500'
+                          isDone ? 'bg-emerald-500/10 text-emerald-400' : isCurrent ? 'bg-amber-500/10 text-amber-400' : 'text-slate-500'
                         }`}>
                           {st.badge}
                         </span>
@@ -502,23 +428,20 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
             </div>
           </div>
 
-          {/* Root Cause & Diagnostic Summary */}
           <div className={`p-3 rounded border text-xs font-mono flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
             isDark ? 'bg-[#080D17] border-[#182338]' : 'bg-slate-100 border-slate-200'
           }`}>
             <div className="space-y-0.5 min-w-0">
-              <span className={`text-[10px] uppercase font-bold ${
-                currentIncident.status !== 'RESOLVED' ? 'text-rose-500' : 'text-emerald-500'
-              }`}>
-                Root Cause Diagnosis:
+              <span className={`text-[10px] uppercase font-bold ${isClosed(currentIncident) ? 'text-emerald-500' : 'text-rose-500'}`}>
+                Root cause / detail:
               </span>
               <p className={`font-sans text-xs ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
-                {currentIncident.rootCause}
+                {currentIncident.rootCause || 'Not recorded yet.'}
               </p>
             </div>
-            {currentIncident.timeline && currentIncident.timeline.length > 0 && (
+            {(currentIncident.timeline ?? []).length > 0 && (
               <span className="text-[11px] text-slate-400 shrink-0">
-                {currentIncident.timeline.length} Audit Events Logged
+                {currentIncident.timeline.length} timeline event(s)
               </span>
             )}
           </div>

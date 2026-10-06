@@ -1,22 +1,22 @@
 import { api, ApiResponse, SafeUser, tokenStore } from './api';
 
-interface LoginResponse {
+interface SessionResponse {
   user: SafeUser;
   tokens: { accessToken: string; refreshToken: string; expiresIn: string };
 }
 
 export const AuthService = {
   async login(email: string, password: string): Promise<SafeUser> {
-    const res = await api.post<ApiResponse<LoginResponse>>('/api/auth/login', { email, password });
+    const res = await api.post<ApiResponse<SessionResponse>>('/api/auth/login', { email, password });
     tokenStore.setTokens(res.data.tokens.accessToken, res.data.tokens.refreshToken, res.data.user);
     return res.data.user;
   },
 
   async logout(): Promise<void> {
-    const refresh = tokenStore.getRefresh();
+    const refreshToken = tokenStore.getRefresh();
     try {
-      if (refresh) await api.post('/api/auth/logout', { refreshToken: refresh });
-    } catch { /* best-effort */ }
+      if (refreshToken) await api.post('/api/auth/logout', { refreshToken });
+    } catch { /* best-effort: the local session is cleared regardless */ }
     tokenStore.clear();
   },
 
@@ -25,8 +25,10 @@ export const AuthService = {
     return res.data;
   },
 
+  /** Changing the password signs out every other session; this session gets fresh tokens. */
   async changePassword(currentPassword: string, newPassword: string): Promise<void> {
-    await api.post('/api/auth/change-password', { currentPassword, newPassword });
+    const res = await api.post<ApiResponse<SessionResponse>>('/api/auth/change-password', { currentPassword, newPassword });
+    tokenStore.setTokens(res.data.tokens.accessToken, res.data.tokens.refreshToken, res.data.user);
   },
 
   isAuthenticated(): boolean {

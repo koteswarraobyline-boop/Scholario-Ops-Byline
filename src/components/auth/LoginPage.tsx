@@ -82,7 +82,7 @@ export const LoginPage: React.FC = () => {
                 autoFocus
                 value={email}
                 onChange={e => setEmail(e.target.value)}
-                placeholder="you@scholario.net"
+                placeholder="Email address"
                 disabled={loading}
                 className="w-full px-3 py-2 bg-[#0A0F1A] border border-[#1E293B] rounded-lg text-sm text-slate-100 font-mono
                            placeholder-slate-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/50
@@ -135,11 +135,14 @@ export const LoginPage: React.FC = () => {
           </form>
         </div>
 
-        {/* Dev credentials hint */}
-        <div className="mt-4 p-3 bg-[#0D1220] border border-[#1A2436] rounded-lg text-[10px] font-mono text-slate-500 space-y-0.5">
-          <div className="text-slate-400 font-semibold mb-1">Default credentials</div>
-          <div>admin@scholario.net · Admin@Scholario2026!</div>
-          <div>arjun.mehta@scholario.net · Operator@Scholario2026!</div>
+        {/* First-run hint */}
+        <div className="mt-4 p-3 bg-[#0D1220] border border-[#1A2436] rounded-lg text-[10px] font-mono text-slate-500 space-y-1">
+          <div className="text-slate-400 font-semibold">First sign-in</div>
+          <div>
+            The first administrator is created when the server starts, from{' '}
+            <span className="text-slate-300">ADMIN_EMAIL</span> and <span className="text-slate-300">ADMIN_PASSWORD</span>{' '}
+            in the server <span className="text-slate-300">.env</span> file. Further accounts are created by an administrator on the Users page.
+          </div>
         </div>
       </div>
     </div>
