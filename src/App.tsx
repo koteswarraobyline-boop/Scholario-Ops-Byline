@@ -5,7 +5,6 @@ import { OpsProvider, useOps } from './context/OpsContext';
 import { Shell } from './components/layout/Shell';
 import { LoginPage } from './components/auth/LoginPage';
 
-// All existing dashboard views — unchanged
 import { OverviewView }      from './components/overview/OverviewView';
 import { ApplicationsView }  from './components/applications/ApplicationsView';
 import { InfrastructureView} from './components/infrastructure/InfrastructureView';
@@ -23,7 +22,6 @@ import { CommunicationsView} from './components/communications/CommunicationsVie
 import { ReportsView }       from './components/analytics/ReportsView';
 import { AuditLogsView }     from './components/admin/AuditLogsView';
 import { UsersView }         from './components/admin/UsersView';
-import { ProjectOverviewView } from './components/overview/ProjectOverviewView';
 import { RealVpsTestbenchView } from './components/resilience/RealVpsTestbenchView';
 
 // ── Protected Route ──────────────────────────────────────────────────────────
@@ -50,40 +48,29 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 const DashboardView: React.FC<{ tab: string }> = ({ tab }) => {
   const { setActiveTab } = useOps();
 
-  // Keep OpsContext activeTab in sync with URL
   React.useEffect(() => {
     setActiveTab(tab);
   }, [tab, setActiveTab]);
 
   const viewMap: Record<string, React.ReactNode> = {
+    'real-vps':     <RealVpsTestbenchView />,
     overview:       <OverviewView />,
     applications:   <ApplicationsView />,
     infrastructure: <InfrastructureView />,
     monitors:       <MonitorsView />,
     incidents:      <IncidentsView />,
-    alerts:         <IncidentsView />,
     resilience:     <DrDashboardView />,
-    failover:       <DrDashboardView />,
     backups:        <BackupsView />,
     dependencies:   <DependencyMapView />,
     hostinger:      <HostingerView />,
     cloudflare:     <CloudflareView />,
     deployments:    <DeploymentsView />,
-    changes:        <DeploymentsView />,
     runbooks:       <RunbooksView />,
     maintenance:    <MaintenanceView />,
     communications: <CommunicationsView />,
-    escalation:     <CommunicationsView />,
-    integrations:   <CommunicationsView />,
-    settings:       <CommunicationsView />,
     reports:        <ReportsView />,
-    uptime:         <ReportsView />,
     audit:          <AuditLogsView />,
     users:          <UsersView />,
-    'real-vps':     <RealVpsTestbenchView />,
-    'vps-testbench':<RealVpsTestbenchView />,
-    'project-overview': <ProjectOverviewView />,
-    docs:           <ProjectOverviewView />,
   };
 
   return <Shell>{viewMap[tab] ?? <OverviewView />}</Shell>;
@@ -120,15 +107,12 @@ const DashboardRoutes: React.FC = () => (
   <Routes>
     <Route path="/"              element={<Navigate to="/real-vps" replace />} />
     <Route path="/real-vps"      element={<DashboardView tab="real-vps" />} />
-    <Route path="/vps-testbench" element={<DashboardView tab="real-vps" />} />
     <Route path="/overview"      element={<DashboardView tab="overview" />} />
     <Route path="/applications"  element={<DashboardView tab="applications" />} />
     <Route path="/infrastructure"element={<DashboardView tab="infrastructure" />} />
     <Route path="/monitors"      element={<DashboardView tab="monitors" />} />
     <Route path="/incidents"     element={<DashboardView tab="incidents" />} />
-    <Route path="/alerts"        element={<DashboardView tab="alerts" />} />
     <Route path="/resilience"    element={<DashboardView tab="resilience" />} />
-    <Route path="/failover"      element={<DashboardView tab="failover" />} />
     <Route path="/backups"       element={<DashboardView tab="backups" />} />
     <Route path="/dependencies"  element={<DashboardView tab="dependencies" />} />
     <Route path="/hostinger"     element={<DashboardView tab="hostinger" />} />
@@ -137,14 +121,9 @@ const DashboardRoutes: React.FC = () => (
     <Route path="/runbooks"      element={<DashboardView tab="runbooks" />} />
     <Route path="/maintenance"   element={<DashboardView tab="maintenance" />} />
     <Route path="/communications"element={<DashboardView tab="communications" />} />
-    <Route path="/escalation"    element={<DashboardView tab="escalation" />} />
     <Route path="/reports"       element={<DashboardView tab="reports" />} />
-    <Route path="/uptime"        element={<DashboardView tab="uptime" />} />
     <Route path="/audit"         element={<DashboardView tab="audit" />} />
     <Route path="/users"         element={<DashboardView tab="users" />} />
-    <Route path="/settings"      element={<DashboardView tab="settings" />} />
-    <Route path="/project-overview" element={<DashboardView tab="project-overview" />} />
-    <Route path="/docs"          element={<DashboardView tab="docs" />} />
     <Route path="*"              element={<Navigate to="/real-vps" replace />} />
   </Routes>
 );

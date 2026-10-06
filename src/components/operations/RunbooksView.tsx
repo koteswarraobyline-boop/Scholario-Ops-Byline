@@ -9,6 +9,19 @@ export const RunbooksView: React.FC = () => {
 
   const currentRunbook = runbooks.find(r => r.id === activeRbId) || runbooks[0];
 
+  if (!currentRunbook) {
+    return (
+      <div className={`space-y-6`}>
+        <div className={`pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+          <h1 className="text-lg font-bold font-mono tracking-tight">OPERATIONAL RUNBOOKS &amp; MITIGATION SOPs</h1>
+        </div>
+        <div className={`rounded-lg border p-8 text-center text-xs font-mono ${isDark ? 'bg-[#111726] border-[#1E293B] text-slate-500' : 'bg-white border-slate-200 text-slate-400'}`}>
+          Loading runbooks...
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b ${
