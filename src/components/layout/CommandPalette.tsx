@@ -620,7 +620,7 @@ export const CommandPalette: React.FC = () => {
       icon: CheckCircle2,
       keywords: 'simulate recovery mosaic verify pass resolve scenario',
       action: () => {
-        triggerSimulatedScenario('RESOLVE_MOSAIC');
+        triggerSimulatedScenario?.('RESOLVE_MOSAIC');
         showFeedback('Simulated recovery sequence: 3 checks verified & incident resolved');
       }
     });
@@ -636,7 +636,7 @@ export const CommandPalette: React.FC = () => {
       icon: AlertTriangle,
       keywords: 'simulate failure inject mosaic database mysql pool exhaustion scenario',
       action: () => {
-        triggerSimulatedScenario('TRIGGER_MOSAIC_FAIL');
+        triggerSimulatedScenario?.('TRIGGER_MOSAIC_FAIL');
         showFeedback('Injected failure scenario: Mosaic connection pool starved');
       }
     });

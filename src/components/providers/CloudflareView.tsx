@@ -10,6 +10,21 @@ export const CloudflareView: React.FC = () => {
 
   const selectedZone = cloudflareZones.find(z => z.id === selectedZoneId) || cloudflareZones[0];
 
+  // Guard: zones not loaded yet
+  if (!selectedZone) {
+    return (
+      <div className={`space-y-6`}>
+        <div className={`pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+          <h1 className="text-lg font-bold font-mono tracking-tight">CLOUDFLARE ANYCAST EDGE &amp; TRAFFIC ROUTING</h1>
+          <p className={`text-xs font-mono mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Read-only edge telemetry, TLS certificates, WAF events &amp; DNS records</p>
+        </div>
+        <div className={`rounded-lg border p-8 text-center text-xs font-mono ${isDark ? 'bg-[#111726] border-[#1E293B] text-slate-500' : 'bg-white border-slate-200 text-slate-400'}`}>
+          Loading Cloudflare zone data...
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       

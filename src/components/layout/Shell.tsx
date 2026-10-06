@@ -25,8 +25,6 @@ import {
   Radio, 
   Cpu,
   Zap,
-  CheckCircle2,
-  AlertOctagon,
   ArrowRight,
   Shield,
   Sun,
@@ -64,7 +62,6 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     incidents,
     setSelectedIncidentId,
     deadMan,
-    triggerSimulatedScenario,
     runAllProbes,
     apiHealth,
     triggerHealthCheck,
@@ -77,6 +74,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
   const refreshData = () => {
     triggerHealthCheck();
   };
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -90,8 +88,6 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
   const isDark = theme === 'dark';
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-  const [showSimMenu, setShowSimMenu] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
 
   const activeCriticalIncident = incidents.find(i => i.severity === 'CRITICAL' && (i.status === 'OPEN' || i.status === 'INVESTIGATING' || i.status === 'MITIGATING' || i.status === 'ACKNOWLEDGED'));
 
@@ -120,8 +116,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       title: 'Command Center',
       items: [
         { id: 'overview', label: 'Overview', icon: Activity },
-        { id: 'incidents', label: 'Incidents', icon: AlertTriangle, badge: systemSummary.openIncidents > 0 ? `${systemSummary.openIncidents}` : undefined, badgeColor: systemSummary.criticalIncidents > 0 ? 'text-rose-400 font-semibold' : 'text-amber-400' },
-        { id: 'alerts', label: 'Alerts', icon: Bell }
+        { id: 'incidents', label: 'Incidents', icon: AlertTriangle, badge: systemSummary.openIncidents > 0 ? `${systemSummary.openIncidents}` : undefined, badgeColor: systemSummary.criticalIncidents > 0 ? 'text-rose-400 font-semibold' : 'text-amber-400' }
       ]
     },
     {
@@ -137,8 +132,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       title: 'Resilience',
       items: [
         { id: 'resilience', label: 'PRD / DR Readiness', icon: Cloud, badge: `${systemSummary.drReadinessCount}/${systemSummary.totalApps}` },
-        { id: 'backups', label: 'Backups', icon: Database, badge: `${systemSummary.backupsCurrentCount}/${systemSummary.totalApps}` },
-        { id: 'failover', label: 'Failover Console', icon: RefreshCw }
+        { id: 'backups', label: 'Backups', icon: Database, badge: `${systemSummary.backupsCurrentCount}/${systemSummary.totalApps}` }
       ]
     },
     {
@@ -152,7 +146,6 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       title: 'Operations',
       items: [
         { id: 'deployments', label: 'Deployments', icon: GitBranch },
-        { id: 'changes', label: 'Changes', icon: FileText },
         { id: 'maintenance', label: 'Maintenance', icon: Calendar },
         { id: 'runbooks', label: 'Runbooks', icon: Terminal }
       ]
@@ -160,16 +153,20 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     {
       title: 'Communications',
       items: [
-        { id: 'communications', label: 'Notifications', icon: Bell },
-        { id: 'escalation', label: 'Escalation Policies', icon: Sliders }
+        { id: 'communications', label: 'Notifications', icon: Bell }
       ]
     },
     {
       title: 'Analytics & Compliance',
       items: [
-        { id: 'uptime', label: 'Uptime SLA', icon: Activity },
-        { id: 'reports', label: 'Daily Ops Report', icon: FileText },
+        { id: 'reports', label: 'Reports', icon: FileText },
         { id: 'audit', label: 'Audit Logs', icon: Shield }
+      ]
+    },
+    {
+      title: 'Admin',
+      items: [
+        { id: 'users', label: 'Users', icon: Activity }
       ]
     }
   ];
@@ -402,93 +399,6 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
               </span>
             </button>
 
-            {/* Ops Simulator Dropdown */}
-            <div className="relative">
-              <button
-                onClick={() => setShowSimMenu(!showSimMenu)}
-                className={`flex items-center gap-1 px-2 py-1 text-[11px] font-mono rounded transition-colors border cursor-pointer ${
-                  isDark 
-                    ? 'text-slate-300 bg-[#162033] hover:bg-[#1D2B44] border-[#23334E]' 
-                    : 'text-slate-700 bg-slate-100 hover:bg-slate-200 border-slate-300'
-                }`}
-                title="Interactive Operations Simulator"
-              >
-                <Zap className="w-3 h-3 text-blue-500" />
-                <span className="hidden md:inline font-semibold">SIMULATOR</span>
-              </button>
-
-              {showSimMenu && (
-                <div 
-                  className={`absolute right-0 mt-2 w-72 rounded border p-2 z-50 text-xs space-y-1 shadow-2xl animate-in fade-in ${
-                    isDark ? 'bg-[#0F172A] border-[#23334E] text-slate-100' : 'bg-white border-slate-300 text-slate-900'
-                  }`}
-                  onMouseLeave={() => setShowSimMenu(false)}
-                >
-                  <div className={`px-2 py-1 text-[10px] font-semibold uppercase tracking-wider font-mono border-b ${
-                    isDark ? 'text-slate-400 border-slate-800' : 'text-slate-500 border-slate-200'
-                  }`}>
-                    Live Operational Scenarios
-                  </div>
-                  <button
-                    onClick={() => {
-                      triggerSimulatedScenario('RESOLVE_MOSAIC');
-                      setShowSimMenu(false);
-                    }}
-                    className={`w-full flex items-center gap-2 p-2 rounded text-left font-mono text-[11px] ${
-                      isDark ? 'hover:bg-[#162033] text-emerald-400' : 'hover:bg-emerald-50 text-emerald-700'
-                    }`}
-                  >
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                    <div>
-                      <div className="font-semibold">Verify Recovery &amp; Failback</div>
-                      <div className={`text-[10px] font-sans ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Confirms 3 passes, restores pool &amp; resolves INC-1042</div>
-                    </div>
-                  </button>
-                  <button
-                    onClick={() => {
-                      triggerSimulatedScenario('TRIGGER_MOSAIC_FAIL');
-                      setShowSimMenu(false);
-                    }}
-                    className={`w-full flex items-center gap-2 p-2 rounded text-left font-mono text-[11px] ${
-                      isDark ? 'hover:bg-[#162033] text-rose-400' : 'hover:bg-rose-50 text-rose-700'
-                    }`}
-                  >
-                    <AlertOctagon className="w-3.5 h-3.5 text-rose-500 shrink-0" />
-                    <div>
-                      <div className="font-semibold">Inject MySQL Pool Exhaustion</div>
-                      <div className={`text-[10px] font-sans ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Triggers 3 check failures, INC-1042 &amp; DR failover</div>
-                    </div>
-                  </button>
-                  <button
-                    onClick={() => {
-                      triggerSimulatedScenario('DEADMAN_SILENCE');
-                      setShowSimMenu(false);
-                    }}
-                    className={`w-full flex items-center gap-2 p-2 rounded text-left font-mono text-[11px] ${
-                      isDark ? 'hover:bg-[#162033] text-amber-400' : 'hover:bg-amber-50 text-amber-700'
-                    }`}
-                  >
-                    <Radio className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                    <div>
-                      <div className="font-semibold">Toggle Watchdog Silence</div>
-                      <div className={`text-[10px] font-sans ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Simulates external dead-man timeout</div>
-                    </div>
-                  </button>
-                  <button
-                    onClick={() => {
-                      triggerSimulatedScenario('RESET_ALL');
-                      setShowSimMenu(false);
-                    }}
-                    className={`w-full flex items-center gap-2 p-1.5 rounded text-left text-[11px] font-mono ${
-                      isDark ? 'hover:bg-[#162033] text-slate-400' : 'hover:bg-slate-100 text-slate-600'
-                    }`}
-                  >
-                    <RefreshCw className="w-3 h-3 text-slate-400 shrink-0" />
-                    <div>Reset State to Baseline</div>
-                  </button>
-                </div>
-              )}
-            </div>
 
             {/* Poll Probes */}
             <button
@@ -560,7 +470,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                 CRITICAL [{activeCriticalIncident.id}]
               </span>
               <span className={`text-[11px] font-sans ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
-                Mosaic production health check failed: MySQL connection pool starved. Cloudflare has routed traffic to DR standby.
+                {activeCriticalIncident.title}
               </span>
               <span className={`text-[10px] hidden md:inline ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
                 Opened {activeCriticalIncident.durationMinutes}m ago · Owner: {activeCriticalIncident.owner.split('(')[0]}

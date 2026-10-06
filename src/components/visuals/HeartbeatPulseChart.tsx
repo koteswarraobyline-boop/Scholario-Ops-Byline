@@ -3,7 +3,7 @@ import { useOps } from '../../context/OpsContext';
 import { Activity, ShieldCheck, AlertTriangle, Radio, RefreshCw, Zap, Wifi } from 'lucide-react';
 
 export const HeartbeatPulseChart: React.FC = () => {
-  const { deadMan, triggerSimulatedScenario, runAllProbes, theme } = useOps();
+  const { deadMan, runAllProbes, triggerSimulatedScenario, theme } = useOps();
   const isDark = theme === 'dark';
 
   const [tick, setTick] = useState(0);
