@@ -226,6 +226,8 @@ To restore: `gunzip -c backups/ops-XXXX.sql.gz | psql "$DATABASE_URL"` (into an 
 
 ## 14. Updating and rollback
 
+> **Production uses CI/CD.** After the one-time cutover in [docs/CI-CD.md](docs/CI-CD.md) §14, merges to `main` are deployed automatically as immutable releases with health checks and automatic rollback, and PM2 runs `/var/www/scholario-ops-releases/current`. The in-place steps below then no longer change the live app; use `sudo /usr/local/sbin/scholario-ops-release rollback` instead. They remain valid for a server without CI/CD.
+
 **Update**
 
 ```bash

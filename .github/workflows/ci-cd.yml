@@ -1,0 +1,193 @@
+# Scholario Ops — CI/CD (docs/CI-CD.md)
+#
+#   pull_request → main : test only (lint, build, tests against a throw-away PostgreSQL in the job)
+#   push → main         : test, then deploy-production (release-based, health-checked, auto-rollback)
+#
+# CI never sees production .env, the production database or application secrets.
+# deploy-production only receives the SSH credentials of the restricted deploy user.
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: {}   # manual re-run; deploys only when run on main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: scholario_ci
+          POSTGRES_PASSWORD: ci-throwaway-only
+          POSTGRES_DB: scholario_ops_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U scholario_ci -d scholario_ops_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # Disposable database that exists only inside this job — never production.
+      # The tests create their own throw-away schemas and drop them afterwards.
+      DATABASE_URL: postgresql://scholario_ci:ci-throwaway-only@127.0.0.1:5432/scholario_ops_ci
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (type-check)
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Package release artifact
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$GITHUB_SHA" > REVISION
+          printf 'commit=%s\nrun=%s/%s/actions/runs/%s\nbuilt=%s\n' "$GITHUB_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(date -u +%FT%TZ)" > BUILD_INFO
+          mkdir -p release
+          name="scholario-ops-$GITHUB_SHA.tar.gz"
+          # Exactly what was tested: built dashboard + server bundle + migrations + lockfile + deploy scripts
+          tar -czf "release/$name" --owner=0 --group=0 --numeric-owner \
+            dist dist-server package.json package-lock.json deploy REVISION BUILD_INFO
+          (cd release && sha256sum "$name" > "$name.sha256")
+          if tar -tzvf "release/$name" | awk '{print substr($1,1,1)}' | grep -qv '[-d]'; then
+            echo "::error::artifact contains links"; exit 1
+          fi
+          ls -l release
+
+      - name: Upload release artifact
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ github.sha }}
+          path: release/
+          retention-days: 14
+          if-no-files-found: error
+
+  deploy-production:
+    name: deploy-production
+    needs: test
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment:
+      name: production
+      url: https://scholario-ops.bylinelearning.cloud
+    concurrency:
+      group: scholario-ops-production
+      cancel-in-progress: false
+    steps:
+      - name: Download release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: release-${{ github.sha }}
+          path: release
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.PRODUCTION_SSH_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ secrets.PRODUCTION_HOST }}
+          DEPLOY_USER: ${{ secrets.PRODUCTION_USER }}
+          DEPLOY_PORT: ${{ secrets.PRODUCTION_PORT }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "$SSH_KEY" ]         || missing="$missing PRODUCTION_SSH_KEY"
+          [ -n "$SSH_KNOWN_HOSTS" ] || missing="$missing PRODUCTION_SSH_KNOWN_HOSTS"
+          [ -n "$DEPLOY_HOST" ]     || missing="$missing PRODUCTION_HOST"
+          [ -n "$DEPLOY_USER" ]     || missing="$missing PRODUCTION_USER"
+          if [ -n "$missing" ]; then echo "::error::missing GitHub secrets:$missing"; exit 1; fi
+          install -d -m 700 ~/.ssh
+          install -m 600 /dev/null ~/.ssh/deploy_key
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          install -m 600 /dev/null ~/.ssh/known_hosts
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          install -m 600 /dev/null ~/.ssh/config
+          {
+            printf 'Host production\n'
+            printf '  HostName %s\n' "$DEPLOY_HOST"
+            printf '  Port %s\n' "${DEPLOY_PORT:-22}"
+            printf '  User %s\n' "$DEPLOY_USER"
+            printf '  IdentityFile ~/.ssh/deploy_key\n'
+            printf '  IdentitiesOnly yes\n'
+            printf '  StrictHostKeyChecking yes\n'
+            printf '  BatchMode yes\n'
+            printf '  ConnectTimeout 20\n'
+            printf '  ServerAliveInterval 30\n'
+            printf '  ServerAliveCountMax 6\n'
+          } > ~/.ssh/config
+          ssh production true
+          echo "SSH connection OK"
+
+      - name: Upload artifact to server
+        run: |
+          set -euo pipefail
+          ssh production 'mkdir -p incoming && chmod 700 incoming'
+          scp -q "release/scholario-ops-$GITHUB_SHA.tar.gz" "release/scholario-ops-$GITHUB_SHA.tar.gz.sha256" production:incoming/
+          echo "uploaded scholario-ops-$GITHUB_SHA.tar.gz"
+
+      - name: Check installed release manager
+        run: |
+          set -euo pipefail
+          repo_sum="$(tar -xzOf "release/scholario-ops-$GITHUB_SHA.tar.gz" deploy/release.sh | sha256sum | awk '{print $1}')"
+          server_sum="$(ssh production 'sha256sum /usr/local/sbin/scholario-ops-release' | awk '{print $1}')"
+          if [ "$repo_sum" != "$server_sum" ]; then
+            echo "::warning::/usr/local/sbin/scholario-ops-release on the server differs from deploy/release.sh in this commit. An administrator should reinstall it (docs/CI-CD.md → Updating the release manager). Deploying with the installed version."
+          else
+            echo "release manager matches deploy/release.sh"
+          fi
+
+      - name: Deploy (switch, health checks, automatic rollback)
+        id: deploy
+        run: |
+          set -uo pipefail
+          code=0
+          # shellcheck disable=SC2029 # GITHUB_SHA is meant to expand here
+          ssh production "sudo -n /usr/local/sbin/scholario-ops-release deploy $GITHUB_SHA" || code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          case "$code" in
+            0) msg="✅ Deployed \`$GITHUB_SHA\` — local liveness/readiness and public liveness healthy." ;;
+            1) msg="❌ Deployment of \`$GITHUB_SHA\` failed. Rolled back to the previous release, which is healthy. See the log above (database migrations, if any, were NOT rolled back)." ;;
+            2) msg="🚨 Deployment of \`$GITHUB_SHA\` failed AND the rollback failed health checks. Production needs manual attention (docs/CI-CD.md → Emergency manual rollback)." ;;
+            *) msg="❌ Deployment of \`$GITHUB_SHA\` did not complete (exit $code). Check the log and \`scholario-ops-release status\` on the server." ;;
+          esac
+          printf '### Production deployment\n\n%s\n' "$msg" >> "$GITHUB_STEP_SUMMARY"
+          [ "$code" = 0 ] || { echo "::error::$msg"; exit "$code"; }
+
+      - name: Clean up
+        if: always()
+        run: |
+          # shellcheck disable=SC2029 # GITHUB_SHA is meant to expand here
+          ssh production "rm -f incoming/scholario-ops-$GITHUB_SHA.tar.gz incoming/scholario-ops-$GITHUB_SHA.tar.gz.sha256; find incoming -name 'scholario-ops-*' -mtime +7 -delete" 2>/dev/null || true
+          rm -f ~/.ssh/deploy_key ~/.ssh/config ~/.ssh/known_hosts
