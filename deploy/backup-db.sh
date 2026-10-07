@@ -8,7 +8,9 @@
 # Restore:  gunzip -c backups/ops-XXXX.sql.gz | psql "$DATABASE_URL"
 set -euo pipefail
 
-APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# APP_DIR (the directory holding .env and backups/) defaults to the checkout this script is in;
+# the release manager (deploy/release.sh) sets it to /var/www/scholario-ops.
+APP_DIR="${APP_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 ENV_FILE="$APP_DIR/.env"
 [ -f "$ENV_FILE" ] || { echo "No .env in $APP_DIR" >&2; exit 1; }
 
