@@ -101,47 +101,82 @@ test('status is never conveyed by colour alone: badges carry an icon and a word'
   assert.match(html, /<svg[^>]*aria-hidden="true"[^>]*>[\s\S]*?<\/svg><span>(Healthy|Warning|Critical|Unknown|FAILED|\d+|Connected)<\/span>/);
 });
 
-// ── Dead-man heartbeat panel ─────────────────────────────────────────────────
+// ── Dead-man heartbeat panel (monitored infrastructure) ─────────────────────
 import { DeadManPanel } from '../src/components/visuals/HeartbeatPulseChart.tsx';
-import type { DeadManControlPlane } from '../src/types/index.ts';
+import type { DeadManControlPlane, HeartbeatCheck, HeartbeatGroup, ServerHeartbeat } from '../src/types/index.ts';
 
 const NOW = Date.parse('2026-10-08T10:00:00Z');
-const dm = (over: Partial<DeadManControlPlane>): DeadManControlPlane => ({
-  id: 'deadman-outbound', name: 'External Dead-Man Heartbeat', nodeLocation: 'hc-ping.com', targetControlPlane: 'hc-ping.com', lastHeartbeatReceivedAt: '',
-  intervalSec: 60, toleranceSec: 180, status: 'HEALTHY', consecutiveMisses: 0, configured: true, configError: null, workerRunning: true,
-  lastAttemptAt: null, lastSuccessAt: null, lastHttpStatus: null, lastLatencyMs: null, lastError: null, consecutiveFailures: 0, ...over,
+const ago = (s: number) => new Date(NOW - s * 1000).toISOString();
+const hc = (over: Partial<HeartbeatCheck> & Pick<HeartbeatCheck, 'kind' | 'key' | 'name'>): HeartbeatCheck => ({
+  state: 'HEALTHY', detail: 'ok', target: null, lastCheckAt: ago(5), lastSuccessAt: ago(5), latencyMs: null, failures: 0, httpStatus: null, restartCount: null, intervalSec: 10, toleranceSec: 60, ...over,
+});
+const grp = (checks: HeartbeatCheck[]): HeartbeatGroup => ({ state: checks.some(c => c.state === 'FAILING') ? 'FAILING' : checks.some(c => c.state !== 'HEALTHY') ? 'DEGRADED' : 'HEALTHY', total: checks.length, healthy: checks.filter(c => c.state === 'HEALTHY').length, checks });
+const srvHb = (env: 'PRD' | 'DR', over: Partial<ServerHeartbeat> = {}): ServerHeartbeat => ({
+  serverId: env, hostname: `${env.toLowerCase()}-vps.example.com`, ip: env === 'PRD' ? '93.127.167.135' : '187.126.113.32', environment: env, state: 'HEALTHY',
+  server: hc({ kind: 'SERVER', key: 'server', name: 'Server heartbeat', detail: 'Agent v3.3.0 CONNECTED', latencyMs: 15, target: '93.127.167.135' }),
+  applications: grp([hc({ kind: 'APPLICATION', key: 'app:a:4100', name: 'ICT', target: '127.0.0.1:4100/health', latencyMs: 4, httpStatus: 200, detail: 'HTTP 200' })]),
+  services: grp([hc({ kind: 'SERVICE', key: 'service:nginx', name: 'nginx', detail: 'running', target: 'systemd' })]),
+  databases: grp([hc({ kind: 'DATABASE', key: 'db:mysql:ict', name: 'mysql ict', latencyMs: 3, detail: '8.0.36', target: 'mysql' })]),
+  ...over,
+});
+const hb = (servers: ServerHeartbeat[], status: DeadManControlPlane['status']): DeadManControlPlane => ({
+  id: 'deadman-infrastructure', name: 'Dead-Man Watchdog Heartbeat Stream', status, evaluatedAt: ago(0), telemetryIntervalSec: 10, staleAfterSec: 60, disconnectedAfterSec: 600,
+  servers, counts: { total: servers.length * 4, healthy: servers.length * 4, degraded: 0, failing: 0, unknown: 0 },
 });
 // Text nodes are joined (React SSR separates them with <!-- -->); SVG namespace URLs are not data
-const renderDm = (d: DeadManControlPlane, isDark = true) => renderToString(React.createElement(DeadManPanel, { deadMan: d, isDark, now: NOW })).replace(/<!-- -->/g, "").replace(/ xmlns="[^"]*"/g, "");
+const renderDm = (d: DeadManControlPlane, isDark = true) => renderToString(React.createElement(DeadManPanel, { deadMan: d, isDark, now: NOW })).replace(/<!-- -->/g, '').replace(/ xmlns="[^"]*"/g, '');
 
-test('dead-man panel: healthy shows real ping age, latency, failures; never a URL', () => {
-  const html = renderDm(dm({ status: 'HEALTHY', lastAttemptAt: '2026-10-08T09:59:55Z', lastSuccessAt: '2026-10-08T09:59:48Z', lastHeartbeatReceivedAt: '2026-10-08T09:59:48Z', lastHttpStatus: 200, lastLatencyMs: 84 }));
-  assert.match(html, /HEALTHY/);
-  assert.match(html, /12s ago/);
-  assert.match(html, /84 ms/);
-  assert.match(html, /HTTP 200/);
-  assert.match(html, /Running/);
-  assert.match(html, /Configured/);
-  assert.equal(/https?:\/\//.test(html), false, 'no URL in the panel');
+test('heartbeat stream: synchronized PRD + DR with server / application / service / database rows; UI rate separate from probe rates; no URL', () => {
+  const html = renderDm(hb([srvHb('PRD'), srvHb('DR')], 'HEALTHY'));
+  assert.match(html, /Dead-Man Watchdog Heartbeat Stream/);
+  assert.match(html, /SYNCHRONIZED/);
+  assert.match(html, /PRD VPS/);
+  assert.match(html, /DR VPS/);
+  for (const row of ['Server heartbeat', 'Application checks', 'Services', 'Database']) assert.match(html, new RegExp(row));
+  assert.match(html, /Scholario Ops is the monitoring control plane/);
+  assert.match(html, /UI stream: 1 Hz refresh \(animation only\)/);
+  assert.match(html, /agent reports every 10s/);
+  assert.match(html, /every 30s/, 'applications / services / databases cadence');
+  assert.match(html, /last report 5s ago/);
+  assert.match(html, /delivery 15 ms/);
+  assert.match(html, /127\.0\.0\.1:4100\/health/);
+  assert.equal(/https?:\/\//.test(html), false, 'no URL (no external watchdog)');
+  assert.equal(/DEADMAN_HEARTBEAT_URL/.test(html), false);
 });
 
-test('dead-man panel: degraded / failing / pending / not configured / missing data', () => {
-  const degraded = renderDm(dm({ status: 'DEGRADED', lastAttemptAt: '2026-10-08T09:59:58Z', lastSuccessAt: '2026-10-08T09:58:00Z', lastHttpStatus: 503, lastLatencyMs: 40, consecutiveFailures: 2, lastError: 'HTTP 503' }));
+test('heartbeat stream: degraded / failing / unknown / no servers / missing data', () => {
+  const failingApp = hc({ kind: 'APPLICATION', key: 'app:a:4100', name: 'ICT', state: 'FAILING', failures: 3, lastSuccessAt: ago(300), latencyMs: null, httpStatus: null, detail: 'Health check failing: port not listening', target: '127.0.0.1:4100/health' });
+  const failing = renderDm(hb([srvHb('PRD', { state: 'FAILING', applications: grp([failingApp]) }), srvHb('DR')], 'FAILING'), false);
+  assert.match(failing, /HEARTBEAT FAILING/);
+  assert.match(failing, /0\/1 healthy/);
+  assert.match(failing, /3 fail/);
+  assert.match(failing, /last OK 5m 0s ago/);
+  const staleServer = srvHb('DR', { state: 'DEGRADED', server: hc({ kind: 'SERVER', key: 'server', name: 'Server heartbeat', state: 'DEGRADED', lastCheckAt: ago(90), lastSuccessAt: ago(90), detail: 'Agent v3.3.0 STALE · 8 report(s) missed', failures: 8 }) });
+  const degraded = renderDm(hb([srvHb('PRD'), staleServer], 'DEGRADED'));
   assert.match(degraded, /DEGRADED/);
-  assert.match(degraded, /Last error: HTTP 503/);
-  assert.match(degraded, /60s of tolerance left/);
-  const failing = renderDm(dm({ status: 'FAILING', lastAttemptAt: '2026-10-08T09:59:58Z', consecutiveFailures: 5, lastError: 'fetch failed (ECONNREFUSED)' }), false);
-  assert.match(failing, /FAILING/);
-  assert.match(failing, /None yet/);
-  assert.match(failing, /—/, 'latency not measured → dash, not 0');
-  assert.equal(/>0 ms</.test(failing), false);
-  const pending = renderDm(dm({ status: 'PENDING' }));
-  assert.match(pending, /STARTING/);
-  assert.match(pending, /Not reported/);
-  const off = renderDm(dm({ status: 'NOT_CONFIGURED', configured: false, workerRunning: false, nodeLocation: 'Not configured', targetControlPlane: '' }));
-  assert.match(off, /NOT CONFIGURED/);
-  assert.match(off, /Set <code[^>]*>DEADMAN_HEARTBEAT_URL<\/code> on the Scholario Ops/);
-  assert.match(off, /external watchdog is responsible for alerting if heartbeats stop/);
-  const bad = renderDm(dm({ status: 'NOT_CONFIGURED', configured: false, configError: 'DEADMAN_HEARTBEAT_URL must be an http:// or https:// URL' }));
-  assert.match(bad, /must be an http/);
+  assert.match(degraded, /8 missed/);
+  const never = srvHb('PRD', { state: 'UNKNOWN', server: hc({ kind: 'SERVER', key: 'server', name: 'Server heartbeat', state: 'UNKNOWN', lastCheckAt: null, lastSuccessAt: null, latencyMs: null, failures: null, intervalSec: null, detail: 'Agent has never reported — install it from Setup' }),
+    applications: grp([]), services: grp([]), databases: grp([]) });
+  const unknown = renderDm({ ...hb([never], 'UNKNOWN'), telemetryIntervalSec: null });
+  assert.match(unknown, /AWAITING TELEMETRY/);
+  assert.match(unknown, /Agent has never reported/);
+  assert.match(unknown, /No watched services/);
+  assert.match(unknown, /No database probe/);
+  assert.match(unknown, /agent reports every —/, 'unknown interval is a dash, not 0');
+  assert.equal(/ 0 ms/.test(unknown), false);
+  const none = renderDm(hb([], 'NOT_CONFIGURED'));
+  assert.match(none, /NO SERVERS REGISTERED/);
+  assert.match(none, /add the PRD and DR VPS in Setup/);
+});
+
+test('an older backend payload (external-watchdog shape) or garbage never crashes the heartbeat UI', async () => {
+  const { normalizeDeadMan } = await import('../src/context/OpsContext.tsx');
+  const old = { id: 'deadman-outbound', name: 'External Dead-Man Heartbeat', nodeLocation: 'Not configured', targetControlPlane: '', lastHeartbeatReceivedAt: '',
+    intervalSec: 60, toleranceSec: 180, status: 'NOT_CONFIGURED', consecutiveMisses: 0, configured: false, workerRunning: false };
+  for (const raw of [old, { ...old, status: 'PENDING' }, null, undefined, 'x', { servers: 'nope' }, { servers: [{ hostname: 'half' }] }]) {
+    const d = normalizeDeadMan(raw);
+    assert.ok(Array.isArray(d.servers) && d.servers.length === 0);
+    assert.ok(['NOT_CONFIGURED', 'UNKNOWN'].includes(d.status), d.status);
+    assert.ok(renderDm(d).includes('Dead-Man Watchdog Heartbeat Stream'));
+  }
 });

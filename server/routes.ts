@@ -17,7 +17,7 @@ import {
 } from './validate.ts';
 import {
   HTTP_TYPES, TCP_TYPES, INFRA_TYPES, PUSH_TYPES, runMonitorNow, registerNewMonitor, recomputeDerived,
-  ingestAgentReport, publicServer, performFailover, FailoverError, deadMan, nextIncidentId, AgentReport, closeMonitorIncident,
+  ingestAgentReport, publicServer, performFailover, FailoverError, nextIncidentId, AgentReport, closeMonitorIncident,
 } from './engine.ts';
 import { httpProbe, tcpProbe, dnsProbe, sslProbe, parseHostPort, normalizeUrl } from './probes.ts';
 import { sendToChannel, notifyIncident } from './notify.ts';
@@ -26,6 +26,7 @@ import { hostingerState, syncHostinger } from './hostinger.ts';
 import { buildInstaller, buildUninstaller, AGENT_VERSION } from './agent.ts';
 import { appChecksFor, LIST_KEYS, NULLABLE_LIST_KEYS, NULLABLE_OBJECT_KEYS } from './telemetry.ts';
 import { agentHealth, serverHealth } from './telemetryHealth.ts';
+import { infraHeartbeat } from './heartbeat.ts';
 import { lbState, syncLoadBalancers, PERMISSION_HINT } from './loadbalancer.ts';
 import { syncAppUrlMonitors, DEFAULT_HEALTH_CHECK } from './appMonitors.ts';
 import { readiness, failoverPreflight, applicationAvailability } from './readiness.ts';
@@ -88,8 +89,6 @@ function integrationStatus(req: Request): IntegrationStatus {
     notifications: notificationStatus(),
     loadBalancing: { configured: isCloudflareConfigured(), status: lbState.status, lastSyncAt: lbState.lastSyncAt, lastError: lbState.lastError, poolCount: lbState.pools.filter(p => p.found).length },
     smtp: { configured: isSmtpConfigured() },
-    // Never the URL itself — only whether it is set and the timing
-    deadMan: { configured: deadMan.configured, configError: deadMan.configError, intervalSec: deadMan.intervalSec, toleranceSec: deadMan.toleranceSec },
     publicUrl: publicBaseUrl(req),
   };
 }
@@ -109,6 +108,7 @@ function summary() {
   const criticalApps = db.applications.filter(a => a.status === 'CRITICAL').length;
   const unknownApps = db.applications.filter(a => a.status === 'UNKNOWN' || a.status === 'STALE').length;
   // Data sources that are not reporting: health below is based on partial information
+  const heartbeat = infraHeartbeat();
   const visibilityGaps: string[] = [];
   const silent = db.servers.filter(x => x.agentStatus !== 'CONNECTED');
   if (silent.length) visibilityGaps.push(`VPS telemetry missing for ${silent.map(x => x.ip).join(', ')}`);
@@ -125,9 +125,10 @@ function summary() {
     drReadinessCount: drReady,
     backupsCurrentCount: backupsCurrent,
     cloudflareStatus,
-    deadManStatus: deadMan.status,
-    deadManLastHeartbeat: deadMan.lastHeartbeatReceivedAt || null,
-    overallHealth: critical.length > 0 || criticalApps > 0 || deadMan.status === 'FAILING' ? 'CRITICAL'
+    // Dead-man heartbeat of the monitored infrastructure; "last heartbeat" = the most recent agent report
+    deadManStatus: heartbeat.status,
+    deadManLastHeartbeat: db.servers.map(x => x.lastSeen).filter(Boolean).sort().at(-1) ?? null,
+    overallHealth: critical.length > 0 || criticalApps > 0 || heartbeat.status === 'FAILING' ? 'CRITICAL'
       : open.length > 0 || unhealthyApps > 0 ? 'WARNING'
         : db.applications.length === 0 || unknownApps > 0 ? 'UNKNOWN' : 'OPERATIONAL',
     visibilityGaps,
@@ -454,7 +455,7 @@ export function buildRouter(): Router {
       checks: {
         api_gateway: 'UP',
         edge_ingress: 'UP',
-        deadman_watchdog: deadMan.status,
+        deadman_watchdog: infraHeartbeat().status,
         cloudflare_sync: !isCloudflareConfigured() ? 'NOT_CONFIGURED' : cfState.lastError ? 'ERROR' : s.cloudflareStatus,
         cloudflare_load_balancing: lbState.status,
         vps_telemetry_stream: `${db.servers.filter(x => x.agentStatus === 'CONNECTED').length}/${db.servers.length} agents connected`,
@@ -706,7 +707,7 @@ export function buildRouter(): Router {
       auditLogs: db.auditLogs.slice(0, 200),
       cloudflareZones: cfState.zones,
       loadBalancer: lbState,
-      deadMan,
+      deadMan: infraHeartbeat(),
       integrations: integrationStatus(req),
       summary: summary(),
     });
@@ -714,7 +715,9 @@ export function buildRouter(): Router {
 
   r.get('/v1/integrations', (req, res) => { ok(res, integrationStatus(req)); });
   r.get('/v1/system/summary', (_req, res) => { ok(res, summary()); });
-  r.get('/v1/deadman/status', (_req, res) => { ok(res, deadMan); });
+  // Heartbeat of the monitored servers / applications / services / databases (same data under both names)
+  r.get('/v1/deadman/status', (_req, res) => { ok(res, infraHeartbeat()); });
+  r.get('/v1/health/heartbeats', (_req, res) => { ok(res, infraHeartbeat()); });
 
   // ── Servers ────────────────────────────────────────────────────────────────
   r.get('/v1/servers', (_req, res) => { ok(res, db.servers.map(publicServer)); });
@@ -1587,7 +1590,7 @@ export function buildRouter(): Router {
         const rtt = o?.health.map(x => x.rttMs).filter(x => x !== null) ?? [];
         return `  pool ${(p.name || p.id).padEnd(20)} ${p.role.padEnd(3)} enabled=${p.enabled ?? '?'} healthy=${p.healthy ?? '?'} origin ${o?.address ?? '—'} ${rtt.length ? `rtt ${rtt.join('/')}ms` : 'rtt n/a'}`;
       }),
-      `Dead-man switch:  ${deadMan.status}`,
+      `Dead-man heartbeat (monitored infrastructure): ${infraHeartbeat().status}`,
       '',
       'APPLICATION UPTIME (24h / 7d / 30d)',
       ...db.applications.map(a => `  ${a.name.padEnd(28)} ${fmt(a.uptime24h)} / ${fmt(a.uptime7d)} / ${fmt(a.uptime30d)}  [${a.failoverState}]`),

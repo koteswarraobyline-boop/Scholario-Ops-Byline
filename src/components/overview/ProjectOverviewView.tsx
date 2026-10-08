@@ -113,12 +113,12 @@ export const ProjectOverviewView: React.FC = () => {
   const autoFailoverApps = applications.filter(a => a.autoFailover).length;
   const dnsLinkedApps = applications.filter(a => a.dnsRecordName).length;
   const cfConfigured = Boolean(integrations?.cloudflare.configured);
-  const deadManConfigured = deadMan.configured;
+  const deadManConfigured = deadMan.servers.length > 0;
   const thresholds = [...new Set(monitors.map(m => m.failureConfirmationThreshold))];
 
   const deadManLabel = !deadManConfigured
-    ? 'Dead-man: not configured'
-    : deadMan.status === 'HEALTHY' ? `Dead-man: OK (${deadMan.intervalSec}s ping)` : deadMan.status === 'PENDING' ? 'Dead-man: starting' : `Dead-man: ${deadMan.status} (${deadMan.consecutiveFailures} failed)`;
+    ? 'Dead-man: no servers'
+    : deadMan.status === 'HEALTHY' ? `Dead-man: OK (${deadMan.servers.length} server(s))` : `Dead-man: ${deadMan.status} (${deadMan.counts.failing} failing, ${deadMan.counts.degraded} degraded)`;
 
   const card = `p-4 rounded-lg border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`;
   const tile = `p-3 rounded border text-center ${isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'}`;
@@ -405,11 +405,11 @@ export const ProjectOverviewView: React.FC = () => {
                 Dead-Man Heartbeat
               </h3>
               <p className={bodyText}>
-                The control plane pings an external heartbeat service on a fixed interval. If the control plane itself
-                goes down, that external service stops receiving pings and alerts independently.{' '}
+                The heartbeat of the monitored infrastructure: every PRD / DR server's telemetry agent, plus the application
+                checks, watched services and database probes it reports. Late or failing heartbeats open incidents.{' '}
                 {deadManConfigured
-                  ? `Watchdog: ${deadMan.nodeLocation}, every ${deadMan.intervalSec}s, tolerance ${deadMan.toleranceSec}s. Current status: ${deadMan.status}.`
-                  : 'Not configured — set DEADMAN_HEARTBEAT_URL on the Scholario Ops server and restart the backend.'}
+                  ? `${deadMan.servers.length} server(s), ${deadMan.counts.total} check(s). Current status: ${deadMan.status}.`
+                  : 'No servers registered yet.'}
               </p>
             </div>
 
@@ -537,8 +537,8 @@ export const ProjectOverviewView: React.FC = () => {
           <div className={`${card} space-y-2`}>
             <div className="text-xs font-bold text-amber-500 uppercase">2. Independent Watchdog</div>
             <p className={bodyText}>
-              The dead-man heartbeat is checked by an external service, so a complete outage of the control plane is
-              still detected. {deadManConfigured ? 'It is configured.' : 'It is not configured yet.'}
+              The dead-man heartbeat watches the monitored servers: an agent that stops reporting turns STALE, then
+              DISCONNECTED, and raises an incident. {deadManConfigured ? `${deadMan.servers.length} server(s) are covered.` : 'No servers are registered yet.'}
             </p>
           </div>
           <div className={`${card} space-y-2`}>

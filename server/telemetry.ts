@@ -167,6 +167,7 @@ function parseAppChecks(raw: Obj[], previous: ApplicationHealthTelemetry[] | und
       statusCode: optInt(c.statusCode, 100, 599), latencyMs: optNum(c.latencyMs, 0, 600_000), error: optStr(c.error, 300),
       checkedAt: optIso(c.checkedAt) ?? now,
       consecutiveFailures: status === 'DOWN' ? (prev?.status === 'DOWN' ? prev.consecutiveFailures + 1 : 1) : 0,
+      lastSuccessAt: status === 'HEALTHY' ? (optIso(c.checkedAt) ?? now) : (prev?.lastSuccessAt ?? null),
     }];
   });
 }
