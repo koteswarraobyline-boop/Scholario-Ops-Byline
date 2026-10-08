@@ -88,7 +88,8 @@ function integrationStatus(req: Request): IntegrationStatus {
     notifications: notificationStatus(),
     loadBalancing: { configured: isCloudflareConfigured(), status: lbState.status, lastSyncAt: lbState.lastSyncAt, lastError: lbState.lastError, poolCount: lbState.pools.filter(p => p.found).length },
     smtp: { configured: isSmtpConfigured() },
-    deadMan: { configured: Boolean(config.deadManHeartbeatUrl) },
+    // Never the URL itself — only whether it is set and the timing
+    deadMan: { configured: deadMan.configured, configError: deadMan.configError, intervalSec: deadMan.intervalSec, toleranceSec: deadMan.toleranceSec },
     publicUrl: publicBaseUrl(req),
   };
 }
@@ -126,7 +127,7 @@ function summary() {
     cloudflareStatus,
     deadManStatus: deadMan.status,
     deadManLastHeartbeat: deadMan.lastHeartbeatReceivedAt || null,
-    overallHealth: critical.length > 0 || criticalApps > 0 || deadMan.status === 'CRITICAL_SILENCE' ? 'CRITICAL'
+    overallHealth: critical.length > 0 || criticalApps > 0 || deadMan.status === 'FAILING' ? 'CRITICAL'
       : open.length > 0 || unhealthyApps > 0 ? 'WARNING'
         : db.applications.length === 0 || unknownApps > 0 ? 'UNKNOWN' : 'OPERATIONAL',
     visibilityGaps,

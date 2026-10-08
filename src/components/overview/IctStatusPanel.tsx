@@ -80,20 +80,20 @@ const AppPanel: React.FC<{ app: Application }> = ({ app }) => {
     const live = srv?.agentStatus === 'CONNECTED';
     const t = srv?.telemetry;
     return (
-      <div className={`p-3 rounded-lg border space-y-2 text-[11px] font-mono ${isDark ? 'bg-[#0B0F17] border-[#1A2436]' : 'bg-slate-50 border-slate-200'}`}>
-        <div className="flex items-start justify-between gap-2">
-          <div>
+      <div className={`p-3 rounded-lg border space-y-2 text-[11px] font-mono min-w-0 ${isDark ? 'bg-[#0B0F17] border-[#1A2436]' : 'bg-slate-50 border-slate-200'}`}>
+        <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
+          <div className="min-w-0 break-words">
             <div className="text-xs font-bold">{label}</div>
             <div className={muted}>{srv ? srv.ip : 'No server linked'}{srv?.provider ? ` · ${srv.provider}` : ''}{srv?.region ? ` · ${srv.region}` : ''}</div>
             <div className={muted}>{plan ? `${plan.name} · ${plan.cpuCores} Core · ${plan.ramGb} GB RAM · ${plan.diskGb} GB disk` : 'Plan not available'}</div>
           </div>
-          <div className="text-right">
+          <div className="text-right min-w-0 max-w-full sm:max-w-[16rem]">
             <div className={`text-sm font-bold ${verdictColor(verdict.status)}`}>{verdict.status}</div>
-            <div className={`text-[10px] max-w-[220px] ${muted}`}>{verdict.why}</div>
+            <div className={`text-[10px] break-words ${muted}`}>{verdict.why}</div>
           </div>
         </div>
 
-        <div className={`grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2 border-t ${isDark ? 'border-[#1A2332]' : 'border-slate-200'}`}>
+        <div className={`grid grid-cols-[repeat(auto-fit,minmax(11rem,1fr))] gap-x-3 gap-y-2 pt-2 border-t [&>*]:min-w-0 [&>*]:break-words ${isDark ? 'border-[#1A2332]' : 'border-slate-200'}`}>
           <div>
             <div className={muted}>Application (HTTPS)</div>
             {http?.lastCheck ? (
@@ -137,7 +137,7 @@ const AppPanel: React.FC<{ app: Application }> = ({ app }) => {
 
         <EnvStatusLines label={label.startsWith('Production') ? 'PRD' : 'DR'} srv={srv} http={http} db={dbRows?.find(r => r.environment === (label.startsWith('Production') ? 'PRD' : 'DR'))} ready={ready} isDark={isDark} />
 
-        <div className={`grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2 border-t text-[10px] ${isDark ? 'border-[#1A2332]' : 'border-slate-200'} ${muted}`}>
+        <div className={`grid grid-cols-[repeat(auto-fit,minmax(14rem,1fr))] gap-2 pt-2 border-t text-[10px] [&>*]:min-w-0 [&>*]:break-words ${isDark ? 'border-[#1A2332]' : 'border-slate-200'} ${muted}`}>
           <div>
             Application availability (24h, observed):{' '}
             {availErr ? <span className="text-rose-500">Check failed</span>
@@ -156,7 +156,7 @@ const AppPanel: React.FC<{ app: Application }> = ({ app }) => {
   };
 
   return (
-    <div className={`rounded-xl border p-4 space-y-3 ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
+    <div className={`rounded-xl border p-4 space-y-3 min-w-0 ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 className="text-xs font-bold font-mono uppercase tracking-wider">{app.name} application — live</h2>
@@ -167,7 +167,7 @@ const AppPanel: React.FC<{ app: Application }> = ({ app }) => {
           <div className={`text-sm font-bold font-mono ${prd.verdict.status === 'HEALTHY' && dr.verdict.status === 'HEALTHY' ? 'text-emerald-500' : prd.verdict.status === 'CRITICAL' ? 'text-rose-500' : 'text-amber-500'}`}>{answer}</div>
         </div>
       </div>
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 [&>*]:min-w-0">
         {card('Production / Primary', prd)}
         {card('Disaster Recovery / Standby', dr)}
       </div>
@@ -196,13 +196,18 @@ const EnvStatusLines: React.FC<{ label: Env; srv: VpsServer | undefined; http: M
     : prdChecks.some(c => c.status === 'FAIL') ? `FAIL (${prdChecks.filter(c => c.status === 'PASS').length}/${prdChecks.length} checks)`
       : `${prdChecks.every(c => c.status === 'PASS') ? 'PASS' : 'PARTIAL'} (${prdChecks.filter(c => c.status === 'PASS').length}/${prdChecks.length} checks)`;
   const readyCls = verdictColor(!ready ? 'UNKNOWN' : label === 'DR' ? ready.overall : prdChecks.some(c => c.status === 'FAIL') ? 'FAIL' : prdChecks.every(c => c.status === 'PASS') ? 'PASS' : 'WARNING');
+  // Label above value: cells never share a line, so a long value can only wrap inside its own cell
   const row = (k: string, v: React.ReactNode, cls: string, sub?: React.ReactNode) => (
-    <div className="flex gap-2"><span className={`w-20 shrink-0 ${muted}`}>{k}</span><span className={`font-semibold ${cls}`}>{v}</span>{sub && <span className={muted}>{sub}</span>}</div>
+    <div className="min-w-0">
+      <div className={`text-[10px] uppercase tracking-wider ${muted}`}>{k}</div>
+      <div className={`font-semibold break-words ${cls}`}>{v}</div>
+      {sub && <div className={`text-[10px] break-words ${muted}`}>{sub}</div>}
+    </div>
   );
   return (
-    <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-x-3 gap-y-1 pt-2 border-t text-[11px] ${isDark ? 'border-[#1A2332]' : 'border-slate-200'}`}>
+    <div className={`grid grid-cols-[repeat(auto-fit,minmax(7.5rem,1fr))] gap-x-3 gap-y-2 pt-2 border-t text-[11px] ${isDark ? 'border-[#1A2332]' : 'border-slate-200'}`}>
       {row('Agent', agent, agentCls)}
-      {row('App', appStatus, verdictColor(appStatus), local ? <>· local {local.status}{local.latencyMs != null ? ` ${local.latencyMs} ms` : ''}</> : undefined)}
+      {row('App', appStatus, verdictColor(appStatus), local ? <>local {local.status}{local.latencyMs != null ? ` · ${local.latencyMs} ms` : ''}</> : undefined)}
       {row('DB', db ? db.status.replace('_', ' ') : 'UNKNOWN', verdictColor(db?.status ?? 'UNKNOWN'))}
       {row('Services', svcText, svcCls)}
       {row('Readiness', readyText, readyCls)}

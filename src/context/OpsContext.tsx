@@ -159,6 +159,15 @@ const EMPTY_DEADMAN: DeadManControlPlane = {
   toleranceSec: 180,
   status: 'NOT_CONFIGURED',
   consecutiveMisses: 0,
+  configured: false,
+  configError: null,
+  workerRunning: false,
+  lastAttemptAt: null,
+  lastSuccessAt: null,
+  lastHttpStatus: null,
+  lastLatencyMs: null,
+  lastError: null,
+  consecutiveFailures: 0,
 };
 
 const upsert = <T extends { id: string }>(list: T[], item: T, prepend = true): T[] =>

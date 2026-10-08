@@ -299,5 +299,15 @@ export const INITIAL_DEAD_MAN: DeadManControlPlane = {
   intervalSec: 15,
   toleranceSec: 45,
   status: 'HEALTHY',
-  consecutiveMisses: 0
+  consecutiveMisses: 0,
+  // MOCK DATA (not imported anywhere; never shown as real telemetry)
+  configured: true,
+  configError: null,
+  workerRunning: false,
+  lastAttemptAt: null,
+  lastSuccessAt: null,
+  lastHttpStatus: null,
+  lastLatencyMs: null,
+  lastError: null,
+  consecutiveFailures: 0,
 };

@@ -13,6 +13,7 @@ import { notifyIncident, notifyAll } from './notify.ts';
 import { switchDnsRecord } from './cloudflare.ts';
 import { log } from './logger.ts';
 import { applyExtendedReport, ExtendedAgentReport } from './telemetry.ts';
+import { DeadManHeartbeat } from './deadman.ts';
 import { agentHealth, serverHealth } from './telemetryHealth.ts';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -940,46 +941,34 @@ async function evaluateAutoFailover(m: Monitor) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Dead-man switch: this server pings an EXTERNAL heartbeat service. If this
+// Dead-man switch: this server pings an EXTERNAL heartbeat service (server/deadman.ts). If this
 // server dies, the external service stops receiving pings and alerts you.
 // ─────────────────────────────────────────────────────────────────────────────
-export const deadMan: DeadManControlPlane = {
-  id: 'deadman-outbound',
-  name: 'External Dead-Man Heartbeat',
-  nodeLocation: config.deadManHeartbeatUrl ? new URL(config.deadManHeartbeatUrl).host : 'Not configured',
-  targetControlPlane: config.deadManHeartbeatUrl ? new URL(config.deadManHeartbeatUrl).origin : '',
-  lastHeartbeatReceivedAt: '',
+const deadManWorker = new DeadManHeartbeat({
+  url: config.deadManHeartbeatUrl,
   intervalSec: config.deadManIntervalSec,
   toleranceSec: config.deadManToleranceSec,
-  status: config.deadManHeartbeatUrl ? 'HEALTHY' : 'NOT_CONFIGURED',
-  consecutiveMisses: 0,
-};
-
-async function sendDeadManHeartbeat() {
-  if (!config.deadManHeartbeatUrl) return;
-  const prevStatus = deadMan.status;
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
-    const resp = await fetch(config.deadManHeartbeatUrl, { signal: controller.signal });
-    clearTimeout(timer);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    deadMan.lastHeartbeatReceivedAt = new Date().toISOString();
-    deadMan.consecutiveMisses = 0;
-    deadMan.status = 'HEALTHY';
-  } catch (err) {
-    deadMan.consecutiveMisses += 1;
-    if (deadMan.consecutiveMisses * deadMan.intervalSec >= deadMan.toleranceSec) deadMan.status = 'CRITICAL_SILENCE';
-    log.error('deadman', `heartbeat failed: ${(err as Error).message}`);
-  }
-  if (prevStatus !== deadMan.status) {
-    audit('Dead-Man Switch', `DEADMAN_${deadMan.status}`, 'MONITOR', deadMan.id, `Outbound heartbeat is now ${deadMan.status}`);
-  }
-  broadcast('deadman_update', deadMan);
-}
+  onChange: (state, previous) => {
+    if (previous !== state.status && state.status !== 'PENDING') {
+      audit('Dead-Man Switch', `DEADMAN_${state.status}`, 'MONITOR', state.id, `Outbound heartbeat is now ${state.status}${state.lastError ? ` (${state.lastError})` : ''}`);
+    }
+    broadcast('deadman_update', state);
+  },
+});
+/** Live dead-man state (same object for the whole process; never contains the heartbeat URL) */
+export const deadMan: DeadManControlPlane = deadManWorker.state;
 
 // ─────────────────────────────────────────────────────────────────────────────
-export function startEngine() {
+let engineStarted = false;
+const engineTimers: NodeJS.Timeout[] = [];
+
+/** Starts the monitor scheduler, recompute loop and dead-man heartbeat. Idempotent: a second call does nothing and returns false. */
+export function startEngine(): boolean {
+  if (engineStarted) {
+    log.warn('engine', 'startEngine called again — ignored (workers already running)');
+    return false;
+  }
+  engineStarted = true;
   for (const m of db.monitors) {
     // Spread first runs across the interval so a restart does not fire every check at once
     const offset = (db.monitors.indexOf(m) * 997) % (Math.max(5, m.intervalSec) * 1000);
@@ -992,18 +981,30 @@ export function startEngine() {
     try { const r = fn(); if (r instanceof Promise) r.catch(err => log.error('engine', `${name} failed`, { error: err as Error })); }
     catch (err) { log.error('engine', `${name} failed`, { error: err as Error }); }
   };
-  setInterval(guarded('scheduler', schedulerTick), 1000).unref();
-  setInterval(guarded('recompute', () => {
+  engineTimers.push(setInterval(guarded('scheduler', schedulerTick), 1000));
+  engineTimers.push(setInterval(guarded('recompute', () => {
     recomputeDerived();
+    // Dead-man state also ages without new attempts (e.g. a hung request): re-evaluate here
+    const before = deadMan.status;
+    if (deadManWorker.evaluate() !== before) broadcast('deadman_update', deadMan);
     updateIncidentDurations();
     broadcast('telemetry_tick', {
       timestamp: new Date().toISOString(),
       deadManStatus: deadMan.status,
       servers: db.servers.map(s => ({ id: s.id, status: s.status, agentStatus: s.agentStatus, lastSeen: s.lastSeen, telemetry: s.telemetry })),
     });
-  }), 5000).unref();
-  if (config.deadManHeartbeatUrl) {
-    void sendDeadManHeartbeat();
-    setInterval(guarded('dead-man heartbeat', sendDeadManHeartbeat), config.deadManIntervalSec * 1000).unref();
-  }
+  }), 5000));
+  for (const t of engineTimers) t.unref();
+  deadManWorker.start();
+  return true;
 }
+
+/** Stops the engine loops and the dead-man heartbeat (graceful shutdown). */
+export function stopEngine() {
+  for (const t of engineTimers.splice(0)) clearInterval(t);
+  deadManWorker.stop();
+  engineStarted = false;
+}
+
+/** For tests / diagnostics: is the dead-man loop running in this process */
+export const deadManWorkerRunning = () => deadManWorker.running;
