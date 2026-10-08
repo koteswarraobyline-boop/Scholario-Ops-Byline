@@ -12,6 +12,8 @@ import { httpProbe, tcpProbe, dnsProbe, sslProbe, parseHostPort } from './probes
 import { notifyIncident, notifyAll } from './notify.ts';
 import { switchDnsRecord } from './cloudflare.ts';
 import { log } from './logger.ts';
+import { applyExtendedReport, ExtendedAgentReport } from './telemetry.ts';
+import { agentHealth, serverHealth } from './telemetryHealth.ts';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Monitor classification
@@ -507,7 +509,7 @@ function schedulerTick() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Agent telemetry
 // ─────────────────────────────────────────────────────────────────────────────
-export interface AgentReport {
+export interface AgentReport extends ExtendedAgentReport {
   agentVersion?: string;
   hostname?: string;
   os?: string;
@@ -529,7 +531,8 @@ export interface AgentReport {
   diskUsedGb?: number;
   diskFreeGb?: number;
   processes?: Array<{ pid: number; name: string; user?: string; cpu?: number; memMb?: number; status?: string }>;
-  services?: Array<{ name: string; status: string; pid?: number; memoryMb?: number; cpuPercent?: number; since?: string; version?: string }>;
+  services?: Array<{ name: string; status: string; pid?: number; memoryMb?: number; cpuPercent?: number; since?: string; version?: string;
+    /** Agent >= 3.3 */ activeState?: string; subState?: string | null; failed?: boolean; restartCount?: number | null; result?: string | null }>;
   logs?: Array<{ ts?: string; level?: string; service?: string; message: string }>;
   /** Agent >= 3.2 */
   agentStartedAt?: string;
@@ -544,7 +547,12 @@ const num = (v: unknown, min: number, max: number): number => {
 };
 const text = (v: unknown, max: number): string => (typeof v === 'string' ? v.slice(0, max) : '');
 
-const minuteAcc = new Map<string, { minute: number; n: number; sum: ServerMetricPoint }>();
+const OPT_KEYS = ['swap', 'iowait', 'steal', 'diskRead', 'diskWrite', 'diskUtil'] as const;
+type OptKey = typeof OPT_KEYS[number];
+const addOpt = (opt: Record<OptKey, { sum: number; n: number }>, p: ServerMetricPoint) => {
+  for (const k of OPT_KEYS) { const v = p[k]; if (typeof v === 'number' && Number.isFinite(v)) { opt[k].sum += v; opt[k].n += 1; } }
+};
+const minuteAcc = new Map<string, { minute: number; n: number; sum: ServerMetricPoint; opt: Record<OptKey, { sum: number; n: number }> }>();
 
 function recordMetric(serverId: string, p: ServerMetricPoint) {
   const live = (liveMetrics[serverId] ??= []);
@@ -557,17 +565,24 @@ function recordMetric(serverId: string, p: ServerMetricPoint) {
     if (acc && acc.n > 0) {
       const series = (minuteMetrics[serverId] ??= []);
       const r = (x: number) => Math.round((x / acc.n) * 10) / 10;
-      const point = { t: new Date(acc.minute * 60000).toISOString(), cpu: r(acc.sum.cpu), ram: r(acc.sum.ram), disk: r(acc.sum.disk), load1: r(acc.sum.load1), netIn: r(acc.sum.netIn), netOut: r(acc.sum.netOut) };
+      const ro = (k: OptKey) => (acc.opt[k].n ? Math.round((acc.opt[k].sum / acc.opt[k].n) * 10) / 10 : null);
+      const point: ServerMetricPoint = {
+        t: new Date(acc.minute * 60000).toISOString(), cpu: r(acc.sum.cpu), ram: r(acc.sum.ram), disk: r(acc.sum.disk), load1: r(acc.sum.load1), netIn: r(acc.sum.netIn), netOut: r(acc.sum.netOut),
+        swap: ro('swap'), iowait: ro('iowait'), steal: ro('steal'), diskRead: ro('diskRead'), diskWrite: ro('diskWrite'), diskUtil: ro('diskUtil'),
+      };
       series.push(point);
       queueMetric(serverId, point);
       const cutoff = Date.now() - config.metricsRetentionHours * 3600 * 1000;
       while (series.length && Date.parse(series[0].t) < cutoff) series.shift();
     }
-    minuteAcc.set(serverId, { minute, n: 1, sum: { ...p } });
+    const opt = Object.fromEntries(OPT_KEYS.map(k => [k, { sum: 0, n: 0 }])) as Record<OptKey, { sum: number; n: number }>;
+    addOpt(opt, p);
+    minuteAcc.set(serverId, { minute, n: 1, sum: { ...p }, opt });
   } else {
     acc.n += 1;
     acc.sum.cpu += p.cpu; acc.sum.ram += p.ram; acc.sum.disk += p.disk;
     acc.sum.load1 += p.load1; acc.sum.netIn += p.netIn; acc.sum.netOut += p.netOut;
+    addOpt(acc.opt, p);
   }
 }
 
@@ -591,6 +606,10 @@ function parseDatabaseReport(raw: Record<string, unknown>, observedAt: string): 
     connections: n(raw.connections, 1e6),
     maxConnections: n(raw.maxConnections, 1e6),
     longRunningQueries: n(raw.longRunningQueries, 1e6),
+    connectionUsagePercent: (() => {
+      const c = n(raw.connections, 1e6), m = n(raw.maxConnections, 1e6);
+      return c !== null && m ? Math.round((c / m) * 1000) / 10 : null;
+    })(),
     replication: rep0 && typeof rep0 === 'object' ? {
       role, state, lagSec: n(rep0.lagSec, 1e9),
       lastSuccessAt: typeof rep0.lastSuccessAt === 'string' && !Number.isNaN(Date.parse(rep0.lastSuccessAt)) ? new Date(rep0.lastSuccessAt).toISOString() : null,
@@ -651,6 +670,7 @@ export function ingestAgentReport(srv: ServerRecord, r: AgentReport, meta: { sou
   if (r.ramTotalMb) srv.ramGb = Math.round(num(r.ramTotalMb, 0, 1e7) / 102.4) / 10;
   if (r.diskTotalGb) srv.diskGb = Math.round(num(r.diskTotalGb, 0, 1e7));
   if (r.uptimeSec !== undefined) srv.uptimeDays = Math.floor(num(r.uptimeSec, 0, 1e10) / 86400);
+  applyExtendedReport(srv, r, observedAt, Date.parse(now));
 
   if (Array.isArray(r.processes)) {
     srv.processes = r.processes.slice(0, 25).map((p): VpsProcess => ({
@@ -671,6 +691,11 @@ export function ingestAgentReport(srv: ServerRecord, r: AgentReport, meta: { sou
       memoryMb: Math.round(num(s.memoryMb, 0, 1e7)),
       cpuPercent: Math.round(num(s.cpuPercent, 0, 10000) * 10) / 10,
       lastRestart: text(s.since, 64),
+      activeState: s.activeState === undefined ? undefined : text(s.activeState, 32) || null,
+      subState: s.subState === undefined ? undefined : text(s.subState, 32) || null,
+      failed: typeof s.failed === 'boolean' ? s.failed : s.status === 'failed',
+      restartCount: typeof s.restartCount === 'number' && Number.isInteger(s.restartCount) && s.restartCount >= 0 ? s.restartCount : null,
+      result: s.result === undefined ? undefined : text(s.result, 32) || null,
     }));
   }
   if (Array.isArray(r.logs) && r.logs.length) {
@@ -692,6 +717,12 @@ export function ingestAgentReport(srv: ServerRecord, r: AgentReport, meta: { sou
     load1: srv.telemetry.loadAvg[0],
     netIn: srv.telemetry.networkInKbps,
     netOut: srv.telemetry.networkOutKbps,
+    swap: srv.telemetry.swapPercent ?? null,
+    iowait: srv.telemetry.cpuIowaitPercent ?? null,
+    steal: srv.telemetry.cpuStealPercent ?? null,
+    diskRead: srv.telemetry.diskReadBytesPerSec ?? null,
+    diskWrite: srv.telemetry.diskWriteBytesPerSec ?? null,
+    diskUtil: srv.telemetry.diskUtilPercent ?? null,
   });
 
   const wasDisconnected = srv.agentStatus !== 'CONNECTED';
@@ -701,9 +732,11 @@ export function ingestAgentReport(srv: ServerRecord, r: AgentReport, meta: { sou
   broadcast('server_update', publicServer(srv));
 }
 
+/** Server as returned by the API: never the agent token; plus agent health, health summary and warnings computed now. */
 export function publicServer(s: ServerRecord) {
   const { agentToken: _t, ...rest } = s;
-  return rest;
+  const { health, warnings } = serverHealth(s);
+  return { ...rest, agent: agentHealth(s), health, warnings };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -124,6 +124,8 @@ export interface DatabaseReport {
   connections: number | null;
   maxConnections: number | null;
   longRunningQueries: number | null;
+  /** connections / maxConnections % (computed by the server; null when either is unknown) */
+  connectionUsagePercent?: number | null;
   replication: {
     role: 'primary' | 'replica' | 'none' | 'unknown';
     state: 'running' | 'stopped' | 'error' | 'unknown';
@@ -134,6 +136,8 @@ export interface DatabaseReport {
   error: string | null;
   observedAt: string;
 }
+/** Database probe reported by the telemetry agent */
+export type DatabaseTelemetry = DatabaseReport;
 
 export type ProviderStatus = 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE' | 'UNKNOWN';
 
@@ -203,7 +207,195 @@ export interface VpsTelemetry {
   diskUsedGb?: number | null;
   diskFreeGb?: number | null;
   uptimeSec?: number | null;
+  /** Agent >= 3.3 (null = not available on this platform / older agent; never a made-up 0) */
+  cpuIowaitPercent?: number | null;
+  cpuStealPercent?: number | null;
+  /** 1-minute load / CPU cores (computed by the server) */
+  loadPerCore?: number | null;
+  swapTotalMb?: number | null;
+  swapUsedMb?: number | null;
+  swapFreeMb?: number | null;
+  /** null when no swap is configured */
+  swapPercent?: number | null;
+  pressure?: PressureTelemetry | null;
+  /** Disk I/O summed over physical disks (utilisation = busiest disk) */
+  diskReadBytesPerSec?: number | null;
+  diskWriteBytesPerSec?: number | null;
+  diskReadOpsPerSec?: number | null;
+  diskWriteOpsPerSec?: number | null;
+  diskUtilPercent?: number | null;
 }
+/** Current host telemetry of a server (alias used by the telemetry UI) */
+export type ServerTelemetry = VpsTelemetry;
+
+/** Pressure stall information: % of time some tasks waited for the resource (avg over 60 s). null = kernel without PSI */
+export interface PressureTelemetry { cpu: number | null; memory: number | null; io: number | null }
+
+export interface FilesystemTelemetry {
+  mountPoint: string;
+  filesystem: string;
+  device: string;
+  totalGb: number | null;
+  usedGb: number | null;
+  freeGb: number | null;
+  usedPercent: number | null;
+  /** null for filesystems without a fixed inode table (btrfs, vfat) */
+  inodeTotal: number | null;
+  inodeUsed: number | null;
+  inodeFree: number | null;
+  inodePercent: number | null;
+}
+
+export interface NetworkInterfaceTelemetry {
+  name: string;
+  rxBytesPerSec: number | null;
+  txBytesPerSec: number | null;
+  rxPacketsPerSec: number | null;
+  txPacketsPerSec: number | null;
+  /** Cumulative counters since boot */
+  rxErrors: number | null;
+  txErrors: number | null;
+  rxDrops: number | null;
+  txDrops: number | null;
+  /** Errors + drops since the previous report (computed by the server; null on the first report) */
+  newErrors: number | null;
+  newDrops: number | null;
+  operationalState: string | null;
+  /** true for bridges / veth / tunnels (no physical device) */
+  virtual: boolean | null;
+}
+
+export interface DiskIOTelemetry {
+  device: string;
+  readBytesPerSec: number | null;
+  writeBytesPerSec: number | null;
+  readOpsPerSec: number | null;
+  writeOpsPerSec: number | null;
+  ioUtilizationPercent: number | null;
+  readLatencyMs: number | null;
+  writeLatencyMs: number | null;
+}
+
+export type Pm2Status = 'online' | 'stopping' | 'stopped' | 'launching' | 'errored' | 'one-launch-status' | 'waiting restart' | 'unknown';
+
+/** One PM2 application. Built from allow-listed `pm2 jlist` fields only — environments are never collected. */
+export interface PM2ProcessTelemetry {
+  id: number | null;
+  name: string;
+  status: Pm2Status;
+  pid: number | null;
+  cpuPercent: number | null;
+  memoryMb: number | null;
+  uptimeSec: number | null;
+  startedAt: string | null;
+  restartCount: number | null;
+  unstableRestarts: number | null;
+  /** Restarts within THRESHOLDS.pm2Restarts.restartWindowMinutes (computed by the server; null until known) */
+  recentRestarts: number | null;
+  nodeVersion: string | null;
+  interpreter: string | null;
+  execMode: string | null;
+  instances: number | null;
+  /** package.json version reported by PM2 */
+  version: string | null;
+  /** Release directory (deploy/release.sh layout), e.g. 20261008-101500-abc1234 */
+  release: string | null;
+  gitRevision: string | null;
+  /** System user that owns the PM2 daemon */
+  owner: string | null;
+  /** TCP ports this process listens on */
+  ports: number[];
+}
+
+/** Local application health check run by the agent against 127.0.0.1:<port><path> */
+export interface ApplicationHealthTelemetry {
+  applicationId: string;
+  name: string;
+  environment: Environment | null;
+  port: number;
+  path: string;
+  listening: boolean | null;
+  status: 'HEALTHY' | 'DOWN' | 'UNKNOWN';
+  statusCode: number | null;
+  latencyMs: number | null;
+  error: string | null;
+  checkedAt: string;
+  /** Consecutive DOWN results (computed by the server) */
+  consecutiveFailures: number;
+}
+
+export interface ListeningPortTelemetry {
+  address: string;
+  port: number;
+  process: string | null;
+  pids: number[];
+  /** loopback = 127.0.0.1 / ::1 only · all = every interface (0.0.0.0 / ::) · address = one specific address */
+  scope: 'loopback' | 'all' | 'address';
+}
+
+export interface NtpTelemetry {
+  /** timedatectl NTPSynchronized (null = unknown) */
+  synchronized: boolean | null;
+  ntpEnabled: boolean | null;
+  /** Active time service (chronyd, systemd-timesyncd, ntpd …) */
+  service: string | null;
+  /** Offset from NTP time as reported by the time service (ms) */
+  clockOffsetMs: number | null;
+  /** Clock frequency error (ppm, chrony only) */
+  clockDriftPpm: number | null;
+  observedAt: string;
+}
+
+export interface SystemInfoTelemetry {
+  kernelVersion: string | null;
+  architecture: string | null;
+  bootTime: string | null;
+  timezone: string | null;
+  osName: string | null;
+  osVersion: string | null;
+  nodeVersion: string | null;
+  npmVersion: string | null;
+}
+
+export interface FailedUnitsTelemetry { count: number; units: string[]; observedAt: string }
+
+/** Delivery timing of the last report (agent >= 3.3) */
+export interface AgentTimingTelemetry {
+  sentAt: string | null;
+  /** Half the round trip of the previous report (ms) */
+  transportDelayMs: number | null;
+  /** Server clock − agent clock, corrected for the transport delay (ms; + = agent clock behind) */
+  clockSkewMs: number | null;
+}
+
+export interface AgentHealthTelemetry {
+  /** ONLINE = reporting now; STALE = missed reports; OFFLINE = stopped reporting; NOT_CONNECTED = never reported */
+  state: 'ONLINE' | 'STALE' | 'OFFLINE' | 'NOT_CONNECTED';
+  version: string | null;
+  /** Current agent version (server/agent.ts AGENT_VERSION) */
+  expectedVersion: string;
+  /** null when the agent never reported a version */
+  outdated: boolean | null;
+  startedAt: string | null;
+  restartCount: number;
+  lastSeen: string | null;
+  observedAt: string | null;
+  receivedAt: string | null;
+  sentAt: string | null;
+  transportDelayMs: number | null;
+  clockSkewMs: number | null;
+  sourceIp: string | null;
+  errors: string[];
+}
+
+export type TelemetryLevel = 'HEALTHY' | 'WARNING' | 'CRITICAL' | 'UNKNOWN';
+export type HealthCategoryKey = 'agent' | 'time' | 'cpu' | 'memory' | 'swap' | 'disk' | 'diskio' | 'network' | 'systemd' | 'pm2' | 'apps' | 'database';
+
+/** One line of a server's health summary (computed by the server from the latest telemetry) */
+export interface HealthCategory { key: HealthCategoryKey; label: string; level: TelemetryLevel; detail: string }
+
+/** A condition that needs attention. `alert` = also raised as an incident (sustained / significant only). */
+export interface ServerWarning { key: string; category: HealthCategoryKey; level: 'WARNING' | 'CRITICAL'; message: string; alert: boolean }
 
 export interface VpsProcess {
   pid: number;
@@ -222,7 +414,14 @@ export interface VpsService {
   memoryMb: number;
   cpuPercent: number;
   lastRestart: string;
+  /** Agent >= 3.3: raw systemd states and restart counter (NRestarts) */
+  activeState?: string | null;
+  subState?: string | null;
+  failed?: boolean;
+  restartCount?: number | null;
+  result?: string | null;
 }
+export type SystemdServiceTelemetry = VpsService;
 
 export interface VpsLogEntry {
   id: string;
@@ -270,6 +469,23 @@ export interface VpsServer {
   processes: VpsProcess[];
   services: VpsService[];
   logs: VpsLogEntry[];
+  // ── Agent >= 3.3 (undefined = never reported by this server's agent) ──
+  filesystems?: FilesystemTelemetry[];
+  networkInterfaces?: NetworkInterfaceTelemetry[];
+  diskIo?: DiskIOTelemetry[];
+  /** null = PM2 is not running on this server */
+  pm2?: PM2ProcessTelemetry[] | null;
+  pm2ObservedAt?: string;
+  appHealth?: ApplicationHealthTelemetry[];
+  listeningPorts?: ListeningPortTelemetry[] | null;
+  ntp?: NtpTelemetry | null;
+  system?: SystemInfoTelemetry | null;
+  failedUnits?: FailedUnitsTelemetry | null;
+  agentTiming?: AgentTimingTelemetry;
+  // ── Computed by the server for every response (not stored) ──
+  agent?: AgentHealthTelemetry;
+  health?: HealthCategory[];
+  warnings?: ServerWarning[];
 }
 
 /** Classified result of a single synthetic check */
@@ -722,6 +938,15 @@ export interface ServerMetricPoint {
   load1: number;
   netIn: number;
   netOut: number;
+  /** Agent >= 3.3; null / absent = not reported (charts leave a gap, never a 0) */
+  swap?: number | null;
+  iowait?: number | null;
+  steal?: number | null;
+  /** Disk I/O, bytes per second */
+  diskRead?: number | null;
+  diskWrite?: number | null;
+  /** Busiest disk utilisation % */
+  diskUtil?: number | null;
 }
 
 export interface OpsUser {

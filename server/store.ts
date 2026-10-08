@@ -378,11 +378,12 @@ export async function flushMetrics(): Promise<void> {
     for (let i = 0; i < batch.length; i += 200) {
       const params: unknown[] = [];
       const tuples = batch.slice(i, i + 200).map(([id, p]) => {
-        params.push(id, p.t, p.cpu, p.ram, p.disk, p.load1, p.netIn, p.netOut);
+        params.push(id, p.t, p.cpu, p.ram, p.disk, p.load1, p.netIn, p.netOut,
+          p.swap ?? null, p.iowait ?? null, p.steal ?? null, p.diskRead ?? null, p.diskWrite ?? null, p.diskUtil ?? null);
         const n = params.length;
-        return `($${n - 7},$${n - 6},$${n - 5},$${n - 4},$${n - 3},$${n - 2},$${n - 1},$${n})`;
+        return `(${Array.from({ length: 14 }, (_, k) => `${n - 13 + k}`).join(',')})`;
       });
-      await query(`INSERT INTO ${T('server_metrics')} (server_id,t,cpu,ram,disk,load1,net_in,net_out) VALUES ${tuples.join(',')} ON CONFLICT DO NOTHING`, params);
+      await query(`INSERT INTO ${T('server_metrics')} (server_id,t,cpu,ram,disk,load1,net_in,net_out,swap,iowait,steal,disk_read,disk_write,disk_util) VALUES ${tuples.join(',')} ON CONFLICT DO NOTHING`, params);
     }
   } catch (err) {
     metricQueue.unshift(...batch);
@@ -483,10 +484,14 @@ async function loadAll() {
   Object.assign(db, fresh);
   for (const def of TABLES) lastHashes.set(def.table, new Map([...snapshot(def)].map(([k, v]) => [k, v.hash])));
   const since = new Date(Date.now() - config.metricsRetentionHours * 3600 * 1000).toISOString();
-  const m = await query(`SELECT server_id, t, cpu, ram, disk, load1, net_in, net_out FROM ${T('server_metrics')} WHERE t >= $1 ORDER BY t`, [since]);
+  const m = await query(`SELECT server_id, t, cpu, ram, disk, load1, net_in, net_out, swap, iowait, steal, disk_read, disk_write, disk_util FROM ${T('server_metrics')} WHERE t >= $1 ORDER BY t`, [since]);
   for (const k of Object.keys(minuteMetrics)) delete minuteMetrics[k];
+  const opt = (v: unknown) => (v === null || v === undefined ? null : Number(v));
   for (const r of m.rows) {
-    (minuteMetrics[r.server_id as string] ??= []).push({ t: iso(r.t), cpu: Number(r.cpu), ram: Number(r.ram), disk: Number(r.disk), load1: Number(r.load1), netIn: Number(r.net_in), netOut: Number(r.net_out) });
+    (minuteMetrics[r.server_id as string] ??= []).push({
+      t: iso(r.t), cpu: Number(r.cpu), ram: Number(r.ram), disk: Number(r.disk), load1: Number(r.load1), netIn: Number(r.net_in), netOut: Number(r.net_out),
+      swap: opt(r.swap), iowait: opt(r.iowait), steal: opt(r.steal), diskRead: opt(r.disk_read), diskWrite: opt(r.disk_write), diskUtil: opt(r.disk_util),
+    });
   }
 }
 

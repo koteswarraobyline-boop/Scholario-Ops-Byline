@@ -11,6 +11,8 @@ import { db, ServerRecord } from './store.ts';
 import { HTTP_TYPES } from './engine.ts';
 import { lbState, poolFor, routingFor, originHealthy, originRtt, PERMISSION_HINT } from './loadbalancer.ts';
 import { readChecks, availability, AvailabilityStats } from './history.ts';
+import { THRESHOLDS } from '../src/lib/thresholds.ts';
+import { serverHealth } from './telemetryHealth.ts';
 import { Env, agentState, appHealth, backupStatus, databaseHealth, inventoryFor, serverFor, sslMonitor, urlMonitor } from './health.ts';
 
 const envLabel = (env: Env) => (env === 'PRD' ? 'Production' : 'DR');
@@ -155,7 +157,7 @@ function capacityChecks(app: Application): DrReadinessItem[] {
     : state === 'NOT_CONNECTED' ? unknown('telemetry', 'DR telemetry heartbeat', `NOT_CONNECTED — agent not installed on ${srv.ip}`)
       : item('telemetry', 'DR telemetry heartbeat', state === 'STALE' ? 'WARNING' : 'FAIL', `Agent ${state} — last report ${srv.lastSeen}`, srv.lastSeen, 'capacity'));
   if (state !== 'ONLINE') {
-    for (const [k, l] of [['services', 'Required services'], ['disk', 'Disk capacity'], ['memory', 'Memory capacity'], ['cpu', 'CPU / load']]) out.push(unknown(k, l, 'No live telemetry'));
+    for (const [k, l] of [['services', 'Required services'], ['disk', 'Disk capacity'], ['memory', 'Memory capacity'], ['cpu', 'CPU / load'], ['pm2', 'PM2 applications'], ['app_local', 'Local application health'], ['time', 'Time synchronisation']]) out.push(unknown(k, l, 'No live telemetry'));
     return out;
   }
   const t = srv.telemetry;
@@ -167,11 +169,28 @@ function capacityChecks(app: Application): DrReadinessItem[] {
     out.push(item('services', 'Required services', failed.length ? 'FAIL' : notActive.length ? 'WARNING' : 'PASS', srv.services.map(s => `${s.name}: ${s.status}`).join(', '), at, 'capacity'));
   }
   const gb = (v: number | null | undefined) => (v == null ? '?' : `${v} GB`);
-  out.push(item('disk', 'Disk capacity', t.diskPercent >= 90 ? 'FAIL' : t.diskPercent >= 80 ? 'WARNING' : 'PASS', `${t.diskPercent}% used (${gb(t.diskUsedGb)} of ${gb(t.diskTotalGb)})`, at, 'capacity'));
-  out.push(item('memory', 'Memory capacity', t.ramPercent >= 95 ? 'FAIL' : t.ramPercent >= 85 ? 'WARNING' : 'PASS', `${t.ramPercent}% used`, at, 'capacity'));
+  const cap = THRESHOLDS.drCapacity;
+  // Fullest filesystem (all mounts when the agent reports them, otherwise the root filesystem)
+  const fss = srv.filesystems?.length ? srv.filesystems : null;
+  const fullest = fss ? fss.reduce((a, b) => ((b.usedPercent ?? 0) > (a.usedPercent ?? 0) ? b : a)) : null;
+  const diskPct = fullest?.usedPercent ?? t.diskPercent;
+  out.push(item('disk', 'Disk capacity', diskPct >= cap.diskPercent.critical ? 'FAIL' : diskPct >= cap.diskPercent.warning ? 'WARNING' : 'PASS',
+    fullest ? `fullest ${fullest.mountPoint} ${fullest.usedPercent}% used (${fss!.length} filesystem(s))` : `${t.diskPercent}% used (${gb(t.diskUsedGb)} of ${gb(t.diskTotalGb)})`, at, 'capacity'));
+  out.push(item('memory', 'Memory capacity', t.ramPercent >= cap.memoryPercent.critical ? 'FAIL' : t.ramPercent >= cap.memoryPercent.warning ? 'WARNING' : 'PASS', `${t.ramPercent}% used${t.swapPercent != null ? ` · swap ${t.swapPercent}%` : ''}`, at, 'capacity'));
   const cores = srv.cpuCores || srv.planSpec?.cpuCores || 0;
   const perCore = cores ? t.loadAvg[0] / cores : 0;
-  out.push(item('cpu', 'CPU / load', t.cpuPercent >= 95 || perCore >= 2 ? 'FAIL' : t.cpuPercent >= 80 || perCore >= 1 ? 'WARNING' : 'PASS', `CPU ${t.cpuPercent}% · load ${t.loadAvg.map(l => l.toFixed(2)).join(' / ')}${cores ? ` on ${cores} cores` : ''}`, at, 'capacity'));
+  out.push(item('cpu', 'CPU / load', t.cpuPercent >= cap.cpuPercent.critical || perCore >= THRESHOLDS.loadPerCore.critical ? 'FAIL' : t.cpuPercent >= cap.cpuPercent.warning || perCore >= THRESHOLDS.loadPerCore.warning ? 'WARNING' : 'PASS', `CPU ${t.cpuPercent}% · load ${t.loadAvg.map(l => l.toFixed(2)).join(' / ')}${cores ? ` on ${cores} cores` : ''}`, at, 'capacity'));
+
+  // Agent >= 3.3 categories, judged by the same rules as the server health summary
+  const health = serverHealth(srv).health;
+  const fromHealth = (key: string, label: string, cat: string) => {
+    const h = health.find(x => x.key === cat);
+    if (!h || h.level === 'UNKNOWN') return out.push(unknown(key, label, h?.detail ?? 'Not reported'));
+    out.push(item(key, label, h.level === 'CRITICAL' ? 'FAIL' : h.level === 'WARNING' ? 'WARNING' : 'PASS', h.detail, at, 'capacity'));
+  };
+  fromHealth('pm2', 'PM2 applications', 'pm2');
+  fromHealth('app_local', 'Local application health', 'apps');
+  fromHealth('time', 'Time synchronisation', 'time');
   return out;
 }
 

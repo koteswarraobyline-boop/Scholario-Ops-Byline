@@ -9,7 +9,9 @@
  *
  * evaluateAlerts() derives alerts from real state every minute:
  *   agent offline · database unavailable · replication broken · backup stale/failed ·
- *   DR not ready · SSL certificate expiring. (Application down/recovered and Cloudflare origin
+ *   DR not ready · SSL certificate expiring · server telemetry conditions (sustained CPU / memory /
+ *   swap, full disk / inodes, failed systemd service, PM2 app errored / restart spike, local health
+ *   check failing, clock not synchronised — see server/telemetryHealth.ts, warnings with alert: true). (Application down/recovered and Cloudflare origin
  *   unhealthy are raised by the monitor engine / Load Balancer poller.)
  */
 import crypto from 'crypto';
@@ -20,6 +22,7 @@ import { notifyIncident } from './notify.ts';
 import { nextIncidentId } from './engine.ts';
 import { agentState, backupStatus, databaseHealth } from './health.ts';
 import { readiness } from './readiness.ts';
+import { serverHealth } from './telemetryHealth.ts';
 import { log } from './logger.ts';
 
 export interface AlertInput {
@@ -100,6 +103,25 @@ export function evaluateAlerts() {
         openAlert({ fingerprint: fp, title: `Telemetry agent offline on ${srv.hostname} (${srv.ip})`, severity: srv.environment === 'PRD' ? 'HIGH' : 'WARNING',
           detail: `No agent report since ${srv.lastSeen}`, applicationId: srv.applicationId, environment: srv.environment, source: 'Agent Monitor', affected: [srv.hostname] });
       } else if (st === 'ONLINE') resolveAlert(fp, 'Agent Monitor', `Agent on ${srv.hostname} reporting again`);
+
+      // Telemetry conditions. Only evaluated with a live agent: without data nothing opens or closes.
+      if (st === 'ONLINE') {
+        const prefix = `telemetry:${srv.id}:`;
+        const firing = serverHealth(srv).warnings.filter(w => w.alert);
+        for (const w of firing) {
+          openAlert({
+            fingerprint: prefix + w.key, title: `${srv.hostname} (${srv.environment}): ${w.message}`,
+            severity: w.level === 'CRITICAL' && srv.environment === 'PRD' ? 'HIGH' : 'WARNING',
+            detail: w.message, applicationId: srv.applicationId, environment: srv.environment, source: 'Server Telemetry', affected: [srv.hostname],
+          });
+        }
+        const keys = new Set(firing.map(w => prefix + w.key));
+        for (const inc of db.incidents) {
+          if (inc.fingerprint?.startsWith(prefix) && !keys.has(inc.fingerprint) && inc.status !== 'RESOLVED' && inc.status !== 'CLOSED') {
+            resolveAlert(inc.fingerprint, 'Server Telemetry', `Condition cleared on ${srv.hostname}`);
+          }
+        }
+      }
     }
 
     for (const app of db.applications) {
