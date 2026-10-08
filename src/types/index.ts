@@ -766,17 +766,43 @@ export interface AuditLog {
   details: string;
 }
 
+/**
+ * Outbound dead-man heartbeat of this control plane (server/deadman.ts).
+ * NOT_CONFIGURED = DEADMAN_HEARTBEAT_URL missing or invalid · PENDING = configured, first ping not finished yet ·
+ * HEALTHY = latest ping succeeded · DEGRADED = recent pings fail but the last success is within the tolerance ·
+ * FAILING = no successful ping within the tolerance.
+ * These are the LOCAL worker's results; the external watchdog alone decides whether it received the pings.
+ * The heartbeat URL is never part of this object.
+ */
+export type DeadManStatus = 'NOT_CONFIGURED' | 'PENDING' | 'HEALTHY' | 'DEGRADED' | 'FAILING';
+
 export interface DeadManControlPlane {
   id: string;
   name: string;
+  /** Host name of the watchdog (no path, query or credentials); 'Not configured' when unset */
   nodeLocation: string;
+  /** Same as nodeLocation (kept for compatibility; never the full URL) */
   targetControlPlane: string;
+  /** Last successful ping ('' = none yet). Same value as lastSuccessAt. */
   lastHeartbeatReceivedAt: string;
   intervalSec: number;
   toleranceSec: number;
-  status: 'HEALTHY' | 'CRITICAL_SILENCE' | 'NOT_CONFIGURED';
+  status: DeadManStatus;
+  /** Consecutive failed pings (same value as consecutiveFailures) */
   consecutiveMisses: number;
   lastAlertSentAt?: string;
+  configured: boolean;
+  /** Why the configuration is unusable (e.g. not an http/https URL); null when fine */
+  configError: string | null;
+  /** The heartbeat loop is running in this process */
+  workerRunning: boolean;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastHttpStatus: number | null;
+  lastLatencyMs: number | null;
+  /** Redacted error of the latest failed ping */
+  lastError: string | null;
+  consecutiveFailures: number;
 }
 
 /** NOT_CONFIGURED = the check cannot run because something is not set up yet (never a pass) */
@@ -926,7 +952,7 @@ export interface IntegrationStatus {
   notifications: { status: 'CONFIGURED' | 'NOT_CONFIGURED'; enabledChannels: number };
   loadBalancing: { configured: boolean; status: LbSyncStatus; lastSyncAt: string | null; lastError: string | null; poolCount: number };
   smtp: { configured: boolean };
-  deadMan: { configured: boolean };
+  deadMan: { configured: boolean; configError?: string | null; intervalSec?: number; toleranceSec?: number };
   publicUrl: string;
 }
 

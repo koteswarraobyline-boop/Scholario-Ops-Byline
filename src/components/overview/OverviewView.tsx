@@ -16,6 +16,8 @@ import { TelemetryAreaGraph } from '../visuals/TelemetryAreaGraph';
 import { EmptyState } from '../ui/EmptyState';
 import { IctStatusPanel } from './IctStatusPanel';
 import { routeState } from '../ui/routing';
+import { Ago } from '../ui/Freshness';
+import { deadManLabel, deadManLatency } from '../ui/deadman';
 
 // ── Formatting helpers (null-safe) ───────────────────────────────────────────
 const fmtPct = (v: number | null | undefined, digits = 2) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : `${v.toFixed(digits)}%`);
@@ -55,10 +57,12 @@ interface MetricCardProps {
   isDark: boolean;
   badge?: string;
   badgeColor?: string;
+  /** Extra label / value pairs, stacked under the value (each on its own line; values wrap, never overflow) */
+  details?: Array<[string, React.ReactNode]>;
 }
 
 const MetricCard: React.FC<MetricCardProps> = ({
-  label, value, sub, icon: Icon, status = 'ok', onClick, isDark, badge, badgeColor
+  label, value, sub, icon: Icon, status = 'ok', onClick, isDark, badge, badgeColor, details,
 }) => {
   const borderColor =
     status === 'crit'    ? (isDark ? 'border-rose-800/70 bg-[#180E13]'   : 'border-rose-300 bg-rose-50/80') :
@@ -75,25 +79,35 @@ const MetricCard: React.FC<MetricCardProps> = ({
   return (
     <button
       onClick={onClick}
-      className={`p-3 rounded-lg border text-left transition-all group cursor-pointer hover:scale-[1.02] hover:shadow-md ${borderColor}`}
+      className={`p-3 rounded-lg border text-left transition-all group cursor-pointer hover:shadow-md hover:border-blue-500/50 min-w-0 flex flex-col ${borderColor}`}
     >
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-[9px] font-mono font-semibold tracking-widest text-slate-400 uppercase">{label}</span>
-        <Icon className={`w-3.5 h-3.5 transition-colors ${
+      <div className="flex items-center justify-between gap-2 mb-2 min-w-0">
+        <span className="text-[9px] font-mono font-semibold tracking-widest text-slate-400 uppercase truncate" title={label}>{label}</span>
+        <Icon className={`w-3.5 h-3.5 shrink-0 transition-colors ${
           status === 'crit' ? 'text-rose-500' :
           status === 'warn' ? 'text-amber-500' :
           'text-slate-400 group-hover:text-blue-400'
         }`} />
       </div>
-      <div className={`text-xl font-bold font-mono tabular-nums leading-none ${valueColor}`}>{value}</div>
-      <div className="flex items-center justify-between mt-1.5 gap-1">
-        <span className="text-[10px] text-slate-500 font-mono truncate">{sub}</span>
+      <div className={`text-xl font-bold font-mono tabular-nums leading-tight break-words ${valueColor}`}>{value}</div>
+      <div className="flex items-start justify-between mt-1.5 gap-1 min-w-0">
+        <span className="text-[10px] text-slate-500 font-mono break-words min-w-0 line-clamp-2" title={sub}>{sub}</span>
         {badge && (
           <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded shrink-0 ${badgeColor ?? 'text-emerald-400 bg-emerald-950/60'}`}>
             {badge}
           </span>
         )}
       </div>
+      {details && details.length > 0 && (
+        <dl className={`mt-2 pt-2 border-t grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] font-mono ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+          {details.map(([k, v]) => (
+            <div key={k} className="min-w-0">
+              <dt className="text-slate-500 truncate" title={k}>{k}</dt>
+              <dd className={`min-w-0 break-words font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{v}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
     </button>
   );
 };
@@ -218,7 +232,7 @@ export const OverviewView: React.FC = () => {
   const criticalMonitors = enabledMonitors.filter(m => m.status === 'CRITICAL').length;
   const criticalApps = applications.filter(a => a.status === 'CRITICAL').length;
   const cfConfigured = Boolean(integrations?.cloudflare.configured);
-  const deadManConfigured = deadMan.status !== 'NOT_CONFIGURED';
+  const deadManConfigured = deadMan.configured;
 
   const isEmpty = !isLoading && servers.length === 0 && applications.length === 0;
 
@@ -501,7 +515,8 @@ export const OverviewView: React.FC = () => {
       </div>
 
       {/* ── 8-Column Metric Cards ────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+      {/* auto-fit: as many ≥ 10.5rem columns as fit, stretched to the full row — 8 across on wide screens, fewer (never cramped) on laptops */}
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(10.5rem,1fr))] items-start gap-2">
         <MetricCard
           label="Applications"
           value={`${systemSummary.healthyApps}/${systemSummary.totalApps}`}
@@ -569,14 +584,19 @@ export const OverviewView: React.FC = () => {
         />
         <MetricCard
           label="Dead-Man"
-          value={!deadManConfigured ? 'Not set' : deadMan.status === 'HEALTHY' ? 'Active' : 'SILENT'}
-          sub={deadManConfigured ? deadMan.nodeLocation : 'DEADMAN_HEARTBEAT_URL unset'}
+          value={deadManConfigured ? deadManLabel(deadMan.status) : 'Not set'}
+          sub={deadManConfigured ? `every ${deadMan.intervalSec}s · tolerance ${deadMan.toleranceSec}s` : 'Watchdog not configured — set DEADMAN_HEARTBEAT_URL on the server'}
           icon={Activity}
-          status={!deadManConfigured ? 'unknown' : deadMan.status === 'HEALTHY' ? 'ok' : 'crit'}
+          status={deadMan.status === 'HEALTHY' ? 'ok' : deadMan.status === 'DEGRADED' ? 'warn' : deadMan.status === 'FAILING' ? 'crit' : 'unknown'}
           onClick={() => go('monitors')}
           isDark={isDark}
-          badge={deadManConfigured ? (deadMan.status === 'HEALTHY' ? `${deadMan.intervalSec}s hb` : 'ALERT') : undefined}
-          badgeColor={deadMan.status === 'HEALTHY' ? 'text-emerald-400 bg-emerald-950/60' : 'text-rose-400 bg-rose-950/60'}
+          // Only when there is something to show (no rows of dashes when the watchdog is not configured)
+          details={!deadManConfigured ? undefined : [
+            ['Watchdog', 'Configured'],
+            ['Last ping', deadMan.lastSuccessAt ? <Ago iso={deadMan.lastSuccessAt} staleAfterSec={deadMan.toleranceSec} /> : deadManConfigured ? 'None yet' : '—'],
+            ['Latency', deadManLatency(deadMan)],
+            ['Failures', deadMan.lastAttemptAt ? String(deadMan.consecutiveFailures) : '—'],
+          ]}
         />
       </div>
 
@@ -673,12 +693,12 @@ export const OverviewView: React.FC = () => {
 
         <div className="grid grid-cols-1 md:grid-cols-5">
           {answers.map(item => (
-            <div key={item.n} className={`p-3.5 border-r last:border-r-0 ${highlightBg(item.highlight)} ${isDark ? 'border-[#1A2436]' : 'border-slate-100'}`}>
+            <div key={item.n} className={`p-3.5 border-r last:border-r-0 min-w-0 ${highlightBg(item.highlight)} ${isDark ? 'border-[#1A2436]' : 'border-slate-100'}`}>
               <div className="flex items-center gap-1.5 mb-2">
                 <span className={`text-[9px] font-mono font-bold ${item.color}`}>{item.n}</span>
                 <span className={`text-[9px] uppercase tracking-wider font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{item.q}</span>
               </div>
-              <div className={`text-xs font-bold font-mono ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{item.answer}</div>
+              <div className={`text-xs font-bold font-mono break-words ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{item.answer}</div>
               <div className={`text-[11px] font-sans mt-1 leading-snug break-words ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{item.detail}</div>
             </div>
           ))}

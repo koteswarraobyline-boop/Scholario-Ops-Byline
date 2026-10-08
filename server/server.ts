@@ -22,7 +22,7 @@ import { closePool, query, SCHEMA } from './db.ts';
 import { startHistory, flushChecks } from './history.ts';
 import { bootstrapAdmin } from './auth.ts';
 import { buildRouter } from './routes.ts';
-import { startEngine } from './engine.ts';
+import { startEngine, stopEngine, deadMan } from './engine.ts';
 import { syncCloudflare } from './cloudflare.ts';
 import { syncHostinger } from './hostinger.ts';
 import { syncLoadBalancers } from './loadbalancer.ts';
@@ -53,6 +53,8 @@ function checkProductionConfig() {
   if (config.host === '0.0.0.0' || config.host === '::') warnings.push(`HOST=${config.host} exposes Node directly — behind nginx use HOST=127.0.0.1`);
   if (!process.env.CLOUDFLARE_API_TOKEN) warnings.push('CLOUDFLARE_API_TOKEN is not set — Cloudflare pages will show "Not configured"');
   if (!config.deadManHeartbeatUrl) warnings.push('DEADMAN_HEARTBEAT_URL is not set — nobody is alerted if this Ops server itself goes down');
+  else if (deadMan.configError) warnings.push(`${deadMan.configError} — the dead-man heartbeat is disabled`);
+  else if (config.deadManHeartbeatUrl.trim().startsWith('http://')) warnings.push('DEADMAN_HEARTBEAT_URL is not https:// — the heartbeat (and any token in it) is sent unencrypted');
   for (const w of warnings) log.warn('config', w);
   if (errors.length) {
     for (const e of errors) log.error('config', e);
@@ -276,6 +278,7 @@ async function main() {
     shuttingDown = true;
     log.info('server', `${signal} received — finishing requests, saving data, closing connections`);
     closeAllSseClients();
+    stopEngine();
     server.close();
     server.closeIdleConnections?.();
     void Promise.allSettled([flush(), flushMetrics(), flushChecks()])

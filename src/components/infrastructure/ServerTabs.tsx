@@ -88,7 +88,7 @@ export const OverviewTab: React.FC<TabProps & { onNavigateTab?: (tab: string) =>
         {!server.health ? (
           <NotReported isDark={isDark}>Health summary not available from this server version.</NotReported>
         ) : (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(10rem,1fr))] gap-2">
             {server.health.map(h => (
               <button
                 key={h.key}
@@ -147,10 +147,10 @@ export const OverviewTab: React.FC<TabProps & { onNavigateTab?: (tab: string) =>
 const Stat: React.FC<{ label: string; value: React.ReactNode; sub?: React.ReactNode; level?: TelemetryLevel; isDark: boolean }> = ({ label, value, sub, level, isDark }) => {
   const c = ui(isDark);
   return (
-    <div>
+    <div className="min-w-0">
       <div className={`text-[10px] uppercase ${c.muted}`}>{label}</div>
-      <div className={`text-sm font-bold tabular-nums ${level && level !== 'HEALTHY' && level !== 'UNKNOWN' ? levelText(level) : c.strong}`}>{value}</div>
-      {sub && <div className={`text-[10px] ${c.muted}`}>{sub}</div>}
+      <div className={`text-sm font-bold tabular-nums break-words ${level && level !== 'HEALTHY' && level !== 'UNKNOWN' ? levelText(level) : c.strong}`}>{value}</div>
+      {sub && <div className={`text-[10px] break-words ${c.muted}`}>{sub}</div>}
     </div>
   );
 };
@@ -251,7 +251,7 @@ export const ResourcesTab: React.FC<TabProps> = ({ server, isDark }) => {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <div className={c.card}>
           <SectionTitle isDark={isDark}>CPU</SectionTitle>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(7rem,1fr))] gap-3">
             <Stat isDark={isDark} label="Usage" value={`${fmtNum(t.cpuPercent)}%`} level={levelOf(t.cpuPercent, THRESHOLDS.cpuPercent)} sub={cores ? `${cores} cores` : '—'} />
             <Stat isDark={isDark} label="I/O wait" value={t.cpuIowaitPercent == null ? '—' : `${fmtNum(t.cpuIowaitPercent)}%`} level={levelOf(t.cpuIowaitPercent, THRESHOLDS.cpuIowaitPercent)} />
             <Stat isDark={isDark} label="Steal" value={t.cpuStealPercent == null ? '—' : `${fmtNum(t.cpuStealPercent)}%`} level={levelOf(t.cpuStealPercent, THRESHOLDS.cpuStealPercent)} />
@@ -262,7 +262,7 @@ export const ResourcesTab: React.FC<TabProps> = ({ server, isDark }) => {
         </div>
         <div className={c.card}>
           <SectionTitle isDark={isDark}>Memory</SectionTitle>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(7rem,1fr))] gap-3">
             <Stat isDark={isDark} label="Used" value={`${fmtNum(t.ramPercent)}%`} level={levelOf(t.ramPercent, THRESHOLDS.memoryPercent)} sub={t.memUsedMb != null ? fmtMb(t.memUsedMb) : undefined} />
             <Stat isDark={isDark} label="Available" value={fmtMb(t.memAvailableMb)} />
             <Stat isDark={isDark} label="Total" value={t.memTotalMb != null ? fmtMb(t.memTotalMb) : server.ramGb ? `${server.ramGb} GB` : '—'} />
@@ -276,7 +276,7 @@ export const ResourcesTab: React.FC<TabProps> = ({ server, isDark }) => {
         </div>
         <div className={c.card}>
           <SectionTitle isDark={isDark}>Root disk (/)</SectionTitle>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(7rem,1fr))] gap-3">
             <Stat isDark={isDark} label="Used" value={`${fmtNum(t.diskPercent)}%`} level={levelOf(t.diskPercent, THRESHOLDS.diskPercent)} sub={t.diskUsedGb != null ? `${t.diskUsedGb} GB` : undefined} />
             <Stat isDark={isDark} label="Free" value={t.diskFreeGb != null ? `${t.diskFreeGb} GB` : '—'} />
             <Stat isDark={isDark} label="Total" value={t.diskTotalGb != null ? `${t.diskTotalGb} GB` : server.diskGb ? `${server.diskGb} GB` : '—'} />
@@ -285,7 +285,7 @@ export const ResourcesTab: React.FC<TabProps> = ({ server, isDark }) => {
         <div className={c.card}>
           <SectionTitle isDark={isDark}>Disk I/O</SectionTitle>
           {!server.diskIo ? <div className={`text-[11px] ${c.muted}`}>{needsAgent33}</div> : (
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(7rem,1fr))] gap-3">
               <Stat isDark={isDark} label="Read" value={fmtBytesRate(t.diskReadBytesPerSec)} sub={`${fmtNum(t.diskReadOpsPerSec, 0)} IOPS`} />
               <Stat isDark={isDark} label="Write" value={fmtBytesRate(t.diskWriteBytesPerSec)} sub={`${fmtNum(t.diskWriteOpsPerSec, 0)} IOPS`} />
               <Stat isDark={isDark} label="Utilisation" value={t.diskUtilPercent == null ? '—' : `${fmtNum(t.diskUtilPercent)}%`} level={levelOf(t.diskUtilPercent, THRESHOLDS.diskIoUtilPercent)} sub="busiest disk" />

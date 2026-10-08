@@ -23,6 +23,7 @@ import { nextIncidentId } from './engine.ts';
 import { agentState, backupStatus, databaseHealth } from './health.ts';
 import { readiness } from './readiness.ts';
 import { serverHealth } from './telemetryHealth.ts';
+import { deadMan } from './engine.ts';
 import { log } from './logger.ts';
 
 export interface AlertInput {
@@ -155,6 +156,14 @@ export function evaluateAlerts() {
         openAlert({ fingerprint: dfp, title: `${app.name} DR is NOT READY`, severity: 'HIGH', detail: failing.map(c => `${c.label}: ${c.detail}`).join(' · '), applicationId: app.id, environment: 'DR', source: 'DR Readiness', affected: [app.name] });
       } else if (r.overall === 'READY' || r.overall === 'PARTIALLY_READY') resolveAlert(dfp, 'DR Readiness', `DR readiness is ${r.overall}`);
     }
+
+    // Dead-man heartbeat: the local worker cannot reach the external watchdog. (If this process is down,
+    // nothing here runs — that case is alerted by the external watchdog itself.)
+    if (deadMan.status === 'FAILING') {
+      openAlert({ fingerprint: 'deadman-heartbeat', title: 'Dead-man heartbeat to the external watchdog is failing', severity: 'HIGH',
+        detail: `No successful outbound heartbeat to ${deadMan.nodeLocation} for more than ${deadMan.toleranceSec}s (${deadMan.consecutiveFailures} failed attempt(s)${deadMan.lastError ? `, last: ${deadMan.lastError}` : ''}). The watchdog will alert as if this control plane were down.`,
+        source: 'Dead-Man Switch', affected: ['Scholario Ops control plane'] });
+    } else if (deadMan.status === 'HEALTHY') resolveAlert('deadman-heartbeat', 'Dead-Man Switch', 'Outbound heartbeat succeeding again');
 
     // SSL certificates expiring soon (expired / invalid certificates are monitor incidents already)
     for (const m of db.monitors.filter(x => x.type === 'SSL' && x.enabled)) {

@@ -100,3 +100,48 @@ test('status is never conveyed by colour alone: badges carry an icon and a word'
   const html = render(full).OverviewTab + render(full).ServicesTab;
   assert.match(html, /<svg[^>]*aria-hidden="true"[^>]*>[\s\S]*?<\/svg><span>(Healthy|Warning|Critical|Unknown|FAILED|\d+|Connected)<\/span>/);
 });
+
+// ── Dead-man heartbeat panel ─────────────────────────────────────────────────
+import { DeadManPanel } from '../src/components/visuals/HeartbeatPulseChart.tsx';
+import type { DeadManControlPlane } from '../src/types/index.ts';
+
+const NOW = Date.parse('2026-10-08T10:00:00Z');
+const dm = (over: Partial<DeadManControlPlane>): DeadManControlPlane => ({
+  id: 'deadman-outbound', name: 'External Dead-Man Heartbeat', nodeLocation: 'hc-ping.com', targetControlPlane: 'hc-ping.com', lastHeartbeatReceivedAt: '',
+  intervalSec: 60, toleranceSec: 180, status: 'HEALTHY', consecutiveMisses: 0, configured: true, configError: null, workerRunning: true,
+  lastAttemptAt: null, lastSuccessAt: null, lastHttpStatus: null, lastLatencyMs: null, lastError: null, consecutiveFailures: 0, ...over,
+});
+// Text nodes are joined (React SSR separates them with <!-- -->); SVG namespace URLs are not data
+const renderDm = (d: DeadManControlPlane, isDark = true) => renderToString(React.createElement(DeadManPanel, { deadMan: d, isDark, now: NOW })).replace(/<!-- -->/g, "").replace(/ xmlns="[^"]*"/g, "");
+
+test('dead-man panel: healthy shows real ping age, latency, failures; never a URL', () => {
+  const html = renderDm(dm({ status: 'HEALTHY', lastAttemptAt: '2026-10-08T09:59:55Z', lastSuccessAt: '2026-10-08T09:59:48Z', lastHeartbeatReceivedAt: '2026-10-08T09:59:48Z', lastHttpStatus: 200, lastLatencyMs: 84 }));
+  assert.match(html, /HEALTHY/);
+  assert.match(html, /12s ago/);
+  assert.match(html, /84 ms/);
+  assert.match(html, /HTTP 200/);
+  assert.match(html, /Running/);
+  assert.match(html, /Configured/);
+  assert.equal(/https?:\/\//.test(html), false, 'no URL in the panel');
+});
+
+test('dead-man panel: degraded / failing / pending / not configured / missing data', () => {
+  const degraded = renderDm(dm({ status: 'DEGRADED', lastAttemptAt: '2026-10-08T09:59:58Z', lastSuccessAt: '2026-10-08T09:58:00Z', lastHttpStatus: 503, lastLatencyMs: 40, consecutiveFailures: 2, lastError: 'HTTP 503' }));
+  assert.match(degraded, /DEGRADED/);
+  assert.match(degraded, /Last error: HTTP 503/);
+  assert.match(degraded, /60s of tolerance left/);
+  const failing = renderDm(dm({ status: 'FAILING', lastAttemptAt: '2026-10-08T09:59:58Z', consecutiveFailures: 5, lastError: 'fetch failed (ECONNREFUSED)' }), false);
+  assert.match(failing, /FAILING/);
+  assert.match(failing, /None yet/);
+  assert.match(failing, /—/, 'latency not measured → dash, not 0');
+  assert.equal(/>0 ms</.test(failing), false);
+  const pending = renderDm(dm({ status: 'PENDING' }));
+  assert.match(pending, /STARTING/);
+  assert.match(pending, /Not reported/);
+  const off = renderDm(dm({ status: 'NOT_CONFIGURED', configured: false, workerRunning: false, nodeLocation: 'Not configured', targetControlPlane: '' }));
+  assert.match(off, /NOT CONFIGURED/);
+  assert.match(off, /Set <code[^>]*>DEADMAN_HEARTBEAT_URL<\/code> on the Scholario Ops/);
+  assert.match(off, /external watchdog is responsible for alerting if heartbeats stop/);
+  const bad = renderDm(dm({ status: 'NOT_CONFIGURED', configured: false, configError: 'DEADMAN_HEARTBEAT_URL must be an http:// or https:// URL' }));
+  assert.match(bad, /must be an http/);
+});

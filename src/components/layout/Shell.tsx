@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
+import { deadManDot, deadManLabel } from '../ui/deadman';
 import { useAuth } from '../../context/AuthContext';
 import { WsStatusBadge } from '../ui/WsStatusBadge';
 import { Toaster } from '../ui/Toaster';
@@ -273,17 +274,17 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
             <div className="space-y-1.5 font-mono">
               <div className="flex items-center justify-between text-slate-300">
                 <span className="text-[9px] uppercase tracking-wider">Dead-Man Heartbeat</span>
-                <span className={`w-1.5 h-1.5 rounded-full ${deadMan.status === 'HEALTHY' ? 'bg-emerald-400 animate-pulse' : deadMan.status === 'NOT_CONFIGURED' ? 'bg-slate-500' : 'bg-rose-400 animate-ping'}`} />
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${deadManDot(deadMan.status)} ${deadMan.status === 'HEALTHY' ? 'animate-pulse' : deadMan.status === 'FAILING' ? 'animate-ping' : ''}`} aria-label={deadManLabel(deadMan.status)} />
               </div>
-              <div className="text-slate-400 text-[10px] truncate" title={deadMan.targetControlPlane || 'Set DEADMAN_HEARTBEAT_URL to enable'}>
-                {deadMan.status === 'NOT_CONFIGURED'
+              <div className="text-slate-400 text-[10px] truncate" title={deadMan.configured ? `${deadManLabel(deadMan.status)} · ${deadMan.nodeLocation} every ${deadMan.intervalSec}s` : 'Set DEADMAN_HEARTBEAT_URL on the server to enable'}>
+                {!deadMan.configured
                   ? 'Not configured'
-                  : `${deadMan.nodeLocation} · every ${deadMan.intervalSec}s${deadMan.status === 'CRITICAL_SILENCE' ? ' · FAILING' : ''}`}
+                  : `${deadManLabel(deadMan.status)} · every ${deadMan.intervalSec}s`}
               </div>
             </div>
           ) : (
             <div className="flex justify-center">
-              <span className={`w-1.5 h-1.5 rounded-full ${deadMan.status === 'HEALTHY' ? 'bg-emerald-400' : deadMan.status === 'NOT_CONFIGURED' ? 'bg-slate-500' : 'bg-rose-400'}`} />
+              <span className={`w-1.5 h-1.5 rounded-full ${deadManDot(deadMan.status)}`} aria-label={`Dead-man heartbeat: ${deadManLabel(deadMan.status)}`} />
             </div>
           )}
         </div>
@@ -295,26 +296,27 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       }`}>
         
         {/* TOP BAR */}
-        <header className={`h-12 px-5 flex items-center justify-between shrink-0 z-20 border-b ${
+        <header className={`h-12 px-4 lg:px-5 flex items-center justify-between gap-3 min-w-0 shrink-0 z-20 border-b ${
           isDark 
             ? 'bg-[#0B0F17] border-[#1B2436] text-slate-100' 
             : 'bg-white border-[#E2E8F0] text-slate-900 shadow-xs'
         }`}>
           
           {/* Left Zone: Environment Tag & Context */}
-          <div className="flex items-center gap-3">
-            <span className="text-xs font-bold tracking-tight font-mono">
+          <div className="flex items-center gap-3 min-w-0 shrink-0">
+            <span className="text-xs font-bold tracking-tight font-mono whitespace-nowrap">
               SCHOLARIO IT OPS
             </span>
-            <span className={`hidden sm:inline ${isDark ? 'text-slate-600' : 'text-slate-400'}`}>/</span>
-            <div className={`flex items-center gap-1.5 text-[11px] font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            {/* Counts only where there is room (they are also on the Overview); never wrap out of the bar */}
+            <span className={`hidden 2xl:inline ${isDark ? 'text-slate-600' : 'text-slate-400'}`}>/</span>
+            <div className={`hidden 2xl:flex items-center gap-1.5 text-[11px] font-mono whitespace-nowrap ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
               <span className={`w-1.5 h-1.5 rounded-full ${systemSummary.totalServers === 0 ? 'bg-slate-500' : systemSummary.healthyServers === systemSummary.totalServers ? 'bg-emerald-500' : 'bg-amber-500'}`} />
               <span>{systemSummary.totalServers} SERVERS · {systemSummary.totalApps} APPS · {systemSummary.totalMonitors} MONITORS</span>
             </div>
           </div>
 
           {/* Center Zone: Search bar */}
-          <div className="flex-1 max-w-sm mx-4">
+          <div className="flex-1 min-w-0 max-w-sm">
             <button
               onClick={() => setIsCommandPaletteOpen(true)}
               className={`w-full flex items-center justify-between px-2.5 py-1 rounded text-xs transition-colors group cursor-pointer border ${
@@ -323,11 +325,11 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                   : 'bg-[#F1F5F9] hover:bg-[#E2E8F0] border-[#CBD5E1] text-slate-600'
               }`}
             >
-              <div className="flex items-center gap-2">
-                <Search className="w-3.5 h-3.5 text-slate-400 group-hover:text-blue-500" />
+              <div className="flex items-center gap-2 min-w-0">
+                <Search className="w-3.5 h-3.5 shrink-0 text-slate-400 group-hover:text-blue-500" />
                 <span className="truncate text-[11px]">Search routes, apps, VPS, incidents, actions...</span>
               </div>
-              <div className="hidden sm:flex items-center gap-1 font-mono text-[9px]">
+              <div className="hidden xl:flex items-center gap-1 font-mono text-[9px] shrink-0 ml-2">
                 <kbd className={`px-1 py-0.5 border rounded ${
                   isDark ? 'bg-[#0B0F17] border-slate-700 text-slate-400' : 'bg-white border-slate-300 text-slate-500 shadow-2xs'
                 }`}>Ctrl</kbd>
@@ -340,7 +342,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
           </div>
 
           {/* Right Zone: Setup, Theme Toggle, Health & Profile */}
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2 lg:gap-2.5 shrink-0">
             {/* Setup quick action */}
             <button
               onClick={() => navigate('/setup')}
@@ -398,7 +400,11 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                 systemSummary.overallHealth === 'CRITICAL' ? 'bg-rose-500 animate-pulse' :
                 systemSummary.overallHealth === 'WARNING' ? 'bg-amber-500' : systemSummary.overallHealth === 'UNKNOWN' ? 'bg-slate-500' : 'bg-emerald-500'
               }`} />
-              <span className="text-[11px] font-semibold">
+              <span className="text-[11px] font-semibold whitespace-nowrap xl:hidden">
+                {systemSummary.criticalIncidents > 0 ? `${systemSummary.criticalIncidents} CRITICAL` : systemSummary.openIncidents > 0 ? `${systemSummary.openIncidents} OPEN`
+                  : systemSummary.overallHealth === 'OPERATIONAL' ? 'OK' : systemSummary.overallHealth === 'WARNING' ? 'DEGRADED' : systemSummary.overallHealth === 'CRITICAL' ? 'CRITICAL' : 'UNKNOWN'}
+              </span>
+              <span className="text-[11px] font-semibold whitespace-nowrap hidden xl:inline">
                 {systemSummary.criticalIncidents > 0 
                   ? `${systemSummary.criticalIncidents} CRITICAL INCIDENT` 
                   : systemSummary.openIncidents > 0 
@@ -429,7 +435,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
             {/* Operator avatar + logout */}
             <div className={`flex items-center gap-2 pl-2 border-l ${isDark ? 'border-slate-800' : 'border-slate-300'}`}>
-              <span className={`font-mono text-[11px] font-medium ${isDark ? 'text-slate-300' : 'text-slate-800'}`}>
+              <span className={`hidden lg:inline font-mono text-[11px] font-medium whitespace-nowrap truncate max-w-[9rem] xl:max-w-[12rem] ${isDark ? 'text-slate-300' : 'text-slate-800'}`} title={displayName}>
                 {displayName}
               </span>
               {user?.isOnCall && (
@@ -504,10 +510,12 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
         )}
 
         {/* SCROLLABLE MAIN CONTENT AREA */}
-        <main className={`flex-1 overflow-y-auto p-5 transition-colors ${
+        {/* Content container: clear gutter to the sidebar and the window edge; children can never widen the page */}
+        <main className={`flex-1 min-w-0 overflow-y-auto overflow-x-hidden px-4 py-4 sm:px-5 lg:px-6 xl:px-7 transition-colors ${
           isDark ? 'bg-[#0E131F] text-slate-100' : 'bg-[#F6F8FC] text-slate-900'
         }`}>
-          <div className="max-w-7xl mx-auto space-y-5">
+          {/* Full width of the content area (no centred max-width column, so no large empty side margins) */}
+          <div className="w-full min-w-0 space-y-5">
             {isLoading ? (
               <div className={`rounded-lg border p-10 text-center text-xs font-mono animate-pulse ${isDark ? 'border-[#1E293B] text-slate-400' : 'border-slate-200 text-slate-500'}`}>
                 Loading live data from the Scholario Ops API…

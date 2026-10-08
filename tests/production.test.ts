@@ -93,7 +93,8 @@ test('startup with the database unavailable: process stays up, readiness 503, AP
   const child = spawnServer({ DATABASE_URL: 'postgresql://nobody:nothing@127.0.0.1:1/none' }, port);
   try {
     let live = 0;
-    for (let i = 0; i < 40 && live !== 200; i++) { try { live = (await fetch(`http://127.0.0.1:${port}/api/health/live`)).status; } catch { /* starting */ } await new Promise(r => setTimeout(r, 250)); }
+    // Up to 30 s: a freshly spawned tsx process occasionally needs > 10 s to start on a busy machine (flaky before at 10 s)
+    for (let i = 0; i < 120 && live !== 200; i++) { try { live = (await fetch(`http://127.0.0.1:${port}/api/health/live`)).status; } catch { /* starting */ } await new Promise(r => setTimeout(r, 250)); }
     assert.equal(live, 200, 'liveness must answer while the database is down');
     const ready = await fetch(`http://127.0.0.1:${port}/api/health/ready`);
     assert.equal(ready.status, 503);
@@ -297,6 +298,58 @@ test('graceful shutdown: pending data saved, connections closed, exit code 0', a
   const code = await Promise.race([exited, new Promise<'timeout'>(r => setTimeout(() => r('timeout'), 10_000))]);
   assert.equal(code, 0, `expected clean exit, got ${code}\n${out.slice(-1500)}`);
   assert.match(out, /shutdown complete/);
+});
+
+test('dead-man heartbeat end-to-end: real pings, HEALTHY status via API, URL never in API / logs, clean shutdown', async () => {
+  let hits = 0;
+  const wd = (await import('node:http')).createServer((_q, r) => { hits++; r.end('OK'); });
+  await new Promise<void>(r => wd.listen(0, '127.0.0.1', () => r()));
+  const secretPath = 'ping/7a6b5c4d-e2e-secret-uuid-0042';
+  const secretQs = 'e2e-heartbeat-token-value';
+  const url = `http://127.0.0.1:${(wd.address() as { port: number }).port}/${secretPath}?token=${secretQs}`;
+  const port = PORT + 70;
+  let out = '';
+  const child = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
+    env: { ...process.env, NODE_ENV: 'production', PORT: String(port), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR, JWT_SECRET: SECRETS.jwt, ADMIN_EMAIL: ADMIN.email, ADMIN_PASSWORD: ADMIN.password, LOG_FORMAT: 'json', CLOUDFLARE_API_TOKEN: '', DEADMAN_HEARTBEAT_URL: url, DEADMAN_INTERVAL_SEC: '10', DEADMAN_TOLERANCE_SEC: '30' },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  });
+  child.stdout?.on('data', d => { out += d; });
+  child.stderr?.on('data', d => { out += d; });
+  try {
+    const base = `http://127.0.0.1:${port}`;
+    await waitReady(base);
+    const login = await (await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ADMIN) })).json() as { data: { tokens: { accessToken: string } } };
+    const get = async (p: string) => { const r = await fetch(base + p, { headers: { Authorization: `Bearer ${login.data.tokens.accessToken}` } }); return { status: r.status, raw: await r.text() }; };
+    const st = await waitFor(async () => {
+      const r = await get('/api/v1/deadman/status');
+      const d = JSON.parse(r.raw).data;
+      return d.status === 'HEALTHY' ? d : null;
+    });
+    assert.ok(hits >= 1, 'the watchdog received a ping');
+    assert.equal(st.configured, true);
+    assert.equal(st.workerRunning, true);
+    assert.equal(st.intervalSec, 10);
+    assert.equal(st.toleranceSec, 30);
+    assert.equal(st.consecutiveFailures, 0);
+    assert.equal(typeof st.lastLatencyMs, 'number');
+    assert.ok(st.lastSuccessAt && st.lastAttemptAt);
+    for (const p of ['/api/v1/deadman/status', '/api/v1/bootstrap', '/api/v1/integrations', '/api/v1/system/summary', '/api/health', '/api/v1/reports/daily']) {
+      const r = await get(p);
+      assert.ok(r.status < 500, `${p} → ${r.status}`);
+      for (const s of [secretPath, secretQs, url]) assert.equal(r.raw.includes(s), false, `${p} exposes the heartbeat URL`);
+    }
+    const integ = JSON.parse((await get('/api/v1/integrations')).raw).data.deadMan;
+    assert.deepEqual(Object.keys(integ).sort(), ['configError', 'configured', 'intervalSec', 'toleranceSec']);
+    const exited = new Promise<number | null>(resolve => child.once('exit', code => resolve(code)));
+    child.send('shutdown');
+    const code = await Promise.race([exited, new Promise<'timeout'>(r => setTimeout(() => r('timeout'), 10_000))]);
+    assert.equal(code, 0, `clean exit expected, got ${code}`);
+    for (const s of [secretPath, secretQs, url]) assert.equal(out.includes(s), false, 'heartbeat URL in the logs');
+    assert.match(out, /heartbeat to 127\.0\.0\.1 every 10s/);
+  } finally {
+    if (child.exitCode === null) child.kill();
+    wd.close();
+  }
 });
 
 test('logs are structured JSON and contain no secrets', async () => {

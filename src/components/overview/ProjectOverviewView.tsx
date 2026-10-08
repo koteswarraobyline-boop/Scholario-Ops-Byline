@@ -113,12 +113,12 @@ export const ProjectOverviewView: React.FC = () => {
   const autoFailoverApps = applications.filter(a => a.autoFailover).length;
   const dnsLinkedApps = applications.filter(a => a.dnsRecordName).length;
   const cfConfigured = Boolean(integrations?.cloudflare.configured);
-  const deadManConfigured = deadMan.status !== 'NOT_CONFIGURED';
+  const deadManConfigured = deadMan.configured;
   const thresholds = [...new Set(monitors.map(m => m.failureConfirmationThreshold))];
 
   const deadManLabel = !deadManConfigured
     ? 'Dead-man: not configured'
-    : deadMan.status === 'HEALTHY' ? `Dead-man: OK (${deadMan.intervalSec}s ping)` : `Dead-man: SILENT (${deadMan.consecutiveMisses} missed)`;
+    : deadMan.status === 'HEALTHY' ? `Dead-man: OK (${deadMan.intervalSec}s ping)` : deadMan.status === 'PENDING' ? 'Dead-man: starting' : `Dead-man: ${deadMan.status} (${deadMan.consecutiveFailures} failed)`;
 
   const card = `p-4 rounded-lg border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`;
   const tile = `p-3 rounded border text-center ${isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'}`;
@@ -408,8 +408,8 @@ export const ProjectOverviewView: React.FC = () => {
                 The control plane pings an external heartbeat service on a fixed interval. If the control plane itself
                 goes down, that external service stops receiving pings and alerts independently.{' '}
                 {deadManConfigured
-                  ? `Configured target: ${deadMan.nodeLocation}, every ${deadMan.intervalSec}s, silence alert after ${deadMan.toleranceSec}s. Current status: ${deadMan.status}.`
-                  : 'Not configured — set DEADMAN_HEARTBEAT_URL in the server .env and restart.'}
+                  ? `Watchdog: ${deadMan.nodeLocation}, every ${deadMan.intervalSec}s, tolerance ${deadMan.toleranceSec}s. Current status: ${deadMan.status}.`
+                  : 'Not configured — set DEADMAN_HEARTBEAT_URL on the Scholario Ops server and restart the backend.'}
               </p>
             </div>
 
