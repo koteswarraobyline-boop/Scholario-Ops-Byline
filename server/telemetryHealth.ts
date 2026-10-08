@@ -12,7 +12,7 @@ import { AgentHealthTelemetry, HealthCategory, HealthCategoryKey, ServerMetricPo
 import { THRESHOLDS, levelOf, worstLevel, Band } from '../src/lib/thresholds.ts';
 import { AGENT_VERSION } from './agent.ts';
 import { agentState } from './health.ts';
-import { minuteMetrics, ServerRecord } from './store.ts';
+import { db, minuteMetrics, ServerRecord } from './store.ts';
 
 /** Numeric dotted-version compare: <0 when a < b. Non-numeric parts compare as 0. */
 export function compareVersions(a: string, b: string): number {
@@ -252,9 +252,12 @@ export function serverHealth(srv: ServerRecord): { health: HealthCategory[]; war
   if (!srv.databases?.length) cat('database', 'Database', 'UNKNOWN', 'No database probe (set DB_ENGINE in /etc/scholario-agent.conf)');
   else {
     const levels: TelemetryLevel[] = [];
+    // A database configured for an application on this server already raises the per-application
+    // "database unavailable" incident (alerts.ts) — only uncovered probes raise their own, never both
+    const coveredByApp = db.applications.some(a => (a.prdServerId === srv.id && a.environments?.PRD?.dbEngine) || (a.drServerId === srv.id && a.environments?.DR?.dbEngine));
     for (const d of srv.databases) {
       const label = `${d.engine}${d.name ? ` ${d.name}` : ''}`;
-      if (!d.available) { levels.push('CRITICAL'); warn(`db-down:${label}`, 'database', 'CRITICAL', `Database ${label} unavailable: ${d.error ?? 'no error text'}`); continue; }
+      if (!d.available) { levels.push('CRITICAL'); warn(`db-down:${label}`, 'database', 'CRITICAL', `Database ${label} unavailable: ${d.error ?? 'no error text'}`, !coveredByApp); continue; }
       const cl = levelOf(d.connectionUsagePercent, THRESHOLDS.dbConnectionUsagePercent as Band);
       levels.push(cl === 'UNKNOWN' ? 'HEALTHY' : cl);
       warn(`db-connections:${label}`, 'database', cl, `Database ${label} connections at ${fmt(d.connectionUsagePercent)} of max`);

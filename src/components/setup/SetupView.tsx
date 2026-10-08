@@ -121,24 +121,15 @@ const IntegrationsPanel: React.FC = () => {
       detail: integrations.smtp.configured ? <>Email channels can deliver.</> : <>Optional. Set <code className={st.code}>SMTP_HOST</code>, <code className={st.code}>SMTP_FROM</code> (+ user/pass) for email alerts.</>,
     },
     {
-      key: 'deadman', icon: HeartPulse, title: 'Dead-man heartbeat', ok: deadMan.status === 'HEALTHY', configured: integrations.deadMan.configured,
+      // Built in: derived from the agents' reports — nothing to configure, no external watchdog
+      key: 'deadman', icon: HeartPulse, title: 'Dead-man heartbeat', ok: deadMan.status === 'HEALTHY', configured: deadMan.servers.length > 0,
       detail: (
         <span className="block space-y-1 break-words">
           <span className="block">
-            Status: <b>{integrations.deadMan.configured ? 'Configured' : 'Not configured'}</b>
-            {integrations.deadMan.configured && <> · {deadManLabel(deadMan.status)} · last successful ping {deadMan.lastSuccessAt ? timeAgo(deadMan.lastSuccessAt) : 'none yet'}</>}
-            {' '}· interval {integrations.deadMan.intervalSec ?? deadMan.intervalSec} seconds · tolerance {integrations.deadMan.toleranceSec ?? deadMan.toleranceSec} seconds
+            Status: <b>{deadManLabel(deadMan.status)}</b>
+            {deadMan.servers.length > 0 && <> · {deadMan.servers.map(s => `${s.environment} VPS ${deadManLabel(s.state).toLowerCase()}`).join(' · ')}</>}
           </span>
-          <span className="block">This control plane sends periodic outbound heartbeats to an external watchdog. The external watchdog is responsible for alerting if heartbeats stop.</span>
-          {!integrations.deadMan.configured && (
-            <span className="block">
-              {integrations.deadMan.configError
-                ? <span className="text-rose-500">{integrations.deadMan.configError}. </span>
-                : 'Recommended. '}
-              Set <code className={st.code}>DEADMAN_HEARTBEAT_URL</code> (e.g. a healthchecks-style ping URL) on the Scholario Ops server and restart the backend.
-              The URL stays on the server — it is never shown here.
-            </span>
-          )}
+          <span className="block">Built in — no setup needed. Heartbeats of the monitored PRD / DR servers, their applications, services and databases come from the telemetry agent's reports; a heartbeat that goes stale or fails opens an incident.</span>
         </span>
       ),
     },

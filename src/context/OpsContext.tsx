@@ -150,25 +150,37 @@ interface OpsContextType {
 const OpsContext = createContext<OpsContextType | undefined>(undefined);
 
 const EMPTY_DEADMAN: DeadManControlPlane = {
-  id: 'deadman-outbound',
-  name: 'External Dead-Man Heartbeat',
-  nodeLocation: 'Not configured',
-  targetControlPlane: '',
-  lastHeartbeatReceivedAt: '',
-  intervalSec: 60,
-  toleranceSec: 180,
+  id: 'deadman-infrastructure',
+  name: 'Dead-Man Watchdog Heartbeat Stream',
   status: 'NOT_CONFIGURED',
-  consecutiveMisses: 0,
-  configured: false,
-  configError: null,
-  workerRunning: false,
-  lastAttemptAt: null,
-  lastSuccessAt: null,
-  lastHttpStatus: null,
-  lastLatencyMs: null,
-  lastError: null,
-  consecutiveFailures: 0,
+  evaluatedAt: '',
+  telemetryIntervalSec: null,
+  staleAfterSec: 60,
+  disconnectedAfterSec: 600,
+  servers: [],
+  counts: { healthy: 0, degraded: 0, failing: 0, unknown: 0, total: 0 },
 };
+
+/**
+ * Accepts whatever the API sends for the dead-man heartbeat and returns a complete object. An older
+ * backend (or a partial payload) must never crash the UI: missing lists become empty, an unknown
+ * status becomes UNKNOWN.
+ */
+export function normalizeDeadMan(raw: unknown): DeadManControlPlane {
+  const d = (raw && typeof raw === 'object' ? raw : {}) as Partial<DeadManControlPlane>;
+  const statuses: DeadManControlPlane['status'][] = ['HEALTHY', 'DEGRADED', 'FAILING', 'UNKNOWN', 'NOT_CONFIGURED'];
+  const servers = Array.isArray(d.servers) ? d.servers.filter(s => s && typeof s === 'object' && s.server && s.applications && s.services && s.databases) : [];
+  return {
+    ...EMPTY_DEADMAN,
+    ...d,
+    status: statuses.includes(d.status as DeadManControlPlane['status']) ? d.status as DeadManControlPlane['status'] : (servers.length ? 'UNKNOWN' : 'NOT_CONFIGURED'),
+    servers,
+    counts: d.counts && typeof d.counts === 'object' ? { ...EMPTY_DEADMAN.counts, ...d.counts } : EMPTY_DEADMAN.counts,
+    telemetryIntervalSec: typeof d.telemetryIntervalSec === 'number' ? d.telemetryIntervalSec : null,
+    staleAfterSec: typeof d.staleAfterSec === 'number' ? d.staleAfterSec : EMPTY_DEADMAN.staleAfterSec,
+    disconnectedAfterSec: typeof d.disconnectedAfterSec === 'number' ? d.disconnectedAfterSec : EMPTY_DEADMAN.disconnectedAfterSec,
+  };
+}
 
 const upsert = <T extends { id: string }>(list: T[], item: T, prepend = true): T[] =>
   list.some(x => x.id === item.id) ? list.map(x => (x.id === item.id ? item : x)) : prepend ? [item, ...list] : [...list, item];
@@ -271,7 +283,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setBackups(d.backups);
     setAuditLogs(d.auditLogs);
     setCloudflareZones(d.cloudflareZones);
-    setDeadMan(d.deadMan);
+    setDeadMan(normalizeDeadMan(d.deadMan));
     setIntegrations(d.integrations);
     setLoadBalancer(d.loadBalancer ?? null);
     setServerSummary(d.summary);
@@ -363,7 +375,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         case 'deployments_changed': refetch('deployments', async () => setDeployments(await api.getDeployments())); break;
         case 'backups_changed': refetch('backups', async () => setBackups(await api.getBackups())); break;
         case 'cloudflare_update': setCloudflareZones(raw as CloudflareZone[]); refetch('integrations', async () => setIntegrations(await api.integrations())); break;
-        case 'deadman_update': setDeadMan(raw as DeadManControlPlane); break;
+        case 'deadman_update': setDeadMan(normalizeDeadMan(raw)); break;
         case 'loadbalancer_update':
           setLoadBalancer(raw as LoadBalancerState);
           refetch('integrations', async () => setIntegrations(await api.integrations()));

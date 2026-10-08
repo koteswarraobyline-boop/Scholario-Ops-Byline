@@ -38,6 +38,7 @@ const LONG = 'very-long-technical-string-without-any-spaces-'.repeat(4);
 let server: ChildProcess | null = null;
 let chrome: ChildProcess | null = null;
 let watchdog: http.Server | null = null;
+let watchdogHits = 0;
 let token = '';
 let login: { tokens: { accessToken: string; refreshToken: string }; user: unknown } | null = null;
 
@@ -83,8 +84,8 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 before(async () => {
   if (SKIP) return;
-  // Watchdog that rejects pings → the dead-man panel shows DEGRADED with an error text
-  watchdog = http.createServer((_q, r) => { r.statusCode = 503; r.end('down'); });
+  // Deprecated external watchdog URL is set on purpose: it must be ignored (no request ever reaches it)
+  watchdog = http.createServer((_q, r) => { watchdogHits++; r.end('OK'); });
   await new Promise<void>(r => watchdog!.listen(0, '127.0.0.1', () => r()));
   server = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
     env: { ...process.env, NODE_ENV: 'production', PORT: String(PORT), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR, ADMIN_EMAIL: ADMIN.email, ADMIN_PASSWORD: ADMIN.password,
@@ -270,19 +271,17 @@ for (const width of WIDTHS) {
   });
 }
 
-test('dead-man card shows the real backend state (DEGRADED from failing pings) without the URL', { skip: SKIP }, async () => {
-  await visit('/overview', 1366, 'Dead-Man');
-  for (let i = 0; i < 40; i++) {
-    if (await page!.eval<boolean>(`document.body.innerText.includes('Degraded') || document.body.innerText.includes('Failing')`)) break;
-    await sleep(250);
-  }
+test('dead-man heartbeat stream shows the monitored PRD / DR infrastructure from agent reports; no external watchdog', { skip: SKIP }, async () => {
+  await visit('/monitors', 1366, 'Dead-Man Watchdog Heartbeat Stream');
   const text = await page!.eval<string>('document.body.innerText');
-  assert.match(text, /Watchdog/);
-  assert.match(text, /Configured/);
-  assert.match(text, /Degraded|Failing/);
-  assert.equal(text.includes('secret-uuid'), false, 'heartbeat URL visible in the page');
+  for (const t of ['PRD VPS', 'DR VPS', 'Server heartbeat', 'Application checks', 'Services', 'Database', 'UI stream: 1 Hz refresh (animation only)']) assert.ok(text.includes(t), t);
+  assert.match(text, /HEARTBEAT FAILING|DEGRADED/, 'seeded failed service / failing app check');
+  await visit('/overview', 1366, 'Dead-Man');
+  const overview = await page!.eval<string>('document.body.innerText');
+  assert.ok(overview.includes("PRD VPS + DR VPS"), "dead-man card names the monitored servers");
   const html = await page!.eval<string>('document.documentElement.outerHTML');
-  assert.equal(html.includes('secret-uuid'), false, 'heartbeat URL in the DOM');
+  assert.equal(html.includes('secret-uuid'), false, 'old watchdog URL in the DOM');
+  assert.equal(watchdogHits, 0, 'no request to the deprecated external watchdog');
 });
 
 if (SKIP) test(`responsive browser checks skipped: ${SKIP}`, { skip: SKIP }, () => {});

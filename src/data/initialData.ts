@@ -290,24 +290,15 @@ export const INITIAL_ESCALATION_POLICIES: EscalationPolicy[] = [
 
 export const INITIAL_AUDIT_LOGS: AuditLog[] = [];
 
+// MOCK DATA (not imported anywhere; never shown as real telemetry)
 export const INITIAL_DEAD_MAN: DeadManControlPlane = {
-  id: 'deadman-external-ch',
-  name: 'Independent External Watchdog',
-  nodeLocation: 'Primary Watchdog Control Plane',
-  targetControlPlane: 'Scholario Ops 2-VPS Engine',
-  lastHeartbeatReceivedAt: new Date().toISOString(),
-  intervalSec: 15,
-  toleranceSec: 45,
-  status: 'HEALTHY',
-  consecutiveMisses: 0,
-  // MOCK DATA (not imported anywhere; never shown as real telemetry)
-  configured: true,
-  configError: null,
-  workerRunning: false,
-  lastAttemptAt: null,
-  lastSuccessAt: null,
-  lastHttpStatus: null,
-  lastLatencyMs: null,
-  lastError: null,
-  consecutiveFailures: 0,
+  id: 'deadman-mock',
+  name: 'Dead-Man Watchdog Heartbeat Stream',
+  status: 'NOT_CONFIGURED',
+  evaluatedAt: '',
+  telemetryIntervalSec: null,
+  staleAfterSec: 60,
+  disconnectedAfterSec: 600,
+  servers: [],
+  counts: { healthy: 0, degraded: 0, failing: 0, unknown: 0, total: 0 },
 };

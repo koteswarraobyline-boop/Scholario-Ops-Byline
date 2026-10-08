@@ -139,7 +139,7 @@ All routes are under `/api`. Health endpoints live outside the API router: `/api
 | Auth | `POST /auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/change-password`, `GET /auth/me` |
 | Machine reports (token auth) | `POST /v1/agent/ingest`, `GET /v1/agent/install/:serverId`, `GET /v1/agent/uninstall`, `GET/POST /v1/heartbeat/:token`, `POST /v1/deployments/report`, `POST /v1/backups/report` |
 | Realtime | `POST /v1/realtime/ticket` → `GET /v1/realtime/stream?ticket=…` (SSE) |
-| Bootstrap & system | `GET /v1/bootstrap`, `/v1/integrations`, `/v1/system/summary`, `/v1/deadman/status` |
+| Bootstrap & system | `GET /v1/bootstrap`, `/v1/integrations`, `/v1/system/summary`, `/v1/deadman/status` (= `/v1/health/heartbeats`) |
 | Servers | CRUD on `/v1/servers`, `/:id/metrics`, `/:id/agent`, `POST /:id/rotate-token` |
 | Applications | CRUD on `/v1/applications`, `/:id/dr-readiness`, `/:id/availability`, `/:id/failover/preflight`, `POST /:id/failover/decision`, `POST /:id/failover` |
 | Monitors | CRUD on `/v1/monitors`, `/:id/toggle`, `/:id/probe`, `/:id/history`, `POST /v1/monitors/probe-all` |
@@ -172,7 +172,7 @@ Tables: `meta`, `users`, `refresh_tokens`, `servers`, `applications`, `applicati
 | Backups | Backup jobs report each run: last backup, age vs threshold, status | HEALTHY · STALE · FAILED · UNKNOWN |
 | Provider | Hostinger API: plan, CPU, RAM, disk, OS, state, region | HEALTHY · DEGRADED · UNAVAILABLE · UNKNOWN |
 | DR readiness | 13 checks (PRD/DR reachable, PRD/DR app, PRD/DR database, replication healthy and lag, recent backup, DR pool, DR origin, DR SSL, DR URL), each PASS · FAIL · UNKNOWN · NOT_CONFIGURED | READY · PARTIALLY_READY · NOT_READY · UNKNOWN |
-| Ops server itself | Dead-man heartbeat: the server pings `DEADMAN_HEARTBEAT_URL` every `DEADMAN_INTERVAL_SEC`, and the external service alerts when the pings stop | — |
+| Dead-man heartbeat | Per monitored server (PRD / DR), from the agent reports: server heartbeat (age, delivery latency, missed reports), local application checks (HTTP status, latency, last success, consecutive failures), watched systemd services, database probes. No external watchdog. | HEALTHY · DEGRADED · FAILING · UNKNOWN |
 
 **Telemetry agent (v3.2.0):** a Python 3 script that uses only the standard library. It reads `/proc`, `df`, `ps`, `systemctl` and `journalctl`, and is configured in `/etc/scholario-agent.conf`. Install it with the one-line command shown in Setup (`/api/v1/agent/install/:serverId`). Tokens are per server and can be rotated. The installer never contains database credentials.
 
@@ -234,7 +234,7 @@ Only `DATABASE_URL` and `ADMIN_EMAIL` / `ADMIN_PASSWORD` are needed to start. Ev
 | Cloudflare | `CLOUDFLARE_API_TOKEN` (read: LB Monitors & Pools, Load Balancers, Zone), `CLOUDFLARE_SYNC_INTERVAL_SEC`, `CLOUDFLARE_LB_SYNC_INTERVAL_SEC` |
 | Hostinger | `HOSTINGER_API_TOKEN`, `HOSTINGER_SYNC_INTERVAL_SEC`, `HOSTINGER_TIMEOUT_MS` |
 | Email | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` |
-| Dead-man | `DEADMAN_HEARTBEAT_URL`, `DEADMAN_INTERVAL_SEC`, `DEADMAN_TOLERANCE_SEC` |
+| Dead-man | none — built in (the old `DEADMAN_*` variables are deprecated and ignored) |
 | Engine | `TELEMETRY_STALE_THRESHOLD_SEC`, `METRICS_RETENTION_HOURS`, `MONITOR_WORKER_CONCURRENCY`, `AUDIT_RETENTION_ENTRIES`, `CHECK_HISTORY_RETENTION_DAYS`, `AGENT_MAX_CLOCK_SKEW_SEC` |
 | Thresholds | `BACKUP_MAX_AGE_HOURS` (26), `REPLICATION_MAX_LAG_SEC` (300), `SSL_EXPIRY_WARN_DAYS` (21), `DR_LATENCY_THRESHOLD_MS` (2000), `ALERT_COOLDOWN_MIN` (15), `API_RATE_LIMIT_PER_MIN` (600) |
 | Logging / CI | `LOG_LEVEL`, `LOG_FORMAT`, `DEPLOY_REPORT_TOKEN` |
@@ -256,7 +256,7 @@ npm run build && npm start   # production build: dist/ + dist-server/server.js
 |---|---|
 | Connect real data sources per application | Install agents on PRD and DR servers, configure the DB probe per environment, schedule backup jobs to call `/v1/backups/report`, set `CLOUDFLARE_API_TOKEN` with LB read permissions. Until then the dashboard shows UNKNOWN / NOT CONFIGURED. |
 | Notification channels | Add Teams/Email/Webhook/PagerDuty channels and escalation policies in Communications |
-| Dead-man heartbeat | Set `DEADMAN_HEARTBEAT_URL` to an external service so the team is told if the Ops server itself goes down |
+| Dead-man heartbeat | Built in: stale / disconnected agents, failing application checks, failed services and unavailable databases open incidents |
 | Branch protection | Apply the ruleset from `docs/BRANCH-PROTECTION.md` in GitHub, if it isn't applied yet |
 | Housekeeping | Rename `src/hooks/useWebSocket.ts` (it uses SSE). Refresh or remove the outdated `COMPLETION_REPORT.md`. Remove `.env.legacy-server.bak` and the imported JSON backups in `data/` once they're no longer needed. |
 | Frontend | Code-split the bundle. Finish modal focus traps and mobile modal layouts. |

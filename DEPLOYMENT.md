@@ -75,7 +75,7 @@ Create `/var/www/scholario-ops/.env` from `.env.example` and run `chmod 600 .env
 | `CLOUDFLARE_API_TOKEN` | recommended | Read-only token: Account › Load Balancing: Monitors and Pools › Read, Zone › Load Balancers › Read, Zone › Zone › Read, with the application zone (e.g. `kodeit.digital`) included in **Zone Resources** (without it, routing / pool order shows "not readable"). It stays on the server. **A token that was ever pasted into chat, source code, a ticket or a log must be rolled** in Cloudflare before production. |
 | `HOSTINGER_API_TOKEN` | optional | Hostinger VPS API (plan, CPU, RAM, disk, OS, state, region), read-only. `HOSTINGER_TIMEOUT_MS` (15000). |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | optional | Email notification channels |
-| `DEADMAN_HEARTBEAT_URL` | recommended | External heartbeat (e.g. healthchecks.io) that alerts you if this server dies |
+| `DEADMAN_HEARTBEAT_URL` | no — deprecated | Ignored (with a warning if set). The dead-man heartbeat is built in and covers the monitored servers / applications / services / databases |
 | `DEPLOY_REPORT_TOKEN` | optional | Lets CI report deployments |
 | `LOG_LEVEL` / `LOG_FORMAT` | no | `info` / JSON in production (`LOG_FORMAT=text` for plain text) |
 | `DATA_DIR` | no (`./data`) | Holds only the generated session secret and first-admin password file |

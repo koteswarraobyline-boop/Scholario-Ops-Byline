@@ -276,10 +276,10 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                 <span className="text-[9px] uppercase tracking-wider">Dead-Man Heartbeat</span>
                 <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${deadManDot(deadMan.status)} ${deadMan.status === 'HEALTHY' ? 'animate-pulse' : deadMan.status === 'FAILING' ? 'animate-ping' : ''}`} aria-label={deadManLabel(deadMan.status)} />
               </div>
-              <div className="text-slate-400 text-[10px] truncate" title={deadMan.configured ? `${deadManLabel(deadMan.status)} · ${deadMan.nodeLocation} every ${deadMan.intervalSec}s` : 'Set DEADMAN_HEARTBEAT_URL on the server to enable'}>
-                {!deadMan.configured
-                  ? 'Not configured'
-                  : `${deadManLabel(deadMan.status)} · every ${deadMan.intervalSec}s`}
+              <div className="text-slate-400 text-[10px] truncate" title={deadMan.servers.map(s => `${s.environment} ${s.hostname}: ${s.state}`).join(' · ') || 'No servers registered'}>
+                {deadMan.servers.length === 0
+                  ? 'No servers registered'
+                  : `${deadManLabel(deadMan.status)} · ${deadMan.servers.map(s => s.environment).join(' + ')}`}
               </div>
             </div>
           ) : (

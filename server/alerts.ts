@@ -8,7 +8,7 @@
  * nothing is sent anywhere.
  *
  * evaluateAlerts() derives alerts from real state every minute:
- *   agent offline · database unavailable · replication broken · backup stale/failed ·
+ *   server heartbeat stale → offline (one incident, escalated) · database unavailable · replication broken · backup stale/failed ·
  *   DR not ready · SSL certificate expiring · server telemetry conditions (sustained CPU / memory /
  *   swap, full disk / inodes, failed systemd service, PM2 app errored / restart spike, local health
  *   check failing, clock not synchronised — see server/telemetryHealth.ts, warnings with alert: true). (Application down/recovered and Cloudflare origin
@@ -23,7 +23,7 @@ import { nextIncidentId } from './engine.ts';
 import { agentState, backupStatus, databaseHealth } from './health.ts';
 import { readiness } from './readiness.ts';
 import { serverHealth } from './telemetryHealth.ts';
-import { deadMan } from './engine.ts';
+import { config } from './config.ts';
 import { log } from './logger.ts';
 
 export interface AlertInput {
@@ -96,13 +96,26 @@ export function resolveAlert(fingerprint: string, source: string, recovery: stri
 /** Derives alerts from current state. Unknown / not-configured states never open or close alerts. */
 export function evaluateAlerts() {
   try {
-    // Agent offline (only servers whose agent reported at least once)
+    // Server heartbeat (only servers whose agent reported at least once). One incident per outage:
+    // opened when the heartbeat is STALE and escalated in place when it becomes DISCONNECTED.
     for (const srv of db.servers) {
       const st = agentState(srv);
       const fp = `agent-offline:${srv.id}`;
-      if (st === 'OFFLINE') {
-        openAlert({ fingerprint: fp, title: `Telemetry agent offline on ${srv.hostname} (${srv.ip})`, severity: srv.environment === 'PRD' ? 'HIGH' : 'WARNING',
-          detail: `No agent report since ${srv.lastSeen}`, applicationId: srv.applicationId, environment: srv.environment, source: 'Agent Monitor', affected: [srv.hostname] });
+      if (st === 'STALE' || st === 'OFFLINE') {
+        const disconnected = st === 'OFFLINE';
+        const title = disconnected ? `Telemetry agent offline on ${srv.hostname} (${srv.ip})` : `Server heartbeat stale on ${srv.hostname} (${srv.ip})`;
+        const severity = disconnected && srv.environment === 'PRD' ? 'HIGH' : 'WARNING';
+        const detail = disconnected ? `No agent report since ${srv.lastSeen} (disconnected after ${config.telemetryStaleSec * 10}s)`
+          : `Agent heartbeat late: last report ${srv.lastSeen} (stale after ${config.telemetryStaleSec}s)`;
+        const { incident } = openAlert({ fingerprint: fp, title, severity, detail, applicationId: srv.applicationId, environment: srv.environment, source: 'Agent Monitor', affected: [srv.hostname] });
+        if (disconnected && (incident.title !== title || incident.severity !== severity)) {
+          incident.title = title;
+          incident.severity = severity;
+          incident.timeline.push({ id: crypto.randomUUID(), timestamp: new Date().toISOString(), source: 'Agent Monitor', level: severity === 'HIGH' ? 'CRITICAL' : 'WARN', message: `Escalated: heartbeat stale → disconnected. ${detail}` });
+          persist();
+          broadcast('incident_update', incident);
+          notifyIncident(incident, 'FIRING');
+        }
       } else if (st === 'ONLINE') resolveAlert(fp, 'Agent Monitor', `Agent on ${srv.hostname} reporting again`);
 
       // Telemetry conditions. Only evaluated with a live agent: without data nothing opens or closes.
@@ -156,14 +169,6 @@ export function evaluateAlerts() {
         openAlert({ fingerprint: dfp, title: `${app.name} DR is NOT READY`, severity: 'HIGH', detail: failing.map(c => `${c.label}: ${c.detail}`).join(' · '), applicationId: app.id, environment: 'DR', source: 'DR Readiness', affected: [app.name] });
       } else if (r.overall === 'READY' || r.overall === 'PARTIALLY_READY') resolveAlert(dfp, 'DR Readiness', `DR readiness is ${r.overall}`);
     }
-
-    // Dead-man heartbeat: the local worker cannot reach the external watchdog. (If this process is down,
-    // nothing here runs — that case is alerted by the external watchdog itself.)
-    if (deadMan.status === 'FAILING') {
-      openAlert({ fingerprint: 'deadman-heartbeat', title: 'Dead-man heartbeat to the external watchdog is failing', severity: 'HIGH',
-        detail: `No successful outbound heartbeat to ${deadMan.nodeLocation} for more than ${deadMan.toleranceSec}s (${deadMan.consecutiveFailures} failed attempt(s)${deadMan.lastError ? `, last: ${deadMan.lastError}` : ''}). The watchdog will alert as if this control plane were down.`,
-        source: 'Dead-Man Switch', affected: ['Scholario Ops control plane'] });
-    } else if (deadMan.status === 'HEALTHY') resolveAlert('deadman-heartbeat', 'Dead-Man Switch', 'Outbound heartbeat succeeding again');
 
     // SSL certificates expiring soon (expired / invalid certificates are monitor incidents already)
     for (const m of db.monitors.filter(x => x.type === 'SSL' && x.enabled)) {

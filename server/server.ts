@@ -22,7 +22,7 @@ import { closePool, query, SCHEMA } from './db.ts';
 import { startHistory, flushChecks } from './history.ts';
 import { bootstrapAdmin } from './auth.ts';
 import { buildRouter } from './routes.ts';
-import { startEngine, stopEngine, deadMan } from './engine.ts';
+import { startEngine, stopEngine } from './engine.ts';
 import { syncCloudflare } from './cloudflare.ts';
 import { syncHostinger } from './hostinger.ts';
 import { syncLoadBalancers } from './loadbalancer.ts';
@@ -52,9 +52,6 @@ function checkProductionConfig() {
   if ((process.env.JWT_SECRET ?? '').trim().length < 32) warnings.push('JWT_SECRET is not set (or < 32 chars) — using a generated secret stored in DATA_DIR; set one in .env so sessions survive a DATA_DIR loss');
   if (config.host === '0.0.0.0' || config.host === '::') warnings.push(`HOST=${config.host} exposes Node directly — behind nginx use HOST=127.0.0.1`);
   if (!process.env.CLOUDFLARE_API_TOKEN) warnings.push('CLOUDFLARE_API_TOKEN is not set — Cloudflare pages will show "Not configured"');
-  if (!config.deadManHeartbeatUrl) warnings.push('DEADMAN_HEARTBEAT_URL is not set — nobody is alerted if this Ops server itself goes down');
-  else if (deadMan.configError) warnings.push(`${deadMan.configError} — the dead-man heartbeat is disabled`);
-  else if (config.deadManHeartbeatUrl.trim().startsWith('http://')) warnings.push('DEADMAN_HEARTBEAT_URL is not https:// — the heartbeat (and any token in it) is sent unencrypted');
   for (const w of warnings) log.warn('config', w);
   if (errors.length) {
     for (const e of errors) log.error('config', e);
@@ -133,6 +130,10 @@ function startBackgroundWork() {
 
 async function main() {
   checkProductionConfig();
+  // Names only — the values (which may contain tokens) are never read into logs or used
+  if (config.deprecatedDeadManVars.length) {
+    log.warn('config', `${config.deprecatedDeadManVars.join(', ')} ${config.deprecatedDeadManVars.length === 1 ? 'is' : 'are'} deprecated and ignored — no external watchdog is used; the dead-man heartbeat now covers the monitored servers, applications, services and databases. Remove from .env.`);
+  }
 
   const app = express();
   app.disable('x-powered-by');

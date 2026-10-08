@@ -93,10 +93,8 @@ export const config = {
     from: str('SMTP_FROM'),
   },
 
-  /** Outbound dead-man heartbeat (e.g. healthchecks.io / UptimeRobot heartbeat URL) */
-  deadManHeartbeatUrl: str('DEADMAN_HEARTBEAT_URL'),
-  deadManIntervalSec: int('DEADMAN_INTERVAL_SEC', 60, 10),
-  deadManToleranceSec: int('DEADMAN_TOLERANCE_SEC', 180, 10),
+  /** Deprecated and ignored: DEADMAN_HEARTBEAT_URL / DEADMAN_INTERVAL_SEC / DEADMAN_TOLERANCE_SEC (no external watchdog) */
+  deprecatedDeadManVars: ['DEADMAN_HEARTBEAT_URL', 'DEADMAN_INTERVAL_SEC', 'DEADMAN_TOLERANCE_SEC'].filter(k => (process.env[k] ?? '').trim() !== ''),
 
   /** Agent is STALE after this many seconds without a report, DISCONNECTED after 10x */
   telemetryStaleSec: int('TELEMETRY_STALE_THRESHOLD_SEC', 60, 10),

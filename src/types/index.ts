@@ -135,6 +135,9 @@ export interface DatabaseReport {
   } | null;
   error: string | null;
   observedAt: string;
+  /** Last probe with available = true, and consecutive unavailable probes (computed by the server) */
+  lastSuccessAt?: string | null;
+  consecutiveFailures?: number;
 }
 /** Database probe reported by the telemetry agent */
 export type DatabaseTelemetry = DatabaseReport;
@@ -322,6 +325,8 @@ export interface ApplicationHealthTelemetry {
   checkedAt: string;
   /** Consecutive DOWN results (computed by the server) */
   consecutiveFailures: number;
+  /** Last HEALTHY result (kept across failures; null = never healthy since Scholario Ops started tracking) */
+  lastSuccessAt?: string | null;
 }
 
 export interface ListeningPortTelemetry {
@@ -482,6 +487,10 @@ export interface VpsServer {
   system?: SystemInfoTelemetry | null;
   failedUnits?: FailedUnitsTelemetry | null;
   agentTiming?: AgentTimingTelemetry;
+  /** Seconds between the last two accepted agent reports (the real heartbeat interval) */
+  reportIntervalSec?: number | null;
+  /** When the watched systemd services were last reported */
+  servicesObservedAt?: string;
   // ── Computed by the server for every response (not stored) ──
   agent?: AgentHealthTelemetry;
   health?: HealthCategory[];
@@ -767,42 +776,65 @@ export interface AuditLog {
 }
 
 /**
- * Outbound dead-man heartbeat of this control plane (server/deadman.ts).
- * NOT_CONFIGURED = DEADMAN_HEARTBEAT_URL missing or invalid · PENDING = configured, first ping not finished yet ·
- * HEALTHY = latest ping succeeded · DEGRADED = recent pings fail but the last success is within the tolerance ·
- * FAILING = no successful ping within the tolerance.
- * These are the LOCAL worker's results; the external watchdog alone decides whether it received the pings.
- * The heartbeat URL is never part of this object.
+ * Dead-man heartbeat of the MONITORED infrastructure (server/heartbeat.ts) — PRD / DR servers and the
+ * applications, services and databases on them. Scholario Ops is the monitoring control plane, not a
+ * target. Built only from what the agents push; no external watchdog is involved.
+ * HEALTHY = fresh and passing · DEGRADED = late / slow / first failure · FAILING = down, failed or
+ * disconnected · UNKNOWN = no (fresh) data · NOT_CONFIGURED = no server registered.
  */
-export type DeadManStatus = 'NOT_CONFIGURED' | 'PENDING' | 'HEALTHY' | 'DEGRADED' | 'FAILING';
+export type HeartbeatState = 'HEALTHY' | 'DEGRADED' | 'FAILING' | 'UNKNOWN';
+export type DeadManStatus = HeartbeatState | 'NOT_CONFIGURED';
+export type HeartbeatKind = 'SERVER' | 'APPLICATION' | 'SERVICE' | 'DATABASE';
+
+/** One monitored target (a server's telemetry delivery, an application check, a service, a database probe) */
+export interface HeartbeatCheck {
+  kind: HeartbeatKind;
+  /** Stable id within the server, e.g. "server", "app:<appId>:<port>", "service:nginx", "db:mysql:moodle" */
+  key: string;
+  name: string;
+  state: HeartbeatState;
+  detail: string;
+  /** What is checked, e.g. "127.0.0.1:4100/api/health" (never a credential or token) */
+  target: string | null;
+  lastCheckAt: string | null;
+  lastSuccessAt: string | null;
+  latencyMs: number | null;
+  /** Consecutive failures / missed heartbeats (null = not tracked for this target) */
+  failures: number | null;
+  httpStatus: number | null;
+  restartCount: number | null;
+  /** How often this target is observed (seconds; from the agent's actual report rate) */
+  intervalSec: number | null;
+  /** Freshness window: older than this is not live */
+  toleranceSec: number | null;
+}
+
+export interface HeartbeatGroup { state: HeartbeatState; total: number; healthy: number; checks: HeartbeatCheck[] }
+
+export interface ServerHeartbeat {
+  serverId: string;
+  hostname: string;
+  ip: string;
+  environment: Environment;
+  state: HeartbeatState;
+  server: HeartbeatCheck;
+  applications: HeartbeatGroup;
+  services: HeartbeatGroup;
+  databases: HeartbeatGroup;
+}
 
 export interface DeadManControlPlane {
   id: string;
   name: string;
-  /** Host name of the watchdog (no path, query or credentials); 'Not configured' when unset */
-  nodeLocation: string;
-  /** Same as nodeLocation (kept for compatibility; never the full URL) */
-  targetControlPlane: string;
-  /** Last successful ping ('' = none yet). Same value as lastSuccessAt. */
-  lastHeartbeatReceivedAt: string;
-  intervalSec: number;
-  toleranceSec: number;
   status: DeadManStatus;
-  /** Consecutive failed pings (same value as consecutiveFailures) */
-  consecutiveMisses: number;
-  lastAlertSentAt?: string;
-  configured: boolean;
-  /** Why the configuration is unusable (e.g. not an http/https URL); null when fine */
-  configError: string | null;
-  /** The heartbeat loop is running in this process */
-  workerRunning: boolean;
-  lastAttemptAt: string | null;
-  lastSuccessAt: string | null;
-  lastHttpStatus: number | null;
-  lastLatencyMs: number | null;
-  /** Redacted error of the latest failed ping */
-  lastError: string | null;
-  consecutiveFailures: number;
+  evaluatedAt: string;
+  /** Agent report interval observed across servers (seconds; null until two reports arrived) */
+  telemetryIntervalSec: number | null;
+  /** Server heartbeat freshness: CONNECTED ≤ staleAfterSec, STALE ≤ disconnectedAfterSec, then DISCONNECTED */
+  staleAfterSec: number;
+  disconnectedAfterSec: number;
+  servers: ServerHeartbeat[];
+  counts: { healthy: number; degraded: number; failing: number; unknown: number; total: number };
 }
 
 /** NOT_CONFIGURED = the check cannot run because something is not set up yet (never a pass) */
@@ -952,7 +984,6 @@ export interface IntegrationStatus {
   notifications: { status: 'CONFIGURED' | 'NOT_CONFIGURED'; enabledChannels: number };
   loadBalancing: { configured: boolean; status: LbSyncStatus; lastSyncAt: string | null; lastError: string | null; poolCount: number };
   smtp: { configured: boolean };
-  deadMan: { configured: boolean; configError?: string | null; intervalSec?: number; toleranceSec?: number };
   publicUrl: string;
 }
 

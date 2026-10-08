@@ -17,7 +17,7 @@ import { EmptyState } from '../ui/EmptyState';
 import { IctStatusPanel } from './IctStatusPanel';
 import { routeState } from '../ui/routing';
 import { Ago } from '../ui/Freshness';
-import { deadManLabel, deadManLatency } from '../ui/deadman';
+import { deadManLabel, lastServerHeartbeat } from '../ui/deadman';
 
 // ── Formatting helpers (null-safe) ───────────────────────────────────────────
 const fmtPct = (v: number | null | undefined, digits = 2) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : `${v.toFixed(digits)}%`);
@@ -232,7 +232,13 @@ export const OverviewView: React.FC = () => {
   const criticalMonitors = enabledMonitors.filter(m => m.status === 'CRITICAL').length;
   const criticalApps = applications.filter(a => a.status === 'CRITICAL').length;
   const cfConfigured = Boolean(integrations?.cloudflare.configured);
-  const deadManConfigured = deadMan.configured;
+  const hbServers = deadMan.servers;
+  const hbConnected = hbServers.filter(s => s.server.state === 'HEALTHY').length;
+  const hbGroup = (k: 'applications' | 'services' | 'databases') => {
+    const total = hbServers.reduce((a, s) => a + s[k].total, 0);
+    return total ? `${hbServers.reduce((a, s) => a + s[k].healthy, 0)}/${total}` : '—';
+  };
+  const hbLast = lastServerHeartbeat(deadMan);
 
   const isEmpty = !isLoading && servers.length === 0 && applications.length === 0;
 
@@ -584,18 +590,18 @@ export const OverviewView: React.FC = () => {
         />
         <MetricCard
           label="Dead-Man"
-          value={deadManConfigured ? deadManLabel(deadMan.status) : 'Not set'}
-          sub={deadManConfigured ? `every ${deadMan.intervalSec}s · tolerance ${deadMan.toleranceSec}s` : 'Watchdog not configured — set DEADMAN_HEARTBEAT_URL on the server'}
+          value={deadManLabel(deadMan.status)}
+          sub={hbServers.length ? `${hbServers.map(s => `${s.environment} VPS`).join(' + ')} · apps · services · DB` : 'Register servers in Setup'}
           icon={Activity}
           status={deadMan.status === 'HEALTHY' ? 'ok' : deadMan.status === 'DEGRADED' ? 'warn' : deadMan.status === 'FAILING' ? 'crit' : 'unknown'}
           onClick={() => go('monitors')}
           isDark={isDark}
-          // Only when there is something to show (no rows of dashes when the watchdog is not configured)
-          details={!deadManConfigured ? undefined : [
-            ['Watchdog', 'Configured'],
-            ['Last ping', deadMan.lastSuccessAt ? <Ago iso={deadMan.lastSuccessAt} staleAfterSec={deadMan.toleranceSec} /> : deadManConfigured ? 'None yet' : '—'],
-            ['Latency', deadManLatency(deadMan)],
-            ['Failures', deadMan.lastAttemptAt ? String(deadMan.consecutiveFailures) : '—'],
+          // Monitored infrastructure heartbeats (only when servers exist — no rows of dashes)
+          details={!hbServers.length ? undefined : [
+            ['Servers', `${hbConnected}/${hbServers.length} live`],
+            ['Last report', hbLast ? <Ago iso={hbLast} staleAfterSec={deadMan.staleAfterSec} /> : '—'],
+            ['Apps', hbGroup('applications')],
+            ['Services · DB', `${hbGroup('services')} · ${hbGroup('databases')}`],
           ]}
         />
       </div>
