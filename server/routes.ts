@@ -24,6 +24,8 @@ import { sendToChannel, notifyIncident } from './notify.ts';
 import { cfState, syncCloudflare, CloudflareError, listCloudflareAccounts, listLoadBalancerPools } from './cloudflare.ts';
 import { hostingerState, syncHostinger } from './hostinger.ts';
 import { buildInstaller, buildUninstaller, AGENT_VERSION } from './agent.ts';
+import { appChecksFor, LIST_KEYS, NULLABLE_LIST_KEYS, NULLABLE_OBJECT_KEYS } from './telemetry.ts';
+import { agentHealth, serverHealth } from './telemetryHealth.ts';
 import { lbState, syncLoadBalancers, PERMISSION_HINT } from './loadbalancer.ts';
 import { syncAppUrlMonitors, DEFAULT_HEALTH_CHECK } from './appMonitors.ts';
 import { readiness, failoverPreflight, applicationAvailability } from './readiness.ts';
@@ -46,6 +48,8 @@ const h = (fn: Handler) => (req: Request, res: Response, next: NextFunction) => 
   Promise.resolve(fn(req, res)).catch(next);
 };
 
+/** Upper bound for one agent report (the global JSON limit is 1 MB) */
+const AGENT_REPORT_MAX_BYTES = 512 * 1024;
 const ok = (res: Response, data: unknown, status = 200) => res.status(status).json({ success: true, data });
 const fail = (res: Response, status: number, message: string) => res.status(status).json({ success: false, message });
 const newToken = () => crypto.randomBytes(24).toString('hex');
@@ -513,6 +517,8 @@ export function buildRouter(): Router {
   r.post('/v1/agent/ingest', h((req, res) => {
     const srv = agentServer(req);
     if (!srv) return fail(res, 401, 'Invalid agent token');
+    // A real report is a few KB (≈ 50 KB with many PM2 apps / filesystems); refuse anything far larger
+    if (Number(req.headers['content-length'] ?? 0) > AGENT_REPORT_MAX_BYTES) return fail(res, 413, `Report larger than ${AGENT_REPORT_MAX_BYTES} bytes`);
     const b = body(req) as unknown as AgentReport;
     const pctOk = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100;
     if (!pctOk(b.cpuPercent) || !pctOk(b.ramPercent) || !pctOk(b.diskPercent)) {
@@ -525,11 +531,19 @@ export function buildRouter(): Router {
     if (skewSec > config.agentMaxClockSkewSec) {
       return fail(res, 400, `Report timestamp is ${Math.round(skewSec)}s away from server time (max ${config.agentMaxClockSkewSec}s) — check NTP on the VPS`);
     }
-    for (const k of ['load', 'processes', 'services', 'logs'] as const) {
+    for (const k of ['load', 'processes', 'services', 'logs', 'errors', 'databases', ...LIST_KEYS] as const) {
       if (b[k] !== undefined && !Array.isArray(b[k])) return fail(res, 400, `${k} must be a list`);
     }
+    for (const k of NULLABLE_LIST_KEYS) {
+      if (b[k] !== undefined && b[k] !== null && !Array.isArray(b[k])) return fail(res, 400, `${k} must be a list or null`);
+    }
+    for (const k of NULLABLE_OBJECT_KEYS) {
+      const v = b[k];
+      if (v !== undefined && v !== null && (typeof v !== 'object' || Array.isArray(v))) return fail(res, 400, `${k} must be an object or null`);
+    }
     ingestAgentReport(srv, b, { sourceIp: req.ip });
-    ok(res, { accepted: true, serverId: srv.id });
+    // appChecks: local application health checks the agent should run on this host (agent >= 3.3)
+    ok(res, { accepted: true, serverId: srv.id, appChecks: appChecksFor(srv) });
   }));
 
   r.get('/v1/agent/install/:serverId', h((req, res) => {
@@ -1356,17 +1370,60 @@ export function buildRouter(): Router {
   // ── Deployments & backups (read; written by CI / agents above) ─────────────
   r.get('/v1/deployments', (req, res) => { res.json(paginate(req, db.deployments, 200)); });
   r.get('/v1/backups/status', (_req, res) => { ok(res, db.applications.map(a => backupStatus(a))); });
+  // `data` keeps its original shape (a list); `summary` is an additive sibling
   r.get('/v1/health/databases', (_req, res) => {
-    ok(res, db.applications.flatMap(a => (['PRD', 'DR'] as const).map(env => {
+    const rows = db.applications.flatMap(a => (['PRD', 'DR'] as const).map(env => {
       const d = databaseHealth(a, env);
       return { applicationId: a.id, applicationName: a.name, environment: env, status: d.status, detail: d.detail, report: d.report, observedAt: d.observedAt };
-    })));
+    }));
+    const count = (pred: (r: typeof rows[number]) => boolean) => rows.filter(pred).length;
+    res.json({
+      success: true, data: rows,
+      summary: {
+        total: rows.length,
+        healthy: count(r => r.status === 'HEALTHY'),
+        warning: count(r => r.status === 'DEGRADED'),
+        critical: count(r => r.status === 'DOWN'),
+        unavailable: count(r => r.status === 'UNKNOWN'),
+        notConfigured: count(r => r.status === 'NOT_CONFIGURED'),
+      },
+    });
   });
   r.get('/v1/health/agents', (_req, res) => {
-    ok(res, db.servers.map(s => ({
-      serverId: s.id, hostname: s.hostname, ip: s.ip, environment: s.environment, state: agentState(s), version: s.agentVersion || null,
-      lastSeen: s.lastSeen || null, startedAt: s.agentStartedAt ?? null, restartCount: s.agentRestartCount ?? 0, errors: s.agentErrors ?? [],
-    })));
+    const rows = db.servers.map(s => {
+      const a = agentHealth(s);
+      const { warnings } = serverHealth(s);
+      return {
+        serverId: s.id, hostname: s.hostname, ip: s.ip, environment: s.environment, state: agentState(s), version: s.agentVersion || null,
+        lastSeen: s.lastSeen || null, startedAt: s.agentStartedAt ?? null, restartCount: s.agentRestartCount ?? 0, errors: s.agentErrors ?? [],
+        expectedVersion: AGENT_VERSION, outdated: a.outdated, clockSkewMs: a.clockSkewMs, transportDelayMs: a.transportDelayMs,
+        ntpSynchronized: s.ntp?.synchronized ?? null,
+        clockIssue: warnings.some(w => w.category === 'time'),
+        failedServices: s.services.filter(x => x.status === 'failed').length,
+        pm2Issues: (s.pm2 ?? []).filter(p => p.status !== 'online').length + warnings.filter(w => w.key.startsWith('pm2-restarts:')).length,
+        dbIssues: warnings.filter(w => w.category === 'database').length,
+        warnings: warnings.length,
+        critical: warnings.filter(w => w.level === 'CRITICAL').length,
+      };
+    });
+    const n = (pred: (r: typeof rows[number]) => boolean) => rows.filter(pred).length;
+    res.json({
+      success: true, data: rows,
+      summary: {
+        expectedVersion: AGENT_VERSION,
+        total: rows.length,
+        connected: n(r => r.state === 'ONLINE'),
+        stale: n(r => r.state === 'STALE'),
+        disconnected: n(r => r.state === 'OFFLINE'),
+        neverConnected: n(r => r.state === 'NOT_CONNECTED'),
+        outdated: n(r => r.outdated === true),
+        clockIssues: n(r => r.clockIssue),
+        withErrors: n(r => r.errors.length > 0),
+        failedServices: rows.reduce((a, r) => a + r.failedServices, 0),
+        pm2Issues: rows.reduce((a, r) => a + r.pm2Issues, 0),
+        dbIssues: rows.reduce((a, r) => a + r.dbIssues, 0),
+      },
+    });
   });
   r.get('/v1/backups', (req, res) => { res.json(paginate(req, db.backups, 200)); });
 

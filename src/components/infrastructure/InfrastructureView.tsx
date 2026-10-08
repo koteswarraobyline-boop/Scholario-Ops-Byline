@@ -1,32 +1,13 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
-import { VpsServer, ServerMetricPoint } from '../../types';
-import { api } from '../../services/api';
-import { Search, X, Server, RefreshCw } from 'lucide-react';
+import { VpsServer, TelemetryLevel } from '../../types';
+import { Search, X, Server, ChevronRight } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
-import { Ago, verdictColor } from '../ui/Freshness';
+import { THRESHOLDS } from '../../lib/thresholds';
+import { fmtNum, fmtAgo, fmtTime, LevelBadge } from './telemetryUi';
+import { OverviewTab, ResourcesTab, ApplicationsTab, ServicesTab, NetworkTab, StorageTab, DatabaseTab, AgentTab } from './ServerTabs';
 
-const gb = (mb: number | null | undefined) => (mb === null || mb === undefined ? null : Math.round(mb / 102.4) / 10);
-const fmtUptime = (sec: number | null | undefined, days: number) => {
-  if (sec === null || sec === undefined) return days ? `${days} days` : '—';
-  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600);
-  return d ? `${d}d ${h}h` : `${h}h ${Math.floor((sec % 3600) / 60)}m`;
-};
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
-const validDate = (s?: string | null) => Boolean(s) && !Number.isNaN(Date.parse(s as string));
-const fmtDateTime = (s?: string | null, fallback = '—') => (validDate(s) ? new Date(s as string).toLocaleString() : fallback);
-const fmtTime = (s?: string | null, fallback = '—') => (validDate(s) ? new Date(s as string).toLocaleTimeString() : fallback);
-const fmtNum = (v: number | null | undefined, digits = 1) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : v.toFixed(digits));
-const fmtAgo = (s?: string | null) => {
-  if (!validDate(s)) return 'never';
-  const sec = Math.max(0, Math.round((Date.now() - Date.parse(s as string)) / 1000));
-  if (sec < 60) return `${sec}s ago`;
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
-  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
-  return `${Math.floor(sec / 86400)}d ago`;
-};
 /** True once the agent has reported at least once (telemetry values are meaningful). */
 const hasReported = (s: VpsServer) => Boolean(s.lastSeen);
 
@@ -39,159 +20,39 @@ const statusDot = (s: string) =>
       : s === 'CRITICAL' ? 'bg-rose-500 animate-pulse'
         : 'bg-slate-500';
 
-type MetricRange = '1h' | '6h' | '24h' | '48h';
+// Fleet issue predicates (shared by the fleet strip counts and its filters)
+const failedServices = (s: VpsServer) => s.services.filter(x => x.status === 'failed').length;
+const pm2Issues = (s: VpsServer) => (s.warnings ?? []).filter(w => w.category === 'pm2').length;
+const dbIssues = (s: VpsServer) => (s.warnings ?? []).filter(w => w.category === 'database').length;
+const worstWarning = (s: VpsServer): TelemetryLevel | null =>
+  (s.warnings ?? []).some(w => w.level === 'CRITICAL') ? 'CRITICAL' : (s.warnings ?? []).length ? 'WARNING' : null;
 
-// ── Inline SVG line chart (no external dependencies) ────────────────────────
-interface Series { key: keyof ServerMetricPoint; label: string; color: string }
+type FleetIssue = 'CONNECTED' | 'STALE' | 'DISCONNECTED' | 'OUTDATED' | 'CLOCK' | 'FAILED_SERVICES' | 'PM2' | 'DB';
+type DrawerTab = 'overview' | 'resources' | 'applications' | 'services' | 'network' | 'storage' | 'database' | 'agent' | 'processes' | 'logs';
 
-const MetricChart: React.FC<{
-  title: string;
-  unit: string;
-  points: ServerMetricPoint[];
-  series: Series[];
-  fixedMax?: number;
-  isDark: boolean;
-}> = ({ title, unit, points, series, fixedMax, isDark }) => {
-  const W = 600, H = 140, PAD_L = 34, PAD_B = 18, PAD_T = 8, PAD_R = 8;
-  const values = points.flatMap(p => series.map(s => Number(p[s.key]) || 0));
-  const dataMax = values.length ? Math.max(...values) : 0;
-  const max = fixedMax ?? (dataMax > 0 ? dataMax * 1.15 : 1);
-  const times = points.map(p => Date.parse(p.t)).filter(t => Number.isFinite(t));
-  const tMin = times.length ? Math.min(...times) : 0;
-  const tMax = times.length ? Math.max(...times) : 1;
-  const x = (t: number) => PAD_L + ((t - tMin) / Math.max(1, tMax - tMin)) * (W - PAD_L - PAD_R);
-  const y = (v: number) => PAD_T + (1 - Math.min(1, Math.max(0, v / max))) * (H - PAD_T - PAD_B);
-  const latest = points[points.length - 1];
-
+/** One journal entry; long messages are collapsed until clicked */
+const LogRow: React.FC<{ log: VpsServer['logs'][number] }> = ({ log }) => {
+  const [open, setOpen] = useState(false);
+  const long = log.message.length > 160;
   return (
-    <div className={`p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
-      <div className="flex items-center justify-between mb-1 gap-2 flex-wrap">
-        <span className={`text-[10px] uppercase font-semibold ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{title}</span>
-        <div className="flex items-center gap-3 text-[10px]">
-          {series.map(s => (
-            <span key={s.key} className="flex items-center gap-1">
-              <span className="w-2 h-0.5 inline-block" style={{ background: s.color }} />
-              <span className={isDark ? 'text-slate-400' : 'text-slate-600'}>{s.label}</span>
-              {latest && <strong className={isDark ? 'text-slate-200' : 'text-slate-800'}>{fmtNum(Number(latest[s.key]), unit === '%' ? 1 : 2)}{unit}</strong>}
-            </span>
-          ))}
-        </div>
-      </div>
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-32" preserveAspectRatio="none">
-        {[0, 0.5, 1].map(f => (
-          <g key={f}>
-            <line x1={PAD_L} x2={W - PAD_R} y1={y(max * f)} y2={y(max * f)} stroke={isDark ? '#1E293B' : '#E2E8F0'} strokeWidth={1} />
-            <text x={PAD_L - 4} y={y(max * f) + 3} textAnchor="end" fontSize={9} fill={isDark ? '#64748B' : '#94A3B8'}>
-              {fmtNum(max * f, max * f >= 10 || f === 0 ? 0 : 1)}
-            </text>
-          </g>
-        ))}
-        {series.map(s => {
-          const d = points
-            .map(p => ({ t: Date.parse(p.t), v: Number(p[s.key]) || 0 }))
-            .filter(p => Number.isFinite(p.t))
-            .map((p, i) => `${i === 0 ? 'M' : 'L'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`)
-            .join(' ');
-          return <path key={s.key} d={d} fill="none" stroke={s.color} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />;
-        })}
-        {times.length > 0 && (
-          <>
-            <text x={PAD_L} y={H - 4} fontSize={9} fill={isDark ? '#64748B' : '#94A3B8'}>{new Date(tMin).toLocaleTimeString()}</text>
-            <text x={W - PAD_R} y={H - 4} fontSize={9} textAnchor="end" fill={isDark ? '#64748B' : '#94A3B8'}>{new Date(tMax).toLocaleTimeString()}</text>
-          </>
-        )}
-      </svg>
-    </div>
-  );
-};
-
-const ServerMetricsPanel: React.FC<{ serverId: string; isDark: boolean }> = ({ serverId, isDark }) => {
-  const [range, setRange] = useState<MetricRange>('1h');
-  const [points, setPoints] = useState<ServerMetricPoint[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      const data = await api.getServerMetrics(serverId, range);
-      setPoints(Array.isArray(data) ? data : []);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load metrics');
-    } finally {
-      setLoading(false);
-    }
-  }, [serverId, range]);
-
-  useEffect(() => {
-    setLoading(true);
-    void load();
-    const timer = setInterval(() => { void load(); }, 15_000);
-    return () => clearInterval(timer);
-  }, [load]);
-
-  const muted = isDark ? 'text-slate-400' : 'text-slate-500';
-
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Metrics history</div>
-        <div className="flex items-center gap-2">
-          {loading && <RefreshCw className={`w-3 h-3 animate-spin ${muted}`} />}
-          <div className={`flex items-center gap-1 p-0.5 rounded border ${isDark ? 'bg-[#0B0F17] border-[#1E293B]' : 'bg-slate-100 border-slate-300'}`}>
-            {(['1h', '6h', '24h', '48h'] as const).map(r => (
-              <button
-                key={r}
-                onClick={() => setRange(r)}
-                className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
-                  range === r ? 'bg-blue-600 text-white font-medium' : isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                {r}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-      {error ? (
-        <div className="text-[11px] text-rose-500">Could not load metrics: {error}</div>
-      ) : !loading && points.length === 0 ? (
-        <div className={`p-4 rounded border text-center text-[11px] font-sans ${isDark ? 'border-[#1E293B] text-slate-500' : 'border-slate-200 text-slate-500'}`}>
-          No metric samples in the last {range}. Samples appear once the agent is reporting.
-        </div>
-      ) : points.length > 0 ? (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-          <MetricChart
-            title="CPU / RAM / Disk"
-            unit="%"
-            fixedMax={100}
-            points={points}
-            isDark={isDark}
-            series={[
-              { key: 'cpu', label: 'CPU', color: '#F43F5E' },
-              { key: 'ram', label: 'RAM', color: '#F59E0B' },
-              { key: 'disk', label: 'Disk', color: '#3B82F6' },
-            ]}
-          />
-          <MetricChart
-            title="Load average (1m)"
-            unit=""
-            points={points}
-            isDark={isDark}
-            series={[{ key: 'load1', label: 'Load 1m', color: '#10B981' }]}
-          />
-          <MetricChart
-            title="Network (kbps)"
-            unit=""
-            points={points}
-            isDark={isDark}
-            series={[
-              { key: 'netIn', label: 'In', color: '#6366F1' },
-              { key: 'netOut', label: 'Out', color: '#14B8A6' },
-            ]}
-          />
-        </div>
-      ) : null}
+    <div className="flex items-start gap-2">
+      <span className="text-slate-500 shrink-0 w-20">{fmtTime(log.timestamp)}</span>
+      <span className={`px-1 rounded text-[9px] uppercase font-bold shrink-0 w-12 text-center ${
+        log.level === 'error' ? 'bg-rose-950 text-rose-300 border border-rose-900'
+          : log.level === 'warn' ? 'bg-amber-950 text-amber-300 border border-amber-900'
+            : 'bg-blue-950 text-blue-300 border border-blue-900'
+      }`}>
+        {log.level}
+      </span>
+      <span className="text-slate-400 shrink-0 max-w-[10rem] truncate" title={log.service}>[{log.service}]</span>
+      {long ? (
+        <button type="button" onClick={() => setOpen(o => !o)} aria-expanded={open} className={`text-left break-all cursor-pointer ${log.level === 'error' ? 'text-rose-300 font-semibold' : 'text-slate-300'}`}>
+          <ChevronRight className={`w-3 h-3 inline mr-0.5 transition-transform ${open ? 'rotate-90' : ''}`} aria-hidden="true" />
+          {open ? log.message : `${log.message.slice(0, 160)}…`}
+        </button>
+      ) : (
+        <span className={log.level === 'error' ? 'text-rose-300 font-semibold break-all' : 'text-slate-300 break-all'}>{log.message}</span>
+      )}
     </div>
   );
 };
@@ -205,12 +66,10 @@ interface VpsDetailModalProps {
 export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose, isDark }) => {
   const { applications } = useOps();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<'system' | 'processes' | 'services' | 'logs' | 'health'>('system');
+  const [activeTab, setActiveTab] = useState<DrawerTab>('overview');
   const app = applications.find(a => a.id === server.applicationId);
   const reported = hasReported(server);
-  const t = server.telemetry;
   const muted = isDark ? 'text-slate-400' : 'text-slate-500';
-  const card = `p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`;
 
   const goSetup = () => { onClose(); navigate('/setup'); };
 
@@ -229,20 +88,37 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
     </div>
   );
 
+  const failed = failedServices(server);
+  const tabs: Array<{ id: DrawerTab; label: string; level?: TelemetryLevel | null }> = [
+    { id: 'overview', label: 'Overview', level: worstWarning(server) },
+    { id: 'resources', label: 'Resources' },
+    { id: 'applications', label: `Applications${server.pm2 ? ` (${server.pm2.length})` : ''}`, level: (server.warnings ?? []).some(w => (w.category === 'pm2' || w.category === 'apps') && w.level === 'CRITICAL') ? 'CRITICAL' : null },
+    { id: 'services', label: `Services (${server.services.length})`, level: failed ? 'CRITICAL' : null },
+    { id: 'network', label: 'Network' },
+    { id: 'storage', label: `Storage${server.filesystems ? ` (${server.filesystems.length})` : ''}` },
+    { id: 'database', label: `Database${server.databases?.length ? ` (${server.databases.length})` : ''}` },
+    { id: 'agent', label: 'Agent', level: server.agent?.outdated || (server.warnings ?? []).some(w => w.category === 'time') ? 'WARNING' : null },
+    { id: 'processes', label: `Processes (${server.processes.length})` },
+    { id: 'logs', label: `Logs (${server.logs.length})` },
+  ];
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 overflow-y-auto animate-in fade-in">
       <div
-        className={`w-full max-w-5xl rounded-lg border overflow-hidden flex flex-col max-h-[90vh] shadow-2xl transition-colors ${
+        className={`w-full max-w-6xl rounded-lg border overflow-hidden flex flex-col max-h-[90vh] shadow-2xl transition-colors ${
           isDark ? 'bg-[#101624] text-slate-100 border-[#223048]' : 'bg-white text-slate-900 border-slate-200'
         }`}
         onClick={e => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Server ${server.hostname}`}
       >
         {/* Header */}
         <div className={`p-4 px-6 border-b flex items-center justify-between ${
           isDark ? 'border-[#1E293B] bg-[#0A0F1A]' : 'border-slate-200 bg-slate-50'
         }`}>
           <div className="flex items-center gap-3 min-w-0">
-            <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${statusDot(server.status)}`} />
+            <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${statusDot(server.status)}`} aria-hidden="true" />
             <div className="min-w-0">
               <div className="flex items-center gap-2 font-mono flex-wrap">
                 <h2 className="text-base font-bold">{server.hostname}</h2>
@@ -254,7 +130,8 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
                 <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
                 <span className={`text-xs ${muted}`}>{server.ip || 'No IP'}</span>
                 <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
-                <span className={`text-xs font-semibold ${agentColor(server.agentStatus)}`}>Agent {server.agentStatus}</span>
+                <span className={`text-xs font-semibold ${agentColor(server.agentStatus)}`}>Agent {reported ? server.agentStatus : 'NEVER REPORTED'}</span>
+                {server.agent?.outdated && <span className="text-[10px] font-bold px-1.5 rounded border border-amber-500/60 text-amber-500">OUTDATED AGENT</span>}
               </div>
               <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                 {server.provider || 'Provider: Not available'} · {server.region || 'Region: Not available'}
@@ -263,140 +140,50 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
               </p>
             </div>
           </div>
-          <button onClick={onClose} className={`p-1 transition-colors cursor-pointer ${isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800'}`}>
+          <button onClick={onClose} aria-label="Close" className={`p-1 transition-colors cursor-pointer ${isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800'}`}>
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Tabs */}
-        <div className={`flex items-center gap-1 px-4 sm:px-6 border-b text-xs font-mono overflow-x-auto min-w-0 ${
+        <div role="tablist" className={`flex items-center gap-1 px-4 sm:px-6 border-b text-xs font-mono overflow-x-auto min-w-0 ${
           isDark ? 'border-[#1E293B] bg-[#0C121E]' : 'border-slate-200 bg-slate-100'
         }`}>
-          {[
-            { id: 'system', label: 'System & Telemetry' },
-            { id: 'processes', label: `Processes (${server.processes.length})` },
-            { id: 'services', label: `Services (${server.services.length})` },
-            { id: 'logs', label: `Logs (${server.logs.length})` },
-            { id: 'health', label: 'Agent · Database · Provider' },
-          ].map(tab => (
+          {tabs.map(tab => (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id as typeof activeTab)}
-              className={`py-2 px-3 font-medium whitespace-nowrap border-b-2 transition-colors cursor-pointer ${
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`py-2 px-3 font-medium whitespace-nowrap border-b-2 transition-colors cursor-pointer inline-flex items-center gap-1 ${
                 activeTab === tab.id
                   ? 'border-blue-500 text-blue-500 font-semibold'
                   : isDark ? 'border-transparent text-slate-400 hover:text-slate-200' : 'border-transparent text-slate-600 hover:text-slate-900'
               }`}
             >
               {tab.label}
+              {tab.level && tab.level !== 'HEALTHY' && tab.level !== 'UNKNOWN' && (
+                <span className={`w-1.5 h-1.5 rounded-full ${tab.level === 'CRITICAL' ? 'bg-rose-500' : 'bg-amber-500'}`} aria-label={`${tab.level.toLowerCase()} issues`} />
+              )}
             </button>
           ))}
         </div>
 
         {/* Content */}
-        <div className="p-6 overflow-y-auto space-y-5 flex-1 text-xs font-mono">
-
-          {/* TAB: SYSTEM */}
-          {activeTab === 'system' && (
-            <div className="space-y-4">
-              {/* Agent status */}
-              <div className={`${card} grid grid-cols-2 sm:grid-cols-4 gap-3`}>
-                <div>
-                  <span className={muted}>Agent:</span>
-                  <p className={`font-semibold ${agentColor(server.agentStatus)}`}>{server.agentStatus}</p>
-                </div>
-                <div>
-                  <span className={muted}>Last report:</span>
-                  <p className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`} title={fmtDateTime(server.lastSeen)}>
-                    {reported ? fmtAgo(server.lastSeen) : 'Never'}
-                  </p>
-                </div>
-                <div>
-                  <span className={muted}>Agent version:</span>
-                  <p className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{server.agentVersion || '—'}</p>
-                </div>
-                <div>
-                  <span className={muted}>Server status:</span>
-                  <p className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{server.status}</p>
-                </div>
-              </div>
-
-              {!reported ? (
-                notReported('telemetry')
-              ) : (
-                <>
-                  {server.agentStatus !== 'CONNECTED' && (
-                    <div className="p-2 rounded border border-amber-500/40 text-amber-500 text-[11px]">
-                      Agent {server.agentStatus}: the values below are from the last report (<Ago iso={server.lastSeen} />), not live.
-                    </div>
-                  )}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    <div className={card}>
-                      <div className={`text-[10px] uppercase ${muted}`}>CPU</div>
-                      <div className={`text-base font-bold tabular-nums ${t.cpuPercent > 80 ? 'text-rose-500' : (isDark ? 'text-slate-100' : 'text-slate-900')}`}>
-                        {fmtNum(t.cpuPercent)}%
-                      </div>
-                      <div className={`text-[10px] mt-0.5 ${muted}`}>{server.cpuCores ? `${server.cpuCores} vCPU` : '—'}</div>
-                    </div>
-                    <div className={card}>
-                      <div className={`text-[10px] uppercase ${muted}`}>Memory</div>
-                      <div className={`text-base font-bold tabular-nums ${t.ramPercent > 80 ? 'text-rose-500' : (isDark ? 'text-slate-100' : 'text-slate-900')}`}>
-                        {fmtNum(t.ramPercent)}%
-                      </div>
-                      <div className={`text-[10px] mt-0.5 ${muted}`}>
-                        {t.memUsedMb != null && t.memTotalMb != null
-                          ? `${gb(t.memUsedMb)} / ${gb(t.memTotalMb)} GB used · ${gb(t.memAvailableMb) ?? '?'} GB available`
-                          : server.ramGb ? `${server.ramGb} GB total` : '—'}
-                      </div>
-                    </div>
-                    <div className={card}>
-                      <div className={`text-[10px] uppercase ${muted}`}>Disk</div>
-                      <div className={`text-base font-bold tabular-nums ${t.diskPercent > 85 ? 'text-rose-500' : (isDark ? 'text-slate-100' : 'text-slate-900')}`}>
-                        {fmtNum(t.diskPercent)}%
-                      </div>
-                      <div className={`text-[10px] mt-0.5 ${muted}`}>
-                        {t.diskUsedGb != null && t.diskTotalGb != null
-                          ? `${t.diskUsedGb} / ${t.diskTotalGb} GB used · ${t.diskFreeGb ?? '?'} GB free`
-                          : server.diskGb ? `${server.diskGb} GB total` : '—'}
-                      </div>
-                    </div>
-                    <div className={card}>
-                      <div className={`text-[10px] uppercase ${muted}`}>Load Average</div>
-                      <div className={`text-base font-bold tabular-nums ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
-                        {fmtNum(t.loadAvg?.[0], 2)}
-                      </div>
-                      <div className={`text-[10px] mt-0.5 ${muted}`}>
-                        5m: {fmtNum(t.loadAvg?.[1], 2)} · 15m: {fmtNum(t.loadAvg?.[2], 2)}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className={`${card} grid grid-cols-2 sm:grid-cols-4 gap-3`}>
-                    <div>
-                      <span className={muted}>OS:</span>
-                      <p className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{server.os || '—'}</p>
-                    </div>
-                    <div>
-                      <span className={muted}>Network In / Out:</span>
-                      <p className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
-                        {fmtNum(t.networkInKbps / 1024)} / {fmtNum(t.networkOutKbps / 1024)} Mbps
-                      </p>
-                    </div>
-                    <div>
-                      <span className={muted}>Uptime:</span>
-                      <p className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{fmtUptime(t.uptimeSec, server.uptimeDays)}</p>
-                    </div>
-                    <div>
-                      <span className={muted}>Sample observed:</span>
-                      <p className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{fmtTime(t.observedAt)} · <Ago iso={t.observedAt} staleAfterSec={60} /></p>
-                    </div>
-                  </div>
-                </>
-              )}
-
-              <ServerMetricsPanel serverId={server.id} isDark={isDark} />
-            </div>
+        <div className="p-6 overflow-y-auto space-y-5 flex-1 text-xs font-mono" role="tabpanel">
+          {activeTab === 'overview' && (
+            <>
+              {!reported && notReported('telemetry')}
+              <OverviewTab server={server} isDark={isDark} onNavigateTab={tab => setActiveTab(tab as DrawerTab)} />
+            </>
           )}
+          {activeTab === 'resources' && <ResourcesTab server={server} isDark={isDark} />}
+          {activeTab === 'applications' && <ApplicationsTab server={server} isDark={isDark} />}
+          {activeTab === 'services' && <ServicesTab server={server} isDark={isDark} />}
+          {activeTab === 'network' && <NetworkTab server={server} isDark={isDark} />}
+          {activeTab === 'storage' && <StorageTab server={server} isDark={isDark} />}
+          {activeTab === 'database' && <DatabaseTab server={server} isDark={isDark} />}
+          {activeTab === 'agent' && <AgentTab server={server} isDark={isDark} />}
 
           {/* TAB: PROCESSES */}
           {activeTab === 'processes' && (
@@ -439,134 +226,23 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
             )
           )}
 
-          {/* TAB: SERVICES */}
-          {activeTab === 'services' && (
-            server.services.length === 0 ? notReported('services') : (
-              <div className="space-y-3">
-                <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Systemd services (reported by the agent)</div>
-                <div className={`border rounded overflow-x-auto ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
-                  <table className="w-full text-left text-xs">
-                    <thead className={`border-b ${isDark ? 'bg-[#0A0F1A] text-slate-400 border-[#1E293B]' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
-                      <tr>
-                        <th className="py-2 px-3">Service</th>
-                        <th className="py-2 px-3">Status</th>
-                        <th className="py-2 px-3">Version</th>
-                        <th className="py-2 px-3">PID</th>
-                        <th className="py-2 px-3 text-right">Memory</th>
-                        <th className="py-2 px-3 text-right">Last Restart</th>
-                      </tr>
-                    </thead>
-                    <tbody className={`divide-y ${isDark ? 'divide-[#172030]' : 'divide-slate-200'}`}>
-                      {server.services.map(svc => (
-                        <tr key={svc.name} className={isDark ? 'hover:bg-[#151D2E]' : 'hover:bg-slate-50'}>
-                          <td className={`py-2 px-3 font-semibold ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{svc.name}</td>
-                          <td className="py-2 px-3">
-                            <span className={`font-semibold ${svc.status === 'active' ? 'text-emerald-500' : svc.status === 'restarting' ? 'text-amber-500' : 'text-rose-500'}`}>
-                              {svc.status}
-                            </span>
-                          </td>
-                          <td className={`py-2 px-3 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{svc.version || '—'}</td>
-                          <td className={`py-2 px-3 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{svc.pid || '—'}</td>
-                          <td className={`py-2 px-3 text-right tabular-nums ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{svc.memoryMb ? `${fmtNum(svc.memoryMb, 0)} MB` : '—'}</td>
-                          <td className={`py-2 px-3 text-right ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{validDate(svc.lastRestart) ? fmtDateTime(svc.lastRestart) : (svc.lastRestart || '—')}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )
-          )}
-
-          {/* TAB: AGENT / DATABASE / PROVIDER */}
-          {activeTab === 'health' && (() => {
-            const state = !server.lastSeen ? 'NOT_CONNECTED' : server.agentStatus === 'CONNECTED' ? 'ONLINE' : server.agentStatus === 'STALE' ? 'STALE' : 'OFFLINE';
-            const rows = (pairs: Array<[string, React.ReactNode]>) => (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
-                {pairs.map(([k, v]) => <div key={k} className="flex gap-2"><span className={`w-36 shrink-0 ${muted}`}>{k}</span><span className="break-words">{v ?? '—'}</span></div>)}
-              </div>
-            );
-            const unknown = <span className="text-slate-400">Not reported</span>;
-            return (
-              <div className="space-y-4">
-                <div className={card}>
-                  <div className="text-xs font-bold mb-2">Telemetry agent — <span className={verdictColor(state)}>{state.replace('_', ' ')}</span></div>
-                  {rows([
-                    ['Version', server.agentVersion || unknown],
-                    ['Last heartbeat', server.lastSeen ? <Ago iso={server.lastSeen} staleAfterSec={60} /> : unknown],
-                    ['Agent started', server.agentStartedAt ? fmtDateTime(server.agentStartedAt) : unknown],
-                    ['Restarts seen', server.lastSeen ? String(server.agentRestartCount ?? 0) : unknown],
-                    ['Reported hostname', server.reportedHostname || unknown],
-                    ['Reports from IP', server.agentSourceIp || unknown],
-                  ])}
-                  {(server.agentErrors?.length ?? 0) > 0 && (
-                    <div className="mt-2 text-[11px] text-amber-500">Collector errors: {server.agentErrors!.join(' · ')}</div>
-                  )}
-                </div>
-                <div className={card}>
-                  <div className="text-xs font-bold mb-2">Databases (probed by the agent on this server)</div>
-                  {!server.databases?.length ? (
-                    <div className={`text-[11px] ${muted}`}>{server.lastSeen ? 'The agent reports no database probe. Set DB_ENGINE (and DB_CNF / DB_PGPASSFILE for credentials) in /etc/scholario-agent.conf on the server.' : 'UNKNOWN — agent not connected.'}</div>
-                  ) : server.databases.map((d, i) => (
-                    <div key={i} className="space-y-1 mb-2">
-                      <div className="text-[11px] font-semibold">{d.engine}{d.name ? ` · ${d.name}` : ''} — <span className={d.available ? 'text-emerald-500' : 'text-rose-500'}>{d.available ? 'AVAILABLE' : 'UNAVAILABLE'}</span> <span className={muted}>(<Ago iso={d.observedAt} staleAfterSec={180} />)</span></div>
-                      {rows([
-                        ['Version', d.version ?? unknown],
-                        ['Latency', d.latencyMs != null ? `${d.latencyMs} ms` : unknown],
-                        ['Size', d.sizeBytes != null ? `${(d.sizeBytes / 1073741824).toFixed(2)} GB` : unknown],
-                        ['Connections', d.connections != null ? `${d.connections}${d.maxConnections ? ` / ${d.maxConnections}` : ''}` : unknown],
-                        ['Queries > 60 s', d.longRunningQueries != null ? String(d.longRunningQueries) : unknown],
-                        ['Replication', d.replication ? `${d.replication.role} · ${d.replication.state}${d.replication.lagSec != null ? ` · lag ${d.replication.lagSec}s` : ''}${d.replication.error ? ` · ${d.replication.error}` : ''}` : 'not detected'],
-                      ])}
-                      {d.error && <div className="text-[11px] text-rose-500">{d.error}</div>}
-                    </div>
-                  ))}
-                </div>
-                <div className={card}>
-                  <div className="text-xs font-bold mb-2">Hosting provider (Hostinger API)</div>
-                  {!server.hostinger ? (
-                    <div className={`text-[11px] ${muted}`}>Not available — HOSTINGER_API_TOKEN not set, the sync failed, or no Hostinger VM has this IP.</div>
-                  ) : rows([
-                    ['Status', <span className={verdictColor(server.hostinger.status)}>{server.hostinger.status}{server.hostinger.state ? ` (${server.hostinger.state})` : ''}</span>],
-                    ['Plan', server.hostinger.plan ?? unknown],
-                    ['CPU / RAM / Disk', `${server.hostinger.cpus ?? '?'} CPU · ${server.hostinger.ramGb ?? '?'} GB · ${server.hostinger.diskGb ?? '?'} GB`],
-                    ['OS', server.hostinger.os ?? unknown],
-                    ['Region', server.hostinger.region ?? 'Not available'],
-                    ['Hostname', server.hostinger.hostname ?? unknown],
-                    ['Read', <Ago iso={server.hostinger.fetchedAt} staleAfterSec={1800} />],
-                  ])}
-                </div>
-              </div>
-            );
-          })()}
 
           {/* TAB: LOGS */}
           {activeTab === 'logs' && (
             server.logs.length === 0 ? notReported('log entries') : (
               <div className="space-y-3">
-                <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Recent log entries (reported by the agent)</div>
-                <div className={`p-3 rounded border space-y-1.5 text-[11px] max-h-80 overflow-y-auto ${
+                <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Recent journal warnings and errors (reported by the agent) — click a long message to expand</div>
+                <div className={`p-3 rounded border space-y-1.5 text-[11px] max-h-96 overflow-y-auto ${
                   isDark ? 'bg-[#070A10] text-slate-300 border-[#1E293B]' : 'bg-slate-900 text-slate-100 border-slate-800'
                 }`}>
-                  {server.logs.map(log => (
-                    <div key={log.id} className="flex items-start gap-2">
-                      <span className="text-slate-500 shrink-0">{fmtTime(log.timestamp)}</span>
-                      <span className={`px-1 rounded text-[9px] uppercase font-bold shrink-0 ${
-                        log.level === 'error' ? 'bg-rose-950 text-rose-300 border border-rose-900'
-                          : log.level === 'warn' ? 'bg-amber-950 text-amber-300 border border-amber-900'
-                            : 'bg-blue-950 text-blue-300 border border-blue-900'
-                      }`}>
-                        {log.level}
-                      </span>
-                      <span className="text-slate-400 shrink-0">[{log.service}]</span>
-                      <span className={log.level === 'error' ? 'text-rose-300 font-semibold break-all' : 'text-slate-300 break-all'}>{log.message}</span>
-                    </div>
-                  ))}
+                  <div className="flex gap-2 text-[10px] uppercase text-slate-500 pb-1 border-b border-slate-800">
+                    <span className="w-20">Time</span><span className="w-12 text-center">Severity</span><span>Service · Message</span>
+                  </div>
+                  {server.logs.map(log => <LogRow key={log.id} log={log} />)}
                 </div>
               </div>
             )
           )}
-
         </div>
 
         {/* Footer */}
@@ -587,12 +263,15 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
   );
 };
 
+
 export const InfrastructureView: React.FC = () => {
   const { servers, applications, selectedServerId, setSelectedServerId, theme, isLoading } = useOps();
   const navigate = useNavigate();
   const isDark = theme === 'dark';
 
   const [filter, setFilter] = useState<'ALL' | 'PRD' | 'DR' | 'HEALTHY' | 'CRITICAL'>('ALL');
+  // Fleet strip filter (combines with the environment / status filter above)
+  const [issue, setIssue] = useState<FleetIssue | null>(null);
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState<'hostname' | 'cpu' | 'ram' | 'disk'>('hostname');
 
@@ -607,6 +286,29 @@ export const InfrastructureView: React.FC = () => {
   const connected = servers.filter(s => s.agentStatus === 'CONNECTED').length;
   const stale = servers.filter(s => s.agentStatus === 'STALE').length;
   const disconnected = servers.length - connected - stale;
+  const fleet: Array<{ id: FleetIssue; label: string; count: number; level: TelemetryLevel }> = [
+    { id: 'CONNECTED', label: 'Connected', count: connected, level: 'HEALTHY' },
+    { id: 'STALE', label: 'Stale', count: stale, level: 'WARNING' },
+    { id: 'DISCONNECTED', label: 'Disconnected', count: disconnected, level: 'CRITICAL' },
+    { id: 'OUTDATED', label: 'Outdated agent', count: servers.filter(x => x.agent?.outdated).length, level: 'WARNING' },
+    { id: 'CLOCK', label: 'Clock issues', count: servers.filter(x => (x.warnings ?? []).some(w => w.category === 'time')).length, level: 'WARNING' },
+    { id: 'FAILED_SERVICES', label: 'Failed services', count: servers.reduce((a, x) => a + failedServices(x), 0), level: 'CRITICAL' },
+    { id: 'PM2', label: 'PM2 issues', count: servers.reduce((a, x) => a + pm2Issues(x), 0), level: 'WARNING' },
+    { id: 'DB', label: 'DB issues', count: servers.reduce((a, x) => a + dbIssues(x), 0), level: 'WARNING' },
+  ];
+  const matchesIssue = (x: VpsServer) => {
+    switch (issue) {
+      case 'CONNECTED': return x.agentStatus === 'CONNECTED';
+      case 'STALE': return x.agentStatus === 'STALE';
+      case 'DISCONNECTED': return x.agentStatus === 'DISCONNECTED';
+      case 'OUTDATED': return Boolean(x.agent?.outdated);
+      case 'CLOCK': return (x.warnings ?? []).some(w => w.category === 'time');
+      case 'FAILED_SERVICES': return failedServices(x) > 0;
+      case 'PM2': return pm2Issues(x) > 0;
+      case 'DB': return dbIssues(x) > 0;
+      default: return true;
+    }
+  };
 
   const metricValue = (s: VpsServer, v: number) => (hasReported(s) ? v : -1);
 
@@ -618,6 +320,7 @@ export const InfrastructureView: React.FC = () => {
       if (filter === 'CRITICAL') return s.status !== 'HEALTHY';
       return true;
     })
+    .filter(matchesIssue)
     .filter(s => {
       const q = search.toLowerCase();
       return (
@@ -732,6 +435,34 @@ export const InfrastructureView: React.FC = () => {
         )
       ) : (
         <>
+          {/* Fleet health strip — click a count to filter the list */}
+          <div className={`${statCard} font-mono text-xs flex flex-wrap items-stretch gap-1`} role="group" aria-label="Fleet health">
+            <div className="px-2 py-1 mr-1">
+              <div className={`text-[10px] uppercase ${muted}`}>Servers</div>
+              <div className="text-base font-bold tabular-nums">{servers.length}</div>
+            </div>
+            {fleet.map(f => {
+              const active = issue === f.id;
+              const lvl: TelemetryLevel = f.count === 0 ? (f.id === 'CONNECTED' ? 'UNKNOWN' : 'HEALTHY') : f.level;
+              return (
+                <button
+                  key={f.id}
+                  type="button"
+                  onClick={() => setIssue(active ? null : f.id)}
+                  aria-pressed={active}
+                  title={active ? 'Show all servers' : `Show only: ${f.label.toLowerCase()}`}
+                  className={`px-2 py-1 rounded border text-left cursor-pointer transition-colors ${active ? 'border-blue-500 bg-blue-500/10' : isDark ? 'border-transparent hover:border-[#2A3A57]' : 'border-transparent hover:border-slate-300'}`}
+                >
+                  <div className={`text-[10px] uppercase ${muted}`}>{f.label}</div>
+                  <LevelBadge level={lvl} label={String(f.count)} className="text-base" />
+                </button>
+              );
+            })}
+            {issue && (
+              <button type="button" onClick={() => setIssue(null)} className="ml-auto self-center px-2 py-0.5 text-[11px] text-blue-500 hover:underline cursor-pointer">Clear filter</button>
+            )}
+          </div>
+
           {/* Fleet summary (current agent reports) */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 font-mono text-xs">
             <div className={statCard}>
@@ -754,7 +485,7 @@ export const InfrastructureView: React.FC = () => {
             </div>
             <div className={statCard}>
               <div className={`text-[10px] uppercase ${muted}`}>Fullest Disk</div>
-              <div className={`text-base font-bold tabular-nums ${fleetDiskMax !== null && fleetDiskMax > 85 ? 'text-rose-500' : ''}`}>
+              <div className={`text-base font-bold tabular-nums ${fleetDiskMax !== null && fleetDiskMax >= THRESHOLDS.diskPercent.warning ? 'text-rose-500' : ''}`}>
                 {fleetDiskMax === null ? '—' : `${fleetDiskMax.toFixed(1)}%`}
               </div>
               <div className={`text-[10px] mt-0.5 ${muted}`}>highest disk usage in the fleet</div>
@@ -782,6 +513,7 @@ export const InfrastructureView: React.FC = () => {
                       <th className="py-2.5 px-3.5">RAM</th>
                       <th className="py-2.5 px-3.5">Disk</th>
                       <th className="py-2.5 px-3.5">Load (1m)</th>
+                      <th className="py-2.5 px-3.5">Warnings</th>
                       <th className="py-2.5 px-3.5 text-right">Action</th>
                     </tr>
                   </thead>
@@ -817,11 +549,16 @@ export const InfrastructureView: React.FC = () => {
                               {hasReported(s) ? fmtAgo(s.lastSeen) : 'never reported'}{s.agentVersion ? ` · v${s.agentVersion.replace(/^v/, '')}` : ''}
                             </div>
                           </td>
-                          <td className="py-2.5 px-3.5 tabular-nums">{bar(s, s.telemetry.cpuPercent, 80, 'bg-blue-500')}</td>
-                          <td className="py-2.5 px-3.5 tabular-nums">{bar(s, s.telemetry.ramPercent, 80, 'bg-blue-400')}</td>
-                          <td className="py-2.5 px-3.5 tabular-nums">{bar(s, s.telemetry.diskPercent, 85, 'bg-indigo-400')}</td>
+                          <td className="py-2.5 px-3.5 tabular-nums">{bar(s, s.telemetry.cpuPercent, THRESHOLDS.cpuPercent.warning, 'bg-blue-500')}</td>
+                          <td className="py-2.5 px-3.5 tabular-nums">{bar(s, s.telemetry.ramPercent, THRESHOLDS.memoryPercent.warning, 'bg-blue-400')}</td>
+                          <td className="py-2.5 px-3.5 tabular-nums">{bar(s, s.telemetry.diskPercent, THRESHOLDS.diskPercent.warning, 'bg-indigo-400')}</td>
                           <td className={`py-2.5 px-3.5 tabular-nums ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
                             {hasReported(s) ? fmtNum(s.telemetry.loadAvg?.[0], 2) : '—'}
+                          </td>
+                          <td className="py-2.5 px-3.5">
+                            {!hasReported(s) ? <span className={muted}>—</span>
+                              : worstWarning(s) ? <LevelBadge level={worstWarning(s)!} label={String(s.warnings!.length)} />
+                                : s.warnings ? <LevelBadge level="HEALTHY" label="0" /> : <span className={muted}>—</span>}
                           </td>
                           <td className="py-2.5 px-3.5 text-right font-sans">
                             <button

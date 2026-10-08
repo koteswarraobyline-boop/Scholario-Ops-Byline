@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
-import { api, ApplicationAvailability } from '../../services/api';
+import { api, ApplicationAvailability, DatabaseHealthRow, DrReadiness } from '../../services/api';
 import { Application, Monitor, OperationalStatus, VpsServer, LbPool } from '../../types';
 import { Ago, triText, triColor, verdictColor } from '../ui/Freshness';
 import { originHealthy, originRtt } from '../providers/LoadBalancerPanel';
@@ -38,13 +38,20 @@ const AppPanel: React.FC<{ app: Application }> = ({ app }) => {
   const muted = isDark ? 'text-slate-400' : 'text-slate-500';
   const [avail, setAvail] = useState<ApplicationAvailability | null>(null);
   const [availErr, setAvailErr] = useState<string | null>(null);
+  const [dbRows, setDbRows] = useState<DatabaseHealthRow[] | null>(null);
+  const [ready, setReady] = useState<DrReadiness | null>(null);
 
   useEffect(() => {
     let alive = true;
-    const load = () => api.getAvailability(app.id, '24h')
-      .then(a => { if (alive) { setAvail(a); setAvailErr(null); } })
-      .catch(e => { if (alive) setAvailErr(e instanceof Error ? e.message : 'Check failed'); });
-    void load();
+    const load = () => {
+      api.getAvailability(app.id, '24h')
+        .then(a => { if (alive) { setAvail(a); setAvailErr(null); } })
+        .catch(e => { if (alive) setAvailErr(e instanceof Error ? e.message : 'Check failed'); });
+      // Database + readiness are evaluated by the server; a failure leaves the row "unknown", never green
+      api.getDatabaseHealth().then(r => { if (alive) setDbRows(r.filter(x => x.applicationId === app.id)); }).catch(() => { if (alive) setDbRows(null); });
+      api.getDrReadiness(app.id).then(r => { if (alive) setReady(r); }).catch(() => { if (alive) setReady(null); });
+    };
+    load();
     const t = setInterval(load, 60_000);
     return () => { alive = false; clearInterval(t); };
   }, [app.id]);
@@ -128,6 +135,8 @@ const AppPanel: React.FC<{ app: Application }> = ({ app }) => {
           </div>
         </div>
 
+        <EnvStatusLines label={label.startsWith('Production') ? 'PRD' : 'DR'} srv={srv} http={http} db={dbRows?.find(r => r.environment === (label.startsWith('Production') ? 'PRD' : 'DR'))} ready={ready} isDark={isDark} />
+
         <div className={`grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2 border-t text-[10px] ${isDark ? 'border-[#1A2332]' : 'border-slate-200'} ${muted}`}>
           <div>
             Application availability (24h, observed):{' '}
@@ -167,6 +176,36 @@ const AppPanel: React.FC<{ app: Application }> = ({ app }) => {
         <button onClick={() => navigate('/cloudflare')} className="text-blue-400 hover:underline cursor-pointer">Cloudflare pools →</button>
         <button onClick={() => navigate('/infrastructure')} className="text-blue-400 hover:underline cursor-pointer">VPS telemetry →</button>
       </div>
+    </div>
+  );
+};
+
+/** Agent · App · DB · Services · Readiness for one environment. Every value comes from the server. */
+const EnvStatusLines: React.FC<{ label: Env; srv: VpsServer | undefined; http: Monitor | undefined; db: DatabaseHealthRow | undefined; ready: DrReadiness | null; isDark: boolean }> = ({ label, srv, http, db, ready, isDark }) => {
+  const muted = isDark ? 'text-slate-400' : 'text-slate-500';
+  const agent = !srv ? 'No server' : !srv.lastSeen ? 'NOT CONNECTED' : srv.agent?.outdated && srv.agentStatus === 'CONNECTED' ? 'CONNECTED (outdated)' : srv.agentStatus;
+  const agentCls = !srv || !srv.lastSeen ? 'text-slate-400' : srv.agentStatus === 'CONNECTED' ? (srv.agent?.outdated ? 'text-amber-500' : 'text-emerald-500') : srv.agentStatus === 'STALE' ? 'text-amber-500' : 'text-rose-500';
+  const appStatus = !http ? 'NOT CONFIGURED' : !http.lastCheck ? 'UNKNOWN' : http.status === 'HEALTHY' ? 'HEALTHY' : http.status === 'CRITICAL' ? 'DOWN' : http.status;
+  const local = srv?.appHealth?.find(c => c.environment === label) ?? srv?.appHealth?.[0];
+  const failed = srv?.services.filter(s => s.status === 'failed').length ?? 0;
+  const svcText = !srv?.lastSeen ? 'UNKNOWN' : srv.services.length || srv.failedUnits ? `${failed} failed` : 'none watched';
+  const svcCls = !srv?.lastSeen || (!srv.services.length && !srv.failedUnits) ? 'text-slate-400' : failed ? 'text-rose-500' : 'text-emerald-500';
+  // PRD: its 3 core checks; DR: the overall DR readiness (13 core checks)
+  const prdChecks = ready?.checks.filter(c => c.group !== 'capacity' && c.key.startsWith('prd_')) ?? [];
+  const readyText = !ready ? 'UNKNOWN' : label === 'DR' ? `${ready.overall} (${ready.passed}/${ready.total})`
+    : prdChecks.some(c => c.status === 'FAIL') ? `FAIL (${prdChecks.filter(c => c.status === 'PASS').length}/${prdChecks.length} checks)`
+      : `${prdChecks.every(c => c.status === 'PASS') ? 'PASS' : 'PARTIAL'} (${prdChecks.filter(c => c.status === 'PASS').length}/${prdChecks.length} checks)`;
+  const readyCls = verdictColor(!ready ? 'UNKNOWN' : label === 'DR' ? ready.overall : prdChecks.some(c => c.status === 'FAIL') ? 'FAIL' : prdChecks.every(c => c.status === 'PASS') ? 'PASS' : 'WARNING');
+  const row = (k: string, v: React.ReactNode, cls: string, sub?: React.ReactNode) => (
+    <div className="flex gap-2"><span className={`w-20 shrink-0 ${muted}`}>{k}</span><span className={`font-semibold ${cls}`}>{v}</span>{sub && <span className={muted}>{sub}</span>}</div>
+  );
+  return (
+    <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-x-3 gap-y-1 pt-2 border-t text-[11px] ${isDark ? 'border-[#1A2332]' : 'border-slate-200'}`}>
+      {row('Agent', agent, agentCls)}
+      {row('App', appStatus, verdictColor(appStatus), local ? <>· local {local.status}{local.latencyMs != null ? ` ${local.latencyMs} ms` : ''}</> : undefined)}
+      {row('DB', db ? db.status.replace('_', ' ') : 'UNKNOWN', verdictColor(db?.status ?? 'UNKNOWN'))}
+      {row('Services', svcText, svcCls)}
+      {row('Readiness', readyText, readyCls)}
     </div>
   );
 };

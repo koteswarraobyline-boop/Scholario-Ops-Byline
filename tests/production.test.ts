@@ -159,6 +159,86 @@ test('telemetry: only an authenticated agent report updates a server, values are
   await waitFor(async () => (await one(`select state->'telemetry'->>'cpuPercent' c from ${SCHEMA}.servers where id = $1`, [id]))?.c === '12.5');
 });
 
+test('telemetry API (agent 3.3): backward-compatible responses, new sections, fleet summaries, validation, no secrets', async () => {
+  const cols = (await pgc.query(`select column_name from information_schema.columns where table_schema = $1 and table_name = 'server_metrics'`, [SCHEMA])).rows.map(r => r.column_name);
+  for (const c of ['cpu', 'ram', 'disk', 'load1', 'net_in', 'net_out', 'swap', 'iowait', 'steal', 'disk_read', 'disk_write', 'disk_util']) assert.ok(cols.includes(c), `server_metrics.${c}`);
+
+  const srv = await api('POST', '/api/v1/servers', { hostname: 'telemetry33-test', ip: '192.0.2.51', environment: 'PRD' });
+  assert.equal(srv.status, 201, srv.raw);
+  const id = srv.body.data.id;
+  const agentToken = (await one(`select agent_token from ${SCHEMA}.servers where id = $1`, [id])).agent_token as string;
+  const secret = 'pm2-env-secret-value-7f3a';
+  const report = {
+    agentVersion: '3.3.0', observedAt: new Date().toISOString(), sentAt: new Date().toISOString(), lastReportRttMs: 30,
+    cpuPercent: 20, ramPercent: 50, diskPercent: 60, load: [1, 1, 1], cpuCores: 2, cpuIowaitPercent: 3, cpuStealPercent: 1,
+    swapTotalMb: 1024, swapUsedMb: 100, swapFreeMb: 924, swapPercent: 9.8, pressure: { cpu: 1, memory: 0, io: 2 },
+    filesystems: [{ mountPoint: '/', filesystem: 'ext4', device: '/dev/vda1', totalGb: 50, usedGb: 30, freeGb: 20, usedPercent: 60, inodeTotal: 100, inodeUsed: 10, inodeFree: 90, inodePercent: 10 }],
+    networkInterfaces: [{ name: 'eth0', rxBytesPerSec: 1, txBytesPerSec: 2, rxPacketsPerSec: 1, txPacketsPerSec: 1, rxErrors: 0, txErrors: 0, rxDrops: 0, txDrops: 0, operationalState: 'up', virtual: false }],
+    diskIo: [{ device: 'vda', readBytesPerSec: 10, writeBytesPerSec: 20, readOpsPerSec: 1, writeOpsPerSec: 2, ioUtilizationPercent: 5, readLatencyMs: 1, writeLatencyMs: 1 }],
+    pm2: [{ id: 0, name: 'app', status: 'online', pid: 5, cpuPercent: 1, memoryMb: 50, restartCount: 0, ports: [4100], env: { TOKEN: secret }, DB_PASSWORD: secret }],
+    listeningPorts: [], appChecks: [], failedUnits: { count: 0, units: [] },
+    ntp: { synchronized: true, ntpEnabled: true, service: 'systemd-timesyncd', clockOffsetMs: 1.5, clockDriftPpm: null },
+    system: { kernelVersion: '6.8.0', architecture: 'x86_64', bootTime: '2026-10-01T00:00:00Z', timezone: 'UTC', osName: 'Ubuntu', osVersion: '24.04', nodeVersion: '22.11.0', npmVersion: '10.9.0' },
+  };
+  const post = (body: unknown, headers: Record<string, string> = {}) => fetch(`${BASE}/api/v1/agent/ingest`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${agentToken}`, ...headers }, body: JSON.stringify(body) });
+
+  const good = await post(report);
+  assert.equal(good.status, 200);
+  const ack = await good.json() as { data: { accepted: boolean; serverId: string; appChecks: unknown[] } };
+  assert.equal(ack.data.accepted, true);
+  assert.ok(Array.isArray(ack.data.appChecks), 'ingest response lists the local health checks for the agent');
+
+  // Malformed sections are rejected, oversized reports refused, clock skew still enforced
+  assert.equal((await post({ ...report, pm2: 'everything' })).status, 400);
+  assert.equal((await post({ ...report, ntp: ['x'] })).status, 400);
+  assert.equal((await post({ ...report, filesystems: { '/': 1 } })).status, 400);
+  assert.equal((await post({ ...report, pm2: null, listeningPorts: null, ntp: null, failedUnits: null })).status, 200, 'null = source not available');
+  assert.equal((await post({ ...report, logs: [{ message: 'x'.repeat(600 * 1024) }] })).status, 413);
+  const skewed = await post({ ...report, observedAt: new Date(Date.now() - 3600_000).toISOString() });
+  assert.equal(skewed.status, 400);
+  assert.match(await skewed.text(), /NTP/);
+  assert.equal((await post(report)).status, 200);
+
+  const s = await api('GET', `/api/v1/servers/${id}`);
+  const d = s.body.data;
+  for (const k of ['id', 'hostname', 'ip', 'environment', 'status', 'agentStatus', 'agentVersion', 'lastSeen', 'telemetry', 'processes', 'services', 'logs']) assert.ok(k in d, k);
+  for (const k of ['cpuPercent', 'ramPercent', 'diskPercent', 'loadAvg', 'networkInKbps', 'networkOutKbps', 'observedAt', 'receivedAt']) assert.ok(k in d.telemetry, `telemetry.${k}`);
+  assert.equal(d.telemetry.swapPercent, 9.8);
+  assert.equal(d.telemetry.cpuIowaitPercent, 3);
+  assert.equal(d.filesystems[0].inodePercent, 10);
+  assert.equal(d.system.kernelVersion, '6.8.0');
+  assert.equal(d.ntp.service, 'systemd-timesyncd');
+  assert.equal(d.pm2[0].name, 'app');
+  assert.equal('env' in d.pm2[0], false);
+  assert.equal(s.raw.includes(secret), false, 'PM2 environment never reaches the API');
+  assert.equal(s.raw.includes(agentToken), false);
+  assert.equal(d.agent.expectedVersion, '3.3.0');
+  assert.equal(d.agent.outdated, false);
+  assert.ok(Array.isArray(d.health) && d.health.length >= 10);
+  assert.ok(Array.isArray(d.warnings));
+
+  const list = await api('GET', '/api/v1/servers');
+  assert.ok(Array.isArray(list.body.data) && list.body.data.some((x: { id: string }) => x.id === id));
+
+  const agents = await api('GET', '/api/v1/health/agents');
+  assert.ok(Array.isArray(agents.body.data), 'data keeps its list shape');
+  const row = agents.body.data.find((r: { serverId: string }) => r.serverId === id);
+  for (const k of ['serverId', 'hostname', 'ip', 'environment', 'state', 'version', 'lastSeen', 'startedAt', 'restartCount', 'errors']) assert.ok(k in row, k);
+  assert.equal(row.state, 'ONLINE');
+  assert.equal(row.outdated, false);
+  assert.equal(agents.body.summary.expectedVersion, '3.3.0');
+  assert.ok(agents.body.summary.total >= 1 && agents.body.summary.connected >= 1);
+
+  const dbs = await api('GET', '/api/v1/health/databases');
+  assert.ok(Array.isArray(dbs.body.data));
+  for (const k of ['total', 'healthy', 'warning', 'critical', 'unavailable', 'notConfigured']) assert.equal(typeof dbs.body.summary[k], 'number', k);
+
+  const metrics = await api('GET', `/api/v1/servers/${id}/metrics?range=1h`);
+  assert.ok(metrics.body.data.length >= 1);
+  assert.equal(metrics.body.data.at(-1).swap, 9.8);
+  assert.equal(metrics.body.data.at(-1).diskUtil, 5);
+});
+
 test('incident engine: a real failing check opens an incident in PostgreSQL and recovery resolves it', async () => {
   const m = await api('POST', '/api/v1/monitors', { name: 'prodtest status', type: 'HTTP', target: `${BASE}/api/health/live`, environment: 'PRD', intervalSec: 600, timeoutSec: 5, retries: 1, failureConfirmationThreshold: 2, recoveryConfirmationThreshold: 1, expectedStatusCode: 418 });
   assert.equal(m.status, 201, m.raw);
