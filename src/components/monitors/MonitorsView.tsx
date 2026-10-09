@@ -445,6 +445,14 @@ export const MonitorsView: React.FC = () => {
                           <span className={`font-semibold ${m.enabled ? statusText(m.status) : 'text-slate-500'}`}>
                             {!m.enabled ? 'PAUSED' : m.activeMaintenance ? 'MAINTENANCE' : m.status}
                           </span>
+                          {m.enabled && m.flapping && (
+                            <span
+                              className="ml-1.5 px-1 py-0.5 rounded text-[9px] font-bold whitespace-nowrap bg-amber-500/15 text-amber-500"
+                              title={`${m.flapTransitions ?? 0} pass/fail changes in the last 20 checks`}
+                            >
+                              FLAPPING
+                            </span>
+                          )}
                         </td>
 
                         <td className="py-2.5 px-3.5 text-right font-sans">

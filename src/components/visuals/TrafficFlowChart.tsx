@@ -73,6 +73,7 @@ export const TrafficFlowChart: React.FC = () => {
   const prdServer = servers.find(s => s.id === app.prdServerId);
   const drServer = servers.find(s => s.id === app.drServerId);
   const zone = cloudflareZones.find(z => z.domain === app.cloudflareZone);
+  const flowLive = Boolean(integrations?.cloudflare.configured && zone);
   const dnsRecord = app.dnsRecordName ? zone?.dnsRecords.find(r => r.name === app.dnsRecordName) : undefined;
   const pointsAt: 'PRD' | 'DR' | 'OTHER' | null = dnsRecord
     ? dnsRecord.target === prdServer?.ip ? 'PRD' : dnsRecord.target === drServer?.ip ? 'DR' : 'OTHER'
@@ -265,6 +266,7 @@ export const TrafficFlowChart: React.FC = () => {
           isDark ? 'bg-[#070B12] border-[#182336]' : 'bg-[#F8FAFC] border-[#E2E8F0]'
         }`}>
           <div className="min-w-[760px] flex items-center justify-between relative py-2">
+            {/* The moving "packets" only animate when the path is really known (Cloudflare configured and the zone found) — never implied traffic */}
             {/* Stage 1: Clients */}
             <div className={`w-36 ${tile}`}>
               <div className="w-8 h-8 rounded-full bg-blue-500/20 text-blue-500 flex items-center justify-center mb-1.5">
@@ -276,7 +278,7 @@ export const TrafficFlowChart: React.FC = () => {
 
             <div className="flex-1 px-1.5">
               <svg className="w-full h-8" preserveAspectRatio="none" aria-hidden="true">
-                <line x1="0" y1="16" x2="100%" y2="16" stroke="#3B82F6" strokeWidth="2.5" className="animate-flow-packet" />
+                <line x1="0" y1="16" x2="100%" y2="16" stroke="#3B82F6" strokeWidth="2.5" className={flowLive ? 'animate-flow-packet' : ''} strokeDasharray={flowLive ? undefined : '4 4'} strokeOpacity={flowLive ? 1 : 0.4} />
               </svg>
             </div>
 
@@ -298,7 +300,7 @@ export const TrafficFlowChart: React.FC = () => {
 
             <div className="flex-1 px-1.5">
               <svg className="w-full h-8" preserveAspectRatio="none" aria-hidden="true">
-                <line x1="0" y1="16" x2="100%" y2="16" stroke="#6366F1" strokeWidth="2.5" className="animate-flow-packet" />
+                <line x1="0" y1="16" x2="100%" y2="16" stroke="#6366F1" strokeWidth="2.5" className={flowLive ? 'animate-flow-packet' : ''} strokeDasharray={flowLive ? undefined : '4 4'} strokeOpacity={flowLive ? 1 : 0.4} />
               </svg>
             </div>
 

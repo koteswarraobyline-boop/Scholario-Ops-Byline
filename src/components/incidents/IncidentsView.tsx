@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { IncidentMinutes } from '../ui/IncidentMinutes';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
 import { Incident, IncidentStatus, IncidentSeverity } from '../../types';
@@ -183,7 +184,7 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
         }`}>
           <div className="flex flex-wrap items-center gap-4">
             <span>Started: <strong className={isDark ? 'text-slate-200' : 'text-slate-800'}>{fmtDateTime(incident.startedAt)}</strong></span>
-            <span>Duration: <strong className={`tabular-nums ${closed ? 'text-emerald-500' : 'text-rose-500'}`}>{incident.durationMinutes ?? 0} min</strong></span>
+            <span>Duration: <strong className={`tabular-nums ${closed ? 'text-emerald-500' : 'text-rose-500'}`}><IncidentMinutes incident={incident} /> min</strong></span>
             <span className="flex items-center gap-1.5">
               Owner:{' '}
               <strong className={incident.owner && incident.owner !== 'Unassigned' ? (isDark ? 'text-slate-200' : 'text-slate-800') : 'text-amber-500'}>
@@ -855,7 +856,7 @@ export const IncidentsView: React.FC = () => {
                             {app?.name ?? '—'} ({inc.environment})
                           </td>
                           <td className={`py-2.5 px-3.5 tabular-nums ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
-                            {inc.durationMinutes ?? 0} min
+                            <IncidentMinutes incident={inc} /> min
                           </td>
                           <td className={`py-2.5 px-3.5 font-sans ${unassigned ? 'text-amber-500' : isDark ? 'text-slate-300' : 'text-slate-700'}`}>
                             {inc.owner || 'Unassigned'}

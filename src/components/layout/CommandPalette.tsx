@@ -30,6 +30,7 @@ import {
   Settings,
   Network,
   Loader2,
+  Gauge,
 } from 'lucide-react';
 
 export type PaletteCategory =
@@ -78,6 +79,7 @@ const ROUTES: Array<{ tab: string; title: string; subtitle: string; icon: Comman
   { tab: 'runbooks', title: 'Runbooks', subtitle: 'Operational procedures', icon: Terminal, keywords: 'runbooks procedures sop' },
   { tab: 'maintenance', title: 'Maintenance', subtitle: 'Maintenance windows', icon: Calendar, keywords: 'maintenance windows schedule' },
   { tab: 'communications', title: 'Communications', subtitle: 'Notification channels and escalation policies', icon: Send, keywords: 'communications notifications channels escalation teams email webhook' },
+  { tab: 'reliability', title: 'Reliability & SLOs', subtitle: 'Error budgets, capacity forecast, flapping checks', icon: Gauge, keywords: 'slo sla error budget burn rate capacity forecast disk full flapping reliability' },
   { tab: 'reports', title: 'Reports', subtitle: 'Daily operations report', icon: FileText, keywords: 'reports daily summary' },
   { tab: 'audit', title: 'Audit Logs', subtitle: 'Record of operator actions', icon: Shield, keywords: 'audit logs history' },
   { tab: 'users', title: 'Users', subtitle: 'Operator accounts and roles', icon: Users, keywords: 'users accounts roles password' },
@@ -212,8 +214,23 @@ export const CommandPalette: React.FC = () => {
         },
       });
 
-      // Failover / failback (super_admin, requires DNS failover configuration)
-      if (canFailover && app.dnsRecordName && app.prdServerId && app.drServerId && app.failoverState !== 'FAILING_OVER') {
+      // Load-Balancer apps: traffic is switched in Cloudflare after the pre-flight review — open that console
+      if (canFailover && app.loadBalancer) {
+        items.push({
+          id: `action-lb-failover-${app.id}`,
+          category: 'ACTIONS',
+          categoryLabel: 'Failover',
+          title: `Review failover for ${app.name} (Cloudflare Load Balancer)`,
+          subtitle: `Pre-flight checks and decision for ${app.loadBalancer.hostname} — the switch itself is made in Cloudflare`,
+          badge: 'PRE-FLIGHT',
+          badgeType: 'action',
+          icon: Cloud,
+          keywords: `failover failback load balancer cloudflare pool ${app.name} ${app.codeName} dr primary prd`,
+          action: () => { setSelectedAppId(app.id); go('resilience'); },
+        });
+      }
+      // DNS failover / failback (super_admin, requires DNS failover configuration; never for Load-Balancer apps)
+      if (canFailover && !app.loadBalancer && app.dnsRecordName && app.prdServerId && app.drServerId && app.failoverState !== 'FAILING_OVER') {
         const target: 'DR' | 'PRIMARY' = isDr ? 'PRIMARY' : 'DR';
         const targetServer = isDr ? prd : dr;
         items.push({

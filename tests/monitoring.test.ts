@@ -276,7 +276,7 @@ test('DR readiness: UNKNOWN without evidence; never counts UNKNOWN / NOT_CONFIGU
   db.applications.push(app);
   db.monitors.push(mkMonitor(app.id, 'DR', 'HTTPS', 'https://dr.example.invalid/', 'app-url'));
   const r = readiness(app);
-  assert.equal(r.total, 13);
+  assert.equal(r.total, 11, 'no load balancer: the 2 Cloudflare pool / origin checks do not apply');
   assert.equal(r.passed, 0);
   assert.equal(r.overall, 'UNKNOWN');
   assert.ok(r.checks.filter(c => c.group === 'core').every(c => c.status === 'UNKNOWN' || c.status === 'NOT_CONFIGURED'));

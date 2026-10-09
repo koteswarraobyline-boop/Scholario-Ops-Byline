@@ -129,20 +129,28 @@ export function incidentLink(incidentId: string) {
   return config.publicUrl ? `${config.publicUrl}/incidents?id=${encodeURIComponent(incidentId)}` : undefined;
 }
 
-/** Last notification per fingerprint+status — a flapping check notifies at most once per cooldown */
+/** Last notification per fingerprint+status+severity — a flapping check notifies at most once per cooldown */
 const lastSent = new Map<string, number>();
+/** Incidents whose FIRING notification was actually sent: their RESOLVED is never suppressed (paging tools stay in sync) */
+const firingSent = new Set<string>();
 
 export function notifyIncident(incident: Incident, status: 'FIRING' | 'RESOLVED', extra?: string): boolean {
   const channels = channelsForSeverity(incident.severity);
   if (channels.length === 0) return false; // NOT_CONFIGURED: nothing is sent anywhere
-  const key = `${incident.fingerprint}|${status}`;
+  // Severity is part of the key: an escalation (e.g. WARNING → HIGH) is always delivered
+  const key = `${incident.fingerprint}|${status}|${incident.severity}`;
   const now = Date.now();
   const isReminder = Boolean(extra?.startsWith('Reminder'));
-  if (!isReminder && now - (lastSent.get(key) ?? 0) < config.alertCooldownMin * 60_000) {
+  const pairedResolve = status === 'RESOLVED' && firingSent.has(incident.id);
+  if (!isReminder && !pairedResolve && now - (lastSent.get(key) ?? 0) < config.alertCooldownMin * 60_000) {
     log.info('notify', `suppressed ${status} for ${incident.id} (cooldown ${config.alertCooldownMin} min)`);
     return false;
   }
   lastSent.set(key, now);
+  if (status === 'FIRING') firingSent.add(incident.id);
+  else firingSent.delete(incident.id);
+  // Bounded: forget cooldown keys older than a day
+  if (lastSent.size > 5000) for (const [k, t] of lastSent) if (now - t > 86_400_000) lastSent.delete(k);
   const msg: NotificationMessage = {
     title: `${incident.id} ${incident.title}`,
     text: [

@@ -314,13 +314,13 @@ test('database telemetry: connection usage computed; DB issues reported', () => 
   assert.ok(w.some(x => x.key === 'db-long-queries:postgresql app'));
 });
 
-test('DR capacity checks include PM2 / local health / time; READY is still decided by the 13 core checks only', () => {
+test('DR capacity checks include PM2 / local health / time; READY is still decided by the core checks only', () => {
   ingestAgentReport(dr, v33());
   const r = readiness(app);
   const cap = r.checks.filter(c => c.group === 'capacity');
   assert.deepEqual(cap.map(c => c.key), ['telemetry', 'services', 'disk', 'memory', 'cpu', 'pm2', 'app_local', 'time']);
   assert.equal(cap.find(c => c.key === 'pm2')!.status, 'PASS');
-  assert.equal(r.total, 13);
+  assert.equal(r.total, 11, 'no load balancer: the 2 Cloudflare pool / origin checks do not apply');
   assert.notEqual(r.overall, 'READY', 'a connected agent alone never makes DR READY');
 });
 

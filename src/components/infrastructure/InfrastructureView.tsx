@@ -279,10 +279,12 @@ export const InfrastructureView: React.FC = () => {
 
   // Fleet summary computed from the latest agent reports only
   const reporting = servers.filter(hasReported);
+  // Averages use live servers only (a stale / disconnected agent's last values are not current)
+  const live = servers.filter(s => s.agentStatus === 'CONNECTED');
   const avg = (vals: number[]) => (vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null);
-  const fleetCpu = avg(reporting.map(s => s.telemetry.cpuPercent));
-  const fleetRam = avg(reporting.map(s => s.telemetry.ramPercent));
-  const fleetDiskMax = reporting.length ? Math.max(...reporting.map(s => s.telemetry.diskPercent)) : null;
+  const fleetCpu = avg(live.map(s => s.telemetry.cpuPercent));
+  const fleetRam = avg(live.map(s => s.telemetry.ramPercent));
+  const fleetDiskMax = live.length ? Math.max(...live.map(s => s.telemetry.diskPercent)) : null;
   const connected = servers.filter(s => s.agentStatus === 'CONNECTED').length;
   const stale = servers.filter(s => s.agentStatus === 'STALE').length;
   const disconnected = servers.length - connected - stale;
@@ -402,7 +404,7 @@ export const InfrastructureView: React.FC = () => {
                     : isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                {f}
+                {f === 'CRITICAL' ? 'NOT HEALTHY' : f}
               </button>
             ))}
           </div>
@@ -476,7 +478,7 @@ export const InfrastructureView: React.FC = () => {
             <div className={statCard}>
               <div className={`text-[10px] uppercase ${muted}`}>Avg CPU</div>
               <div className="text-base font-bold tabular-nums">{fleetCpu === null ? '—' : `${fleetCpu.toFixed(1)}%`}</div>
-              <div className={`text-[10px] mt-0.5 ${muted}`}>across {reporting.length} reporting server{reporting.length === 1 ? '' : 's'}</div>
+              <div className={`text-[10px] mt-0.5 ${muted}`}>across {live.length} live server{live.length === 1 ? '' : 's'}</div>
             </div>
             <div className={statCard}>
               <div className={`text-[10px] uppercase ${muted}`}>Avg RAM</div>

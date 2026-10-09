@@ -293,6 +293,31 @@ const waitText = async (pred: (t: string) => boolean, what: string) => {
 ${(await bodyText()).slice(0, 3000)}`);
 };
 
+/** Every page of the app (routes in src/App.tsx) — no page overflow, nothing outside its card, no overlaps */
+const ALL_ROUTES = ['/applications', '/incidents', '/resilience', '/backups', '/dependencies', '/hostinger', '/cloudflare',
+  '/deployments', '/runbooks', '/maintenance', '/communications', '/reliability', '/reports', '/audit', '/users'];
+for (const width of [1366, 1024]) {
+  test(`all other pages render cleanly at ${width}px`, { skip: SKIP }, async () => {
+    const failures: string[] = [];
+    for (const route of ALL_ROUTES) {
+      await visit(route, width, '');
+      // Wait until the page content (not only the shell) has rendered
+      for (let i = 0; i < 40; i++) { if ((await page!.eval<number>(`document.querySelector('main')?.innerText.length ?? 0`)) > 120) break; await sleep(250); }
+      // …and table skeletons have been replaced by real rows (pulse dots elsewhere are tiny, skeleton bars are not)
+      for (let i = 0; i < 40; i++) {
+        const skeletons = await page!.eval<number>(`[...document.querySelectorAll('main .animate-pulse')].filter(e => e.getBoundingClientRect().width > 40).length`);
+        if (skeletons === 0) break; await sleep(250);
+      }
+      await sleep(500);
+      const r = await page!.eval<{ problems: string[]; error?: string }>(CHECK('main'));
+      assert.ok(!r.error, r.error);
+      await shot(`page${route.replace(/\//g, '-')}-${width}`);
+      for (const x of r.problems) failures.push(`${route}: ${x}`);
+    }
+    assert.deepEqual(failures, [], failures.join('\n'));
+  });
+}
+
 test('heartbeat stream in the browser: ICT stopped on PRD → server stays CONNECTED, node FAILING; expand; filters; recovery; no watchdog', { skip: SKIP }, async () => {
   const svc = [{ name: 'nginx', status: 'active', pid: 1, memoryMb: 20, since: '' }, { name: 'pm2-root', status: 'active', pid: 2, memoryMb: 30, since: '' }];
   const ict = (status: 'HEALTHY' | 'DOWN') => [{ applicationId: 'ict', name: 'ICT Production', environment: 'PRD', port: 4100, path: '/health', listening: status === 'HEALTHY', status,

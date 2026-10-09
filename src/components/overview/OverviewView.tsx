@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { THRESHOLDS } from '../../lib/thresholds';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
@@ -174,25 +175,30 @@ export const OverviewView: React.FC = () => {
   }, [reportingKey]);
 
   const fleetHistory = useMemo(() => {
-    const buckets = new Map<number, { cpu: number[]; ram: number[]; net: number }>();
-    Object.values(metricSeries).forEach(points => {
+    // Per minute, first average each server's samples (agents report every 5–10 s), then combine
+    // servers: CPU / RAM = mean of the server means, network = sum of the server means.
+    const buckets = new Map<number, Map<string, { cpu: number[]; ram: number[]; net: number[] }>>();
+    Object.entries(metricSeries).forEach(([serverId, points]) => {
       points.forEach(p => {
         const k = minuteKey(p.t);
         if (k === null) return;
-        const b = buckets.get(k) ?? { cpu: [], ram: [], net: 0 };
-        b.cpu.push(p.cpu);
-        b.ram.push(p.ram);
-        b.net += (p.netIn + p.netOut) / 1000; // kbps → Mbps
-        buckets.set(k, b);
+        const minute = buckets.get(k) ?? new Map();
+        const s = minute.get(serverId) ?? { cpu: [], ram: [], net: [] };
+        s.cpu.push(p.cpu);
+        s.ram.push(p.ram);
+        s.net.push((p.netIn + p.netOut) / 1000); // kbps → Mbps
+        minute.set(serverId, s);
+        buckets.set(k, minute);
       });
     });
     const keys = [...buckets.keys()].sort((a, b) => a - b);
-    const avg = (v: number[]) => +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(1);
+    const mean = (v: number[]) => (v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0);
+    const per = (k: number, f: 'cpu' | 'ram' | 'net') => [...buckets.get(k)!.values()].map(s => mean(s[f]));
     return {
       labels: keys.map(hhmm),
-      cpu: keys.map(k => avg(buckets.get(k)!.cpu)),
-      ram: keys.map(k => avg(buckets.get(k)!.ram)),
-      net: keys.map(k => +buckets.get(k)!.net.toFixed(2)),
+      cpu: keys.map(k => +mean(per(k, 'cpu')).toFixed(1)),
+      ram: keys.map(k => +mean(per(k, 'ram')).toFixed(1)),
+      net: keys.map(k => +per(k, 'net').reduce((a, b) => a + b, 0).toFixed(2)),
     };
   }, [metricSeries]);
 
@@ -232,6 +238,7 @@ export const OverviewView: React.FC = () => {
   const criticalMonitors = enabledMonitors.filter(m => m.status === 'CRITICAL').length;
   const criticalApps = applications.filter(a => a.status === 'CRITICAL').length;
   const cfConfigured = Boolean(integrations?.cloudflare.configured);
+  const backupApps = systemSummary.backupApps;
   const hbServers = deadMan.servers;
   const hbConnected = hbServers.filter(s => s.server.state === 'HEALTHY').length;
   const hbGroup = (k: 'applications' | 'services' | 'databases') => {
@@ -304,7 +311,7 @@ export const OverviewView: React.FC = () => {
             </>
           )}
           <span className={isDark ? 'text-slate-700' : 'text-slate-300'}>·</span>
-          <span className={overallUptime === null ? '' : overallUptime >= 99.9 ? 'text-emerald-500 font-semibold' : 'text-amber-500 font-semibold'}>
+          <span className={overallUptime === null ? '' : overallUptime >= THRESHOLDS.uptimePercent.good ? 'text-emerald-500 font-semibold' : 'text-amber-500 font-semibold'}>
             {overallUptime === null ? 'No uptime data yet' : `${overallUptime.toFixed(2)}% avg uptime (30d, ${uptimeVals.length} app${uptimeVals.length === 1 ? '' : 's'})`}
           </span>
         </p>
@@ -572,10 +579,15 @@ export const OverviewView: React.FC = () => {
         />
         <MetricCard
           label="Backups"
-          value={systemSummary.backupsCurrentCount}
-          sub="Successful, last 26h"
+          value={backupApps && backupApps.total ? `${backupApps.healthy}/${backupApps.total}` : systemSummary.backupsCurrentCount}
+          sub={!backupApps ? 'Successful, last 26h'
+            : backupApps.total === 0 ? 'No applications'
+              : backupApps.failed ? `${backupApps.failed} app(s) FAILED`
+                : backupApps.stale ? `${backupApps.stale} app(s) stale`
+                  : backupApps.unknown ? `${backupApps.unknown} app(s) never reported` : 'All apps current'}
           icon={Database}
-          status={systemSummary.backupsCurrentCount === 0 ? 'unknown' : 'ok'}
+          status={!backupApps || backupApps.total === 0 ? (systemSummary.backupsCurrentCount === 0 ? 'unknown' : 'ok')
+            : backupApps.failed ? 'crit' : backupApps.stale ? 'warn' : backupApps.unknown ? 'unknown' : 'ok'}
           onClick={() => go('backups')}
           isDark={isDark}
         />
@@ -849,7 +861,7 @@ export const OverviewView: React.FC = () => {
                       </td>
 
                       <td className="py-2.5 px-3.5 text-right tabular-nums font-semibold">
-                        <span className={app.uptime30d === null ? 'text-slate-500' : app.uptime30d < 99.9 ? 'text-amber-400' : 'text-emerald-400'}>
+                        <span className={app.uptime30d === null ? 'text-slate-500' : app.uptime30d < THRESHOLDS.uptimePercent.good ? 'text-amber-400' : 'text-emerald-400'}>
                           {fmtPct(app.uptime30d)}
                         </span>
                       </td>

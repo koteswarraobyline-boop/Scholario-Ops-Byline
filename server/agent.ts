@@ -13,7 +13,7 @@
  * - Authenticates with a per-server secret token.
  */
 /** Single source of truth for the current agent version (the UI compares reported versions against it). */
-export const AGENT_VERSION = '3.3.0';
+export const AGENT_VERSION = '3.3.1';
 
 const AGENT_PY = String.raw`#!/usr/bin/env python3
 # Scholario Ops telemetry agent. READ-ONLY: never restarts, stops, kills or reconfigures anything.
@@ -21,6 +21,7 @@ import glob, json, os, re, shutil, socket, subprocess, sys, time, urllib.request
 
 AGENT_VERSION = "__VERSION__"
 CONF = "/etc/scholario-agent.conf"
+HEAVY_BUDGET_SEC = 25
 
 def load_conf():
     conf = {}
@@ -498,25 +499,48 @@ def pm2_homes(conf):
             continue
     return live
 
-def find_pm2(conf):
-    if conf.get("PM2_BIN") and os.access(conf["PM2_BIN"], os.X_OK):
-        return conf["PM2_BIN"]
-    exe = shutil.which("pm2")
-    if exe:
-        return exe
-    for pat in ("/usr/local/bin/pm2", "/usr/bin/pm2", "/root/.nvm/versions/node/*/bin/pm2", "/home/*/.nvm/versions/node/*/bin/pm2"):
-        for c in sorted(glob.glob(pat), reverse=True):
-            if os.access(c, os.X_OK):
-                return c
+def trusted_for(path, uid):
+    """A binary may run for uid only if it (and its directory) is owned by root or by uid and is not
+    writable by anyone else — a user's own pm2/node is never executed for root (or another user)."""
+    try:
+        for p in (os.path.realpath(path), os.path.dirname(os.path.realpath(path)), os.path.dirname(path)):
+            st = os.stat(p)
+            if st.st_uid not in (0, uid) or st.st_mode & 0o022:
+                return False
+        node = os.path.join(os.path.dirname(path), "node")  # nvm layout: node next to pm2, first on PATH
+        return not os.path.exists(node) or trusted_for_file(node, uid)
+    except OSError:
+        return False
+
+def trusted_for_file(path, uid):
+    try:
+        st = os.stat(os.path.realpath(path))
+        return st.st_uid in (0, uid) and not st.st_mode & 0o022
+    except OSError:
+        return False
+
+def find_pm2(conf, uid):
+    cands = [conf["PM2_BIN"]] if conf.get("PM2_BIN") else []
+    cands += [shutil.which("pm2") or "", "/usr/local/bin/pm2", "/usr/bin/pm2"]
+    homes = ["/root"] if uid == 0 else [pwd_home(uid)]
+    for h in filter(None, homes):
+        cands += sorted(glob.glob(h + "/.nvm/versions/node/*/bin/pm2"), reverse=True)
+    for c in cands:
+        if c and os.access(c, os.X_OK) and trusted_for(c, uid):
+            return c
     return None
+
+def pwd_home(uid):
+    try:
+        import pwd
+        return pwd.getpwuid(uid).pw_dir
+    except Exception:
+        return None
 
 def pm2_processes(conf, listening=None):
     homes = pm2_homes(conf)
     if not homes:
         return None  # PM2 is not running on this server
-    exe = find_pm2(conf)
-    if not exe:
-        raise RuntimeError("a PM2 daemon is running but the pm2 command was not found (set PM2_BIN in %s)" % CONF)
     by_pid = {}
     for l in listening or []:
         for pid in l["pids"]:
@@ -524,6 +548,9 @@ def pm2_processes(conf, listening=None):
     apps = []
     for home in homes:
         st = os.stat(home)
+        exe = find_pm2(conf, st.st_uid)
+        if not exe:
+            raise RuntimeError("a PM2 daemon is running in %s but no trusted pm2 command was found (owned by root or the daemon's user, not writable by others; set PM2_BIN in %s)" % (home, CONF))
         import pwd  # POSIX only; imported here so the parsers stay importable anywhere
         try:
             owner = pwd.getpwuid(st.st_uid).pw_name
@@ -623,7 +650,8 @@ def db_probe(conf):
             status = ""
             for stmt in ("SHOW REPLICA STATUS\\G", "SHOW SLAVE STATUS\\G"):
                 try:
-                    status = _cmd(base[:-2] + ["-e", stmt.replace("\\\\", "\\")])[0]
+                    # Vertical (\G) output needs the column names: drop -N / -B by value (not by position — host/port follow them)
+                    status = _cmd([a for a in base if a not in ("-N", "-B")] + ["-e", stmt.replace("\\\\", "\\")])[0]
                     break
                 except Exception:
                     continue
@@ -736,7 +764,12 @@ def main():
             # Heavier collections every 3rd report
             if tick % 3 == 0:
                 errors = []
+                # Time budget: slow apps / databases must never delay the report past the stale threshold
+                deadline = time.time() + HEAVY_BUDGET_SEC
                 def collect(key, fn):
+                    if time.time() > deadline:
+                        errors.append("%s: skipped (collection time budget of %ds used up)" % (key, HEAVY_BUDGET_SEC))
+                        return
                     try:
                         payload[key] = fn()
                     except Exception as e:
@@ -748,10 +781,10 @@ def main():
                 collect("failedUnits", failed_units)
                 collect("listeningPorts", listening_ports)
                 collect("pm2", lambda: pm2_processes(conf, payload.get("listeningPorts")))
-                collect("appChecks", lambda: [r for r in (local_health(c) for c in app_checks) if r])
+                collect("appChecks", lambda: [r for r in (local_health(c) for c in app_checks if time.time() < deadline) if r])
                 collect("ntp", ntp_status)
                 try:
-                    dbr = db_probe(conf)
+                    dbr = db_probe(conf) if time.time() < deadline else None
                     if dbr is not None:
                         payload["databases"] = [dbr]
                         if dbr.get("error"): errors.append("database: " + dbr["error"])

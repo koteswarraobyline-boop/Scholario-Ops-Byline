@@ -15,6 +15,7 @@ import { log } from './logger.ts';
 import { applyExtendedReport, ExtendedAgentReport } from './telemetry.ts';
 import { infraHeartbeat } from './heartbeat.ts';
 import { agentHealth, serverHealth } from './telemetryHealth.ts';
+import { detectFlapping } from '../src/lib/insights.ts';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Monitor classification
@@ -137,6 +138,8 @@ const latencySamples = new Map<string, number[]>();
 const monitorCreatedAt = new Map<string, number>();
 const lastRunAt = new Map<string, number>();
 const inFlight = new Set<string>();
+/** The check currently running per monitor — a second caller (e.g. "Probe now") waits for its real result */
+const inFlightRuns = new Map<string, Promise<Monitor>>();
 
 export function registerNewMonitor(m: Monitor) {
   monitorCreatedAt.set(m.id, Date.now());
@@ -293,6 +296,35 @@ function refreshIncidentContext(m: Monitor, outcome: CheckOutcome) {
 }
 
 /** Closes the open incident of a monitor that was reconfigured, paused or deleted (no recovery was observed). */
+/**
+ * Closes every open incident whose fingerprint references one of these ids (a deleted server,
+ * application or monitor) — nothing would ever resolve them otherwise, and reminders would page forever.
+ */
+export function closeIncidentsReferencing(ids: string[], operator: string, reason: string): number {
+  const set = new Set(ids.filter(Boolean));
+  let n = 0;
+  for (const inc of db.incidents) {
+    if (inc.status === 'RESOLVED' || inc.status === 'CLOSED' || !inc.fingerprint) continue;
+    if (!inc.fingerprint.split(':').some(part => set.has(part))) continue;
+    const now = new Date();
+    inc.status = 'CLOSED';
+    inc.resolvedAt = now.toISOString();
+    inc.durationMinutes = Math.max(0, Math.round((now.getTime() - Date.parse(inc.startedAt)) / 60000));
+    inc.recoveryStatus = `Closed without observed recovery: ${reason}`;
+    inc.timeline.push(timelineEvent(operator, 'INFO', inc.recoveryStatus));
+    lastNotifiedAt.delete(inc.id);
+    broadcast('incident_update', inc);
+    audit(operator, 'INCIDENT_CLOSED', 'INCIDENT', inc.id, `${inc.title}: ${reason}`);
+    n++;
+  }
+  if (n) persist();
+  return n;
+}
+
+/** Drops the in-memory state of a deleted monitor / server (latency samples, schedule, rollup accumulator) */
+export function forgetMonitor(id: string) { latencySamples.delete(id); monitorCreatedAt.delete(id); lastRunAt.delete(id); }
+export function forgetServer(id: string) { minuteAcc.delete(id); }
+
 export function closeMonitorIncident(m: Monitor, operator: string, reason: string) {
   const incident = findOpenIncident(`monitor:${m.id}`);
   if (!incident) return;
@@ -408,11 +440,30 @@ function evaluateOriginHealth(state: LoadBalancerState) {
         changed = true;
       }
     }
+    // An origin that was disabled or removed from the pool will never report healthy again:
+    // close its incident instead of paging forever
+    const prefix = `cf-origin:${pool.id}:`;
+    for (const inc of db.incidents) {
+      if (inc.status === 'RESOLVED' || inc.status === 'CLOSED' || !inc.fingerprint?.startsWith(prefix)) continue;
+      const address = inc.fingerprint.slice(prefix.length);
+      const origin = pool.origins.find(x => x.address === address);
+      if (origin && origin.enabled !== false) continue;
+      const now = new Date();
+      inc.status = 'CLOSED';
+      inc.resolvedAt = now.toISOString();
+      inc.durationMinutes = Math.max(0, Math.round((now.getTime() - Date.parse(inc.startedAt)) / 60000));
+      inc.recoveryStatus = `Closed: origin ${address} was ${origin ? 'disabled' : 'removed'} in Cloudflare pool ${pool.name || pool.id}`;
+      inc.timeline.push(timelineEvent('Cloudflare', 'INFO', inc.recoveryStatus));
+      lastNotifiedAt.delete(inc.id);
+      broadcast('incident_update', inc);
+      audit('Cloudflare Monitor', 'INCIDENT_CLOSED', 'INCIDENT', inc.id, inc.recoveryStatus);
+      changed = true;
+    }
   }
   if (changed) persist();
 }
 
-function applyOutcome(m: Monitor, outcome: CheckOutcome) {
+export function applyOutcome(m: Monitor, outcome: CheckOutcome) {
   const now = new Date().toISOString();
   const prev = m.status;
   const maintenance = isInMaintenance(m);
@@ -452,10 +503,12 @@ function applyOutcome(m: Monitor, outcome: CheckOutcome) {
     m.lastFailure = now;
     m.responseTimeMs = outcome.latencyMs;
     const confirmed = m.consecutiveFailures >= m.failureConfirmationThreshold;
-    m.status = maintenance ? 'MAINTENANCE' : confirmed ? 'CRITICAL' : prev === 'UNKNOWN' ? 'UNKNOWN' : 'WARNING';
+    // A failure while recovering keeps the outage open (no resolve → re-open flapping)
+    m.status = maintenance ? 'MAINTENANCE' : confirmed || prev === 'CRITICAL' ? 'CRITICAL' : prev === 'UNKNOWN' ? 'UNKNOWN' : 'WARNING';
   }
 
-  recordBucket(m.id, outcome.ok, outcome.latencyMs);
+  // Planned maintenance does not count against uptime / SLA
+  if (!maintenance) recordBucket(m.id, outcome.ok, outcome.latencyMs);
   m.uptimePercent = uptimeFor([m.id], 24 * 30) ?? 100;
   m.history = [{
     timestamp: now,
@@ -466,22 +519,42 @@ function applyOutcome(m: Monitor, outcome: CheckOutcome) {
     probeStatus,
   } as Monitor['history'][number], ...m.history].slice(0, 60);
 
+  // Flapping: alternating pass/fail never reaches the confirmation threshold, so it would stay
+  // HEALTHY/WARNING forever. Flag it (WARNING at least); evaluateAlerts raises a flapping alert.
+  const flap = detectFlapping(m.history.filter(x => x.status !== 'UNKNOWN').map(x => x.status !== 'CRITICAL'), m.flapping === true);
+  if (flap.flapping !== (m.flapping === true)) {
+    log.warn('engine', `monitor ${m.name} ${flap.flapping ? 'started' : 'stopped'} flapping (${flap.transitions} changes in ${flap.window} checks)`);
+  }
+  m.flapping = flap.flapping;
+  m.flapTransitions = flap.transitions;
+  if (m.flapping && m.status === 'HEALTHY') m.status = 'WARNING';
+
   if (!maintenance) {
     if (m.status === 'CRITICAL' && prev !== 'CRITICAL') openIncidentForMonitor(m, outcome.detail, outcome);
     else if (m.status === 'CRITICAL' && !outcome.ok) refreshIncidentContext(m, outcome);
-    if (prev === 'CRITICAL' && m.status !== 'CRITICAL') resolveIncidentForMonitor(m);
+    // Confirmed recovery — also after a maintenance window that started while the incident was open
+    if (m.status !== 'CRITICAL' && outcome.ok && (prev === 'CRITICAL' || findOpenIncident(`monitor:${m.id}`))) resolveIncidentForMonitor(m);
   }
 }
 
-export async function runMonitorNow(m: Monitor): Promise<Monitor> {
-  if (inFlight.has(m.id)) return m;
+export function runMonitorNow(m: Monitor): Promise<Monitor> {
+  const running = inFlightRuns.get(m.id);
+  if (running) return running;
+  const run = runMonitorOnce(m).finally(() => inFlightRuns.delete(m.id));
+  inFlightRuns.set(m.id, run);
+  return run;
+}
+
+async function runMonitorOnce(m: Monitor): Promise<Monitor> {
   inFlight.add(m.id);
   lastRunAt.set(m.id, Date.now());
   try {
     const outcome = await checkWithRetries(m);
-    // The monitor may have been deleted or replaced while the check was running
+    // The monitor may have been deleted, paused or re-targeted while the check was running:
+    // a result for the old configuration must not change it (no incident on a paused monitor)
     const current = db.monitors.find(x => x.id === m.id);
     if (!current) return m;
+    if (!current.enabled || current.target !== m.target || current.type !== m.type) return current;
     applyOutcome(current, outcome);
     persist();
     broadcast('monitor_update', current);
@@ -865,21 +938,29 @@ export function recomputeDerived() {
   if (appsChanged) broadcast('applications_changed', null);
 }
 
+const engineProcessStart = Date.now();
 function updateIncidentDurations() {
   const now = Date.now();
+  const open = new Set<string>();
   for (const inc of db.incidents) {
     if (inc.status === 'RESOLVED' || inc.status === 'CLOSED') continue;
+    open.add(inc.id);
     inc.durationMinutes = Math.max(0, Math.round((now - Date.parse(inc.startedAt)) / 60000));
+    // No reminders while the affected monitor is in a maintenance window
+    const monId = inc.fingerprint?.startsWith('monitor:') ? inc.fingerprint.split(':')[1] : null;
+    if (monId && db.monitors.find(x => x.id === monId)?.activeMaintenance) continue;
     // Repeat notification for unacknowledged incidents according to the escalation policy
     const policy = db.escalationPolicies.find(p => p.severity === inc.severity);
     if (policy && !inc.acknowledged && policy.repeatIntervalMin > 0) {
-      const last = lastNotifiedAt.get(inc.id) ?? Date.parse(inc.startedAt);
+      // After a restart the first reminder waits a full interval (no re-page of every open incident on deploy)
+      const last = lastNotifiedAt.get(inc.id) ?? Math.max(Date.parse(inc.startedAt), engineProcessStart);
       if (now - last >= policy.repeatIntervalMin * 60000) {
         lastNotifiedAt.set(inc.id, now);
         notifyIncident(inc, 'FIRING', `Reminder: still unacknowledged after ${inc.durationMinutes} min`);
       }
     }
   }
+  for (const id of lastNotifiedAt.keys()) if (!open.has(id)) lastNotifiedAt.delete(id);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -887,6 +968,10 @@ function updateIncidentDurations() {
 // ─────────────────────────────────────────────────────────────────────────────
 const failoverLocks = new Set<string>();
 const FAILOVER_COOLDOWN_MS = 10 * 60 * 1000;
+/** Last automatic failover ATTEMPT per application (success or not) — a failing Cloudflare call is not retried on every check */
+const autoFailoverAttemptAt = new Map<string, number>();
+/** True while a DNS switch for this application is in flight (edits are refused meanwhile) */
+export const isFailoverInProgress = (appId: string) => failoverLocks.has(appId);
 
 export class FailoverError extends Error {
   constructor(message: string, public status = 400) { super(message); }
@@ -910,8 +995,10 @@ export async function performFailover(app: Application, target: 'DR' | 'PRIMARY'
   const previousState = app.failoverState;
   app.failoverState = 'FAILING_OVER';
   broadcast('application_update', app);
+  const live = () => db.applications.find(a => a.id === app.id) ?? app;
   try {
     const changed = await switchDnsRecord(app.cloudflareZone, app.dnsRecordName, targetServer.ip);
+    app = live();
     app.failoverState = desiredState;
     app.lastFailoverAt = new Date().toISOString();
     const summary = changed.length
@@ -924,7 +1011,8 @@ export async function performFailover(app: Application, target: 'DR' | 'PRIMARY'
     broadcast('application_update', app);
     return { app, changed };
   } catch (err) {
-    app.failoverState = previousState;
+    app = live();
+    app.failoverState = previousState === 'FAILING_OVER' ? (target === 'DR' ? 'PRIMARY_ACTIVE' : 'DR_ACTIVE') : previousState;
     audit(operator, `FAILOVER_TO_${target}_FAILED`, 'FAILOVER', app.id, `${app.name}: ${(err as Error).message}`);
     persist();
     broadcast('application_update', app);
@@ -934,21 +1022,33 @@ export async function performFailover(app: Application, target: 'DR' | 'PRIMARY'
   }
 }
 
-async function evaluateAutoFailover(m: Monitor) {
-  if (m.environment !== 'PRD' || m.status !== 'CRITICAL') return;
+export async function evaluateAutoFailover(m: Monitor) {
+  // Only a CONFIRMED outage of an availability check (HTTP / TCP) can move traffic. CPU, SSL, backup,
+  // heartbeat or agent-staleness monitors never trigger a DNS switch.
+  if (m.environment !== 'PRD' || m.status !== 'CRITICAL' || !AVAILABILITY_TYPES.includes(m.type)) return;
+  if (m.consecutiveFailures < Math.max(1, m.failureConfirmationThreshold)) return; // still CRITICAL from before, but the latest check passed
   const app = db.applications.find(a => a.id === m.applicationId);
   // Load-balancer-managed applications (ICT) are never failed over automatically
   if (!app || app.loadBalancer || !app.autoFailover || app.failoverState !== 'PRIMARY_ACTIVE') return;
   if (app.lastFailoverAt && Date.now() - Date.parse(app.lastFailoverAt) < FAILOVER_COOLDOWN_MS) return;
+  const lastAttempt = autoFailoverAttemptAt.get(app.id);
+  if (lastAttempt && Date.now() - lastAttempt < FAILOVER_COOLDOWN_MS) return;
+  // Every PRD availability check must be down — one failing endpoint is not a site outage
+  const prdAvailability = db.monitors.filter(x => x.enabled && x.applicationId === app.id && x.environment === 'PRD' && AVAILABILITY_TYPES.includes(x.type));
+  if (!prdAvailability.every(x => x.status === 'CRITICAL')) return;
   const drAvailability = db.monitors.filter(x => x.enabled && x.applicationId === app.id && x.environment === 'DR' && AVAILABILITY_TYPES.includes(x.type));
   if (drAvailability.length === 0) {
     audit('Auto-Failover', 'AUTO_FAILOVER_SKIPPED', 'FAILOVER', app.id, `${app.name} PRD is CRITICAL but no DR availability monitors exist to confirm DR is healthy`);
+    autoFailoverAttemptAt.set(app.id, Date.now());
     return;
   }
-  if (!drAvailability.every(x => x.status === 'HEALTHY' || x.status === 'WARNING')) {
+  // DR must be confirmed healthy NOW: passing its latest check, with a fresh result (not WARNING = first unconfirmed failure)
+  const fresh = (x: Monitor) => Boolean(x.lastCheck) && Date.now() - Date.parse(x.lastCheck) <= Math.max(60, x.intervalSec * 3) * 1000;
+  if (!drAvailability.every(x => x.status === 'HEALTHY' && x.consecutiveFailures === 0 && fresh(x))) {
     audit('Auto-Failover', 'AUTO_FAILOVER_SKIPPED', 'FAILOVER', app.id, `${app.name} PRD is CRITICAL but DR is not healthy — staying on PRD`);
     return;
   }
+  autoFailoverAttemptAt.set(app.id, Date.now());
   try {
     await performFailover(app, 'DR', 'Auto-Failover', `${m.name} confirmed CRITICAL: ${m.history[0]?.detail ?? ''}`);
   } catch (err) {

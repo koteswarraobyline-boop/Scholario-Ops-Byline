@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import pg from 'pg';
+import { AGENT_VERSION } from '../server/agent.ts';
 
 dotenv.config({ quiet: true });
 const DATABASE_URL = process.env.DATABASE_URL ?? '';
@@ -107,6 +108,78 @@ test('startup with the database unavailable: process stays up, readiness 503, AP
   }
 });
 
+test('security fixes over HTTP: no super-admin takeover, viewers never get push tokens on the live stream, odd tokens are 401 not 500, manual failover needs the pre-flight', async () => {
+  // it_administrator cannot change a super admin (password / status / name), nor grant the role
+  const ita = await api('POST', '/api/v1/users', { email: 'itadmin@example.com', password: 'ItAdminPassw0rd!', fullName: 'IT Admin', roleName: 'it_administrator' });
+  assert.equal(ita.status, 201, ita.raw);
+  const itTok = (await api('POST', '/api/auth/login', { email: 'itadmin@example.com', password: 'ItAdminPassw0rd!' }, '')).body.data.tokens.accessToken;
+  const users = (await api('GET', '/api/v1/users?pageSize=100')).body.data as Array<{ id: string; email: string; roleName: string }>;
+  const superAdmin = users.find(u => u.email === ADMIN.email)!;
+  assert.equal((await api('PATCH', `/api/v1/users/${superAdmin.id}`, { password: 'Attacker12345!' }, itTok)).status, 403);
+  assert.equal((await api('PATCH', `/api/v1/users/${superAdmin.id}`, { isActive: false }, itTok)).status, 403);
+  assert.equal((await api('PATCH', `/api/v1/users/${superAdmin.id}`, { fullName: 'Pwned' }, itTok)).status, 403);
+  assert.equal((await api('PATCH', `/api/v1/users/${ita.body.data.id}`, { roleName: 'super_admin' }, itTok)).status, 403);
+  assert.equal((await api('POST', '/api/auth/login', ADMIN, '')).status, 200, 'the super admin password is unchanged');
+
+  // A viewer's live stream: monitor updates arrive without the push-heartbeat token
+  const v = await api('POST', '/api/v1/users', { email: 'streamviewer@example.com', password: 'ViewerPassw0rd!', fullName: 'Stream Viewer', roleName: 'viewer' });
+  assert.equal(v.status, 201, v.raw);
+  const vTok = (await api('POST', '/api/auth/login', { email: 'streamviewer@example.com', password: 'ViewerPassw0rd!' }, '')).body.data.tokens.accessToken;
+  const ticket = (await api('POST', '/api/v1/realtime/ticket', {}, vTok)).body.data.ticket as string;
+  const ac = new AbortController();
+  const stream = await fetch(`${BASE}/api/v1/realtime/stream?ticket=${encodeURIComponent(ticket)}`, { signal: ac.signal });
+  assert.equal(stream.status, 200);
+  let received = '';
+  const reader = stream.body!.getReader();
+  const pump = (async () => { try { for (;;) { const { value, done } = await reader.read(); if (done) break; received += new TextDecoder().decode(value); } } catch { /* aborted */ } })();
+  const mon = await api('POST', '/api/v1/monitors', { name: 'stream push', type: 'CRON_HEARTBEAT', target: 'nightly-job', environment: 'PRD', intervalSec: 3600 });
+  assert.ok(mon.status < 300, mon.raw);
+  const token = (await one(`select state->>'heartbeatToken' t from ${SCHEMA}.monitors where id = $1`, [mon.body.data.id]))?.t as string | undefined
+    ?? (mon.body.data.heartbeatToken as string);
+  assert.ok(token, 'push monitor has a heartbeat token');
+  await api('POST', `/api/v1/monitors/${mon.body.data.id}/toggle`, {});
+  await waitFor(async () => received.includes(mon.body.data.id));
+  ac.abort(); await pump;
+  assert.equal(received.includes(token), false, 'viewer stream must not carry the heartbeat token');
+
+  // Non-ASCII token of the right length: 401, never a 500
+  const odd = 'é'.repeat(48);
+  const r = await fetch(`${BASE}/api/v1/agent/ingest`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${odd}` }, body: '{}' });
+  assert.equal(r.status, 401);
+  const inst = await fetch(`${BASE}/api/v1/agent/install/${superAdmin.id}?key=${encodeURIComponent('ü'.repeat(48))}`);
+  assert.ok(inst.status === 404 || inst.status === 401, String(inst.status));
+
+  // Manual failover without a passing pre-flight is refused (412) unless explicitly forced
+  const s1 = (await api('POST', '/api/v1/servers', { hostname: 'fo-prd', ip: '192.0.2.81', environment: 'PRD' })).body.data;
+  const s2 = (await api('POST', '/api/v1/servers', { hostname: 'fo-dr', ip: '192.0.2.82', environment: 'DR' })).body.data;
+  // The DR application answers HTTP 500: a confirmed outage once the monitor reaches CRITICAL
+  const broken = (await import('node:http')).createServer((_q, r) => { r.statusCode = 500; r.end('down'); });
+  await new Promise<void>(r => broken.listen(0, '127.0.0.1', () => r()));
+  const drUrl = `http://127.0.0.1:${(broken.address() as { port: number }).port}/health`;
+  const app = await api('POST', '/api/v1/applications', { name: 'FO App', codeName: 'fo-app', tier: 'TIER_2', rtoTargetMin: 30, rpoTargetMin: 10, description: '',
+    prdServerId: s1.id, drServerId: s2.id, prdUrl: drUrl.replace('/health', '/prd'), drUrl, cloudflareZone: 'example.com', dnsRecordName: 'fo.example.com' });
+  assert.ok(app.status < 300, app.raw);
+  const drMon = ((await api('GET', '/api/v1/monitors')).body.data as Array<{ id: string; applicationId: string; environment: string; managedBy?: string }>)
+    .find(m => m.applicationId === app.body.data.id && m.environment === 'DR' && m.managedBy === 'app-url')!;
+  assert.ok(drMon, 'managed DR URL monitor');
+  try {
+  for (let i = 0; i < 6; i++) {
+    const p = await api('POST', `/api/v1/monitors/${drMon.id}/probe`, {});
+    if (p.body?.data?.status === 'CRITICAL') break;
+  }
+  const fo = await api('POST', `/api/v1/applications/${app.body.data.id}/failover`, { target: 'DR', reason: 'test' });
+  assert.equal(fo.status, 412, fo.raw);
+  assert.match(fo.body.message, /Pre-flight failed/);
+  // An explicit override goes ahead (here Cloudflare rejects the fake token) and is audited
+  const forced = await api('POST', `/api/v1/applications/${app.body.data.id}/failover`, { target: 'DR', reason: 'test', force: true });
+  assert.notEqual(forced.status, 412);
+  const audits = (await api('GET', `/api/v1/audit?q=${app.body.data.id}&pageSize=50`)).body.data as Array<{ action: string }>;
+  assert.ok(audits.some(a => a.action === 'FAILOVER_PREFLIGHT_OVERRIDDEN'));
+  } finally {
+    broken.close();
+  }
+});
+
 test('auth: bad password rejected, lockout after repeated failures, RBAC enforced', async () => {
   assert.equal((await api('POST', '/api/auth/login', { email: ADMIN.email, password: 'wrong-password' }, '')).status, 401);
   assert.equal((await api('GET', '/api/v1/servers', undefined, '')).status, 401);
@@ -170,7 +243,7 @@ test('telemetry API (agent 3.3): backward-compatible responses, new sections, fl
   const agentToken = (await one(`select agent_token from ${SCHEMA}.servers where id = $1`, [id])).agent_token as string;
   const secret = 'pm2-env-secret-value-7f3a';
   const report = {
-    agentVersion: '3.3.0', observedAt: new Date().toISOString(), sentAt: new Date().toISOString(), lastReportRttMs: 30,
+    agentVersion: AGENT_VERSION, observedAt: new Date().toISOString(), sentAt: new Date().toISOString(), lastReportRttMs: 30,
     cpuPercent: 20, ramPercent: 50, diskPercent: 60, load: [1, 1, 1], cpuCores: 2, cpuIowaitPercent: 3, cpuStealPercent: 1,
     swapTotalMb: 1024, swapUsedMb: 100, swapFreeMb: 924, swapPercent: 9.8, pressure: { cpu: 1, memory: 0, io: 2 },
     filesystems: [{ mountPoint: '/', filesystem: 'ext4', device: '/dev/vda1', totalGb: 50, usedGb: 30, freeGb: 20, usedPercent: 60, inodeTotal: 100, inodeUsed: 10, inodeFree: 90, inodePercent: 10 }],
@@ -213,7 +286,7 @@ test('telemetry API (agent 3.3): backward-compatible responses, new sections, fl
   assert.equal('env' in d.pm2[0], false);
   assert.equal(s.raw.includes(secret), false, 'PM2 environment never reaches the API');
   assert.equal(s.raw.includes(agentToken), false);
-  assert.equal(d.agent.expectedVersion, '3.3.0');
+  assert.equal(d.agent.expectedVersion, AGENT_VERSION);
   assert.equal(d.agent.outdated, false);
   assert.ok(Array.isArray(d.health) && d.health.length >= 10);
   assert.ok(Array.isArray(d.warnings));
@@ -227,7 +300,7 @@ test('telemetry API (agent 3.3): backward-compatible responses, new sections, fl
   for (const k of ['serverId', 'hostname', 'ip', 'environment', 'state', 'version', 'lastSeen', 'startedAt', 'restartCount', 'errors']) assert.ok(k in row, k);
   assert.equal(row.state, 'ONLINE');
   assert.equal(row.outdated, false);
-  assert.equal(agents.body.summary.expectedVersion, '3.3.0');
+  assert.equal(agents.body.summary.expectedVersion, AGENT_VERSION);
   assert.ok(agents.body.summary.total >= 1 && agents.body.summary.connected >= 1);
 
   const dbs = await api('GET', '/api/v1/health/databases');

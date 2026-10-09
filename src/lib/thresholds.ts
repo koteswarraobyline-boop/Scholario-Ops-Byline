@@ -47,6 +47,8 @@ export const THRESHOLDS = {
   localHealthFailuresForAlert: 2,
   /** Database connections / max_connections % (the database is DEGRADED from 90 %) */
   dbConnectionUsagePercent: { warning: 80, critical: 90 },
+  /** Availability / uptime %: at or above "good" is green, at or above "warning" amber, below it red */
+  uptimePercent: { good: 99.9, warning: 99 },
   /** DR capacity checks (informational, not part of the 13 core DR readiness checks) */
   drCapacity: {
     diskPercent: { warning: 80, critical: 90 },
