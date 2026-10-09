@@ -71,7 +71,7 @@ See **[DEPLOYMENT.md](DEPLOYMENT.md)** for the step-by-step guide: Ubuntu VPS, P
 | `CLOUDFLARE_API_TOKEN` | Read-only ICT monitoring: Account › Load Balancing: Monitors and Pools › Read, Zone › Load Balancers › Read and Zone › Zone › Read. DNS:Edit is only needed for DNS-record failover of other apps. |
 | `HOSTINGER_API_TOKEN` | Optional. Imports plan, CPU, RAM and state for registered servers. |
 | `SMTP_*` | Email notification channels. |
-| `DEADMAN_HEARTBEAT_URL` | External heartbeat (for example healthchecks.io) that alerts you if this server itself goes down. |
+| `DEADMAN_HEARTBEAT_URL` | Deprecated and ignored. The dead-man heartbeat now covers the monitored servers, applications, services and databases from the agents' reports — no external watchdog. |
 | `DEPLOY_REPORT_TOKEN` | Lets CI report deployments to `POST /api/v1/deployments/report`. |
 
 ## Scripts

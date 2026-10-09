@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import pg from 'pg';
+import { AGENT_VERSION } from '../server/agent.ts';
 
 dotenv.config({ quiet: true });
 const DATABASE_URL = process.env.DATABASE_URL ?? '';
@@ -93,7 +94,8 @@ test('startup with the database unavailable: process stays up, readiness 503, AP
   const child = spawnServer({ DATABASE_URL: 'postgresql://nobody:nothing@127.0.0.1:1/none' }, port);
   try {
     let live = 0;
-    for (let i = 0; i < 40 && live !== 200; i++) { try { live = (await fetch(`http://127.0.0.1:${port}/api/health/live`)).status; } catch { /* starting */ } await new Promise(r => setTimeout(r, 250)); }
+    // Up to 30 s: a freshly spawned tsx process occasionally needs > 10 s to start on a busy machine (flaky before at 10 s)
+    for (let i = 0; i < 120 && live !== 200; i++) { try { live = (await fetch(`http://127.0.0.1:${port}/api/health/live`)).status; } catch { /* starting */ } await new Promise(r => setTimeout(r, 250)); }
     assert.equal(live, 200, 'liveness must answer while the database is down');
     const ready = await fetch(`http://127.0.0.1:${port}/api/health/ready`);
     assert.equal(ready.status, 503);
@@ -103,6 +105,78 @@ test('startup with the database unavailable: process stays up, readiness 503, AP
     assert.equal(child.exitCode, null, 'process must keep running and retry');
   } finally {
     child.kill();
+  }
+});
+
+test('security fixes over HTTP: no super-admin takeover, viewers never get push tokens on the live stream, odd tokens are 401 not 500, manual failover needs the pre-flight', async () => {
+  // it_administrator cannot change a super admin (password / status / name), nor grant the role
+  const ita = await api('POST', '/api/v1/users', { email: 'itadmin@example.com', password: 'ItAdminPassw0rd!', fullName: 'IT Admin', roleName: 'it_administrator' });
+  assert.equal(ita.status, 201, ita.raw);
+  const itTok = (await api('POST', '/api/auth/login', { email: 'itadmin@example.com', password: 'ItAdminPassw0rd!' }, '')).body.data.tokens.accessToken;
+  const users = (await api('GET', '/api/v1/users?pageSize=100')).body.data as Array<{ id: string; email: string; roleName: string }>;
+  const superAdmin = users.find(u => u.email === ADMIN.email)!;
+  assert.equal((await api('PATCH', `/api/v1/users/${superAdmin.id}`, { password: 'Attacker12345!' }, itTok)).status, 403);
+  assert.equal((await api('PATCH', `/api/v1/users/${superAdmin.id}`, { isActive: false }, itTok)).status, 403);
+  assert.equal((await api('PATCH', `/api/v1/users/${superAdmin.id}`, { fullName: 'Pwned' }, itTok)).status, 403);
+  assert.equal((await api('PATCH', `/api/v1/users/${ita.body.data.id}`, { roleName: 'super_admin' }, itTok)).status, 403);
+  assert.equal((await api('POST', '/api/auth/login', ADMIN, '')).status, 200, 'the super admin password is unchanged');
+
+  // A viewer's live stream: monitor updates arrive without the push-heartbeat token
+  const v = await api('POST', '/api/v1/users', { email: 'streamviewer@example.com', password: 'ViewerPassw0rd!', fullName: 'Stream Viewer', roleName: 'viewer' });
+  assert.equal(v.status, 201, v.raw);
+  const vTok = (await api('POST', '/api/auth/login', { email: 'streamviewer@example.com', password: 'ViewerPassw0rd!' }, '')).body.data.tokens.accessToken;
+  const ticket = (await api('POST', '/api/v1/realtime/ticket', {}, vTok)).body.data.ticket as string;
+  const ac = new AbortController();
+  const stream = await fetch(`${BASE}/api/v1/realtime/stream?ticket=${encodeURIComponent(ticket)}`, { signal: ac.signal });
+  assert.equal(stream.status, 200);
+  let received = '';
+  const reader = stream.body!.getReader();
+  const pump = (async () => { try { for (;;) { const { value, done } = await reader.read(); if (done) break; received += new TextDecoder().decode(value); } } catch { /* aborted */ } })();
+  const mon = await api('POST', '/api/v1/monitors', { name: 'stream push', type: 'CRON_HEARTBEAT', target: 'nightly-job', environment: 'PRD', intervalSec: 3600 });
+  assert.ok(mon.status < 300, mon.raw);
+  const token = (await one(`select state->>'heartbeatToken' t from ${SCHEMA}.monitors where id = $1`, [mon.body.data.id]))?.t as string | undefined
+    ?? (mon.body.data.heartbeatToken as string);
+  assert.ok(token, 'push monitor has a heartbeat token');
+  await api('POST', `/api/v1/monitors/${mon.body.data.id}/toggle`, {});
+  await waitFor(async () => received.includes(mon.body.data.id));
+  ac.abort(); await pump;
+  assert.equal(received.includes(token), false, 'viewer stream must not carry the heartbeat token');
+
+  // Non-ASCII token of the right length: 401, never a 500
+  const odd = 'é'.repeat(48);
+  const r = await fetch(`${BASE}/api/v1/agent/ingest`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${odd}` }, body: '{}' });
+  assert.equal(r.status, 401);
+  const inst = await fetch(`${BASE}/api/v1/agent/install/${superAdmin.id}?key=${encodeURIComponent('ü'.repeat(48))}`);
+  assert.ok(inst.status === 404 || inst.status === 401, String(inst.status));
+
+  // Manual failover without a passing pre-flight is refused (412) unless explicitly forced
+  const s1 = (await api('POST', '/api/v1/servers', { hostname: 'fo-prd', ip: '192.0.2.81', environment: 'PRD' })).body.data;
+  const s2 = (await api('POST', '/api/v1/servers', { hostname: 'fo-dr', ip: '192.0.2.82', environment: 'DR' })).body.data;
+  // The DR application answers HTTP 500: a confirmed outage once the monitor reaches CRITICAL
+  const broken = (await import('node:http')).createServer((_q, r) => { r.statusCode = 500; r.end('down'); });
+  await new Promise<void>(r => broken.listen(0, '127.0.0.1', () => r()));
+  const drUrl = `http://127.0.0.1:${(broken.address() as { port: number }).port}/health`;
+  const app = await api('POST', '/api/v1/applications', { name: 'FO App', codeName: 'fo-app', tier: 'TIER_2', rtoTargetMin: 30, rpoTargetMin: 10, description: '',
+    prdServerId: s1.id, drServerId: s2.id, prdUrl: drUrl.replace('/health', '/prd'), drUrl, cloudflareZone: 'example.com', dnsRecordName: 'fo.example.com' });
+  assert.ok(app.status < 300, app.raw);
+  const drMon = ((await api('GET', '/api/v1/monitors')).body.data as Array<{ id: string; applicationId: string; environment: string; managedBy?: string }>)
+    .find(m => m.applicationId === app.body.data.id && m.environment === 'DR' && m.managedBy === 'app-url')!;
+  assert.ok(drMon, 'managed DR URL monitor');
+  try {
+  for (let i = 0; i < 6; i++) {
+    const p = await api('POST', `/api/v1/monitors/${drMon.id}/probe`, {});
+    if (p.body?.data?.status === 'CRITICAL') break;
+  }
+  const fo = await api('POST', `/api/v1/applications/${app.body.data.id}/failover`, { target: 'DR', reason: 'test' });
+  assert.equal(fo.status, 412, fo.raw);
+  assert.match(fo.body.message, /Pre-flight failed/);
+  // An explicit override goes ahead (here Cloudflare rejects the fake token) and is audited
+  const forced = await api('POST', `/api/v1/applications/${app.body.data.id}/failover`, { target: 'DR', reason: 'test', force: true });
+  assert.notEqual(forced.status, 412);
+  const audits = (await api('GET', `/api/v1/audit?q=${app.body.data.id}&pageSize=50`)).body.data as Array<{ action: string }>;
+  assert.ok(audits.some(a => a.action === 'FAILOVER_PREFLIGHT_OVERRIDDEN'));
+  } finally {
+    broken.close();
   }
 });
 
@@ -157,6 +231,86 @@ test('telemetry: only an authenticated agent report updates a server, values are
   assert.equal(s.reportedHostname, 'dr-host');
   assert.equal(JSON.stringify(s).includes(agentToken), false, 'agent token must not be returned');
   await waitFor(async () => (await one(`select state->'telemetry'->>'cpuPercent' c from ${SCHEMA}.servers where id = $1`, [id]))?.c === '12.5');
+});
+
+test('telemetry API (agent 3.3): backward-compatible responses, new sections, fleet summaries, validation, no secrets', async () => {
+  const cols = (await pgc.query(`select column_name from information_schema.columns where table_schema = $1 and table_name = 'server_metrics'`, [SCHEMA])).rows.map(r => r.column_name);
+  for (const c of ['cpu', 'ram', 'disk', 'load1', 'net_in', 'net_out', 'swap', 'iowait', 'steal', 'disk_read', 'disk_write', 'disk_util']) assert.ok(cols.includes(c), `server_metrics.${c}`);
+
+  const srv = await api('POST', '/api/v1/servers', { hostname: 'telemetry33-test', ip: '192.0.2.51', environment: 'PRD' });
+  assert.equal(srv.status, 201, srv.raw);
+  const id = srv.body.data.id;
+  const agentToken = (await one(`select agent_token from ${SCHEMA}.servers where id = $1`, [id])).agent_token as string;
+  const secret = 'pm2-env-secret-value-7f3a';
+  const report = {
+    agentVersion: AGENT_VERSION, observedAt: new Date().toISOString(), sentAt: new Date().toISOString(), lastReportRttMs: 30,
+    cpuPercent: 20, ramPercent: 50, diskPercent: 60, load: [1, 1, 1], cpuCores: 2, cpuIowaitPercent: 3, cpuStealPercent: 1,
+    swapTotalMb: 1024, swapUsedMb: 100, swapFreeMb: 924, swapPercent: 9.8, pressure: { cpu: 1, memory: 0, io: 2 },
+    filesystems: [{ mountPoint: '/', filesystem: 'ext4', device: '/dev/vda1', totalGb: 50, usedGb: 30, freeGb: 20, usedPercent: 60, inodeTotal: 100, inodeUsed: 10, inodeFree: 90, inodePercent: 10 }],
+    networkInterfaces: [{ name: 'eth0', rxBytesPerSec: 1, txBytesPerSec: 2, rxPacketsPerSec: 1, txPacketsPerSec: 1, rxErrors: 0, txErrors: 0, rxDrops: 0, txDrops: 0, operationalState: 'up', virtual: false }],
+    diskIo: [{ device: 'vda', readBytesPerSec: 10, writeBytesPerSec: 20, readOpsPerSec: 1, writeOpsPerSec: 2, ioUtilizationPercent: 5, readLatencyMs: 1, writeLatencyMs: 1 }],
+    pm2: [{ id: 0, name: 'app', status: 'online', pid: 5, cpuPercent: 1, memoryMb: 50, restartCount: 0, ports: [4100], env: { TOKEN: secret }, DB_PASSWORD: secret }],
+    listeningPorts: [], appChecks: [], failedUnits: { count: 0, units: [] },
+    ntp: { synchronized: true, ntpEnabled: true, service: 'systemd-timesyncd', clockOffsetMs: 1.5, clockDriftPpm: null },
+    system: { kernelVersion: '6.8.0', architecture: 'x86_64', bootTime: '2026-10-01T00:00:00Z', timezone: 'UTC', osName: 'Ubuntu', osVersion: '24.04', nodeVersion: '22.11.0', npmVersion: '10.9.0' },
+  };
+  const post = (body: unknown, headers: Record<string, string> = {}) => fetch(`${BASE}/api/v1/agent/ingest`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${agentToken}`, ...headers }, body: JSON.stringify(body) });
+
+  const good = await post(report);
+  assert.equal(good.status, 200);
+  const ack = await good.json() as { data: { accepted: boolean; serverId: string; appChecks: unknown[] } };
+  assert.equal(ack.data.accepted, true);
+  assert.ok(Array.isArray(ack.data.appChecks), 'ingest response lists the local health checks for the agent');
+
+  // Malformed sections are rejected, oversized reports refused, clock skew still enforced
+  assert.equal((await post({ ...report, pm2: 'everything' })).status, 400);
+  assert.equal((await post({ ...report, ntp: ['x'] })).status, 400);
+  assert.equal((await post({ ...report, filesystems: { '/': 1 } })).status, 400);
+  assert.equal((await post({ ...report, pm2: null, listeningPorts: null, ntp: null, failedUnits: null })).status, 200, 'null = source not available');
+  assert.equal((await post({ ...report, logs: [{ message: 'x'.repeat(600 * 1024) }] })).status, 413);
+  const skewed = await post({ ...report, observedAt: new Date(Date.now() - 3600_000).toISOString() });
+  assert.equal(skewed.status, 400);
+  assert.match(await skewed.text(), /NTP/);
+  assert.equal((await post(report)).status, 200);
+
+  const s = await api('GET', `/api/v1/servers/${id}`);
+  const d = s.body.data;
+  for (const k of ['id', 'hostname', 'ip', 'environment', 'status', 'agentStatus', 'agentVersion', 'lastSeen', 'telemetry', 'processes', 'services', 'logs']) assert.ok(k in d, k);
+  for (const k of ['cpuPercent', 'ramPercent', 'diskPercent', 'loadAvg', 'networkInKbps', 'networkOutKbps', 'observedAt', 'receivedAt']) assert.ok(k in d.telemetry, `telemetry.${k}`);
+  assert.equal(d.telemetry.swapPercent, 9.8);
+  assert.equal(d.telemetry.cpuIowaitPercent, 3);
+  assert.equal(d.filesystems[0].inodePercent, 10);
+  assert.equal(d.system.kernelVersion, '6.8.0');
+  assert.equal(d.ntp.service, 'systemd-timesyncd');
+  assert.equal(d.pm2[0].name, 'app');
+  assert.equal('env' in d.pm2[0], false);
+  assert.equal(s.raw.includes(secret), false, 'PM2 environment never reaches the API');
+  assert.equal(s.raw.includes(agentToken), false);
+  assert.equal(d.agent.expectedVersion, AGENT_VERSION);
+  assert.equal(d.agent.outdated, false);
+  assert.ok(Array.isArray(d.health) && d.health.length >= 10);
+  assert.ok(Array.isArray(d.warnings));
+
+  const list = await api('GET', '/api/v1/servers');
+  assert.ok(Array.isArray(list.body.data) && list.body.data.some((x: { id: string }) => x.id === id));
+
+  const agents = await api('GET', '/api/v1/health/agents');
+  assert.ok(Array.isArray(agents.body.data), 'data keeps its list shape');
+  const row = agents.body.data.find((r: { serverId: string }) => r.serverId === id);
+  for (const k of ['serverId', 'hostname', 'ip', 'environment', 'state', 'version', 'lastSeen', 'startedAt', 'restartCount', 'errors']) assert.ok(k in row, k);
+  assert.equal(row.state, 'ONLINE');
+  assert.equal(row.outdated, false);
+  assert.equal(agents.body.summary.expectedVersion, AGENT_VERSION);
+  assert.ok(agents.body.summary.total >= 1 && agents.body.summary.connected >= 1);
+
+  const dbs = await api('GET', '/api/v1/health/databases');
+  assert.ok(Array.isArray(dbs.body.data));
+  for (const k of ['total', 'healthy', 'warning', 'critical', 'unavailable', 'notConfigured']) assert.equal(typeof dbs.body.summary[k], 'number', k);
+
+  const metrics = await api('GET', `/api/v1/servers/${id}/metrics?range=1h`);
+  assert.ok(metrics.body.data.length >= 1);
+  assert.equal(metrics.body.data.at(-1).swap, 9.8);
+  assert.equal(metrics.body.data.at(-1).diskUtil, 5);
 });
 
 test('incident engine: a real failing check opens an incident in PostgreSQL and recovery resolves it', async () => {
@@ -217,6 +371,64 @@ test('graceful shutdown: pending data saved, connections closed, exit code 0', a
   const code = await Promise.race([exited, new Promise<'timeout'>(r => setTimeout(() => r('timeout'), 10_000))]);
   assert.equal(code, 0, `expected clean exit, got ${code}\n${out.slice(-1500)}`);
   assert.match(out, /shutdown complete/);
+});
+
+test('dead-man heartbeat end-to-end: built from agent reports, deprecated DEADMAN_* ignored, no outbound request, no secrets', async () => {
+  let hits = 0;
+  const wd = (await import('node:http')).createServer((_q, r) => { hits++; r.end('OK'); });
+  await new Promise<void>(r => wd.listen(0, '127.0.0.1', () => r()));
+  const oldUrl = `http://127.0.0.1:${(wd.address() as { port: number }).port}/ping/e2e-old-secret-uuid?token=e2e-old-token`;
+  const port = PORT + 70;
+  let out = '';
+  const child = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
+    env: { ...process.env, NODE_ENV: 'production', PORT: String(port), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR, JWT_SECRET: SECRETS.jwt, ADMIN_EMAIL: ADMIN.email, ADMIN_PASSWORD: ADMIN.password, LOG_FORMAT: 'json', CLOUDFLARE_API_TOKEN: '', DEADMAN_HEARTBEAT_URL: oldUrl, DEADMAN_INTERVAL_SEC: '10' },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  });
+  child.stdout?.on('data', d => { out += d; });
+  child.stderr?.on('data', d => { out += d; });
+  try {
+    const base = `http://127.0.0.1:${port}`;
+    await waitReady(base);
+    const login = await (await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ADMIN) })).json() as { data: { tokens: { accessToken: string } } };
+    const get = async (p: string) => { const r = await fetch(base + p, { headers: { Authorization: `Bearer ${login.data.tokens.accessToken}` } }); return { status: r.status, raw: await r.text() }; };
+    // A reporting server shows up in the heartbeat with its delivery data
+    const srv = JSON.parse((await (await fetch(`${base}/api/v1/servers`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${login.data.tokens.accessToken}` }, body: JSON.stringify({ hostname: 'hb-e2e', ip: '192.0.2.77', environment: 'PRD' }) })).text())).data;
+    const agentToken = (await one(`select agent_token from ${SCHEMA}.servers where id = $1`, [srv.id])).agent_token as string;
+    const now = new Date().toISOString();
+    const ing = await fetch(`${base}/api/v1/agent/ingest`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${agentToken}` },
+      body: JSON.stringify({ agentVersion: '3.3.0', observedAt: now, sentAt: now, lastReportRttMs: 20, cpuPercent: 5, ramPercent: 20, diskPercent: 30,
+        services: [{ name: 'nginx', status: 'active', pid: 1, memoryMb: 10, since: '' }],
+        databases: [{ engine: 'postgresql', name: 'app', available: true, latencyMs: 2, version: '16', sizeBytes: 1, connections: 1, maxConnections: 100, longRunningQueries: 0, replication: null, error: null }] }) });
+    assert.equal(ing.status, 200);
+    const hb = await waitFor(async () => {
+      const d = JSON.parse((await get('/api/v1/deadman/status')).raw).data;
+      return d.servers?.some((s: { serverId: string; server: { state: string } }) => s.serverId === srv.id && s.server.state === 'HEALTHY') ? d : null;
+    });
+    const mine = hb.servers.find((s: { serverId: string }) => s.serverId === srv.id);
+    assert.equal(mine.environment, 'PRD');
+    assert.equal(mine.server.latencyMs, 10);
+    assert.equal(mine.services.healthy, 1);
+    assert.equal(mine.databases.checks[0].latencyMs, 2);
+    assert.equal(hb.name, 'Dead-Man Watchdog Heartbeat Stream');
+    assert.deepEqual(JSON.parse((await get('/api/v1/health/heartbeats')).raw).data.servers.map((s: { serverId: string }) => s.serverId), hb.servers.map((s: { serverId: string }) => s.serverId));
+    await new Promise(r => setTimeout(r, 2000));
+    assert.equal(hits, 0, 'no request to the (deprecated) external watchdog URL');
+    for (const p of ['/api/v1/deadman/status', '/api/v1/bootstrap', '/api/v1/integrations', '/api/v1/system/summary', '/api/health']) {
+      const r = await get(p);
+      assert.ok(r.status < 500, `${p} → ${r.status}`);
+      for (const s of ['e2e-old-secret-uuid', 'e2e-old-token', oldUrl, agentToken]) assert.equal(r.raw.includes(s), false, `${p} exposes a secret`);
+    }
+    assert.equal('deadMan' in JSON.parse((await get('/api/v1/integrations')).raw).data, false, 'no external watchdog configuration');
+    const exited = new Promise<number | null>(resolve => child.once('exit', code => resolve(code)));
+    child.send('shutdown');
+    const code = await Promise.race([exited, new Promise<'timeout'>(r => setTimeout(() => r('timeout'), 10_000))]);
+    assert.equal(code, 0, `clean exit expected, got ${code}`);
+    assert.match(out, /DEADMAN_HEARTBEAT_URL, DEADMAN_INTERVAL_SEC[^"]* deprecated and ignored/);
+    for (const s of ['e2e-old-secret-uuid', 'e2e-old-token', oldUrl, agentToken]) assert.equal(out.includes(s), false, 'secret in the logs');
+  } finally {
+    if (child.exitCode === null) child.kill();
+    wd.close();
+  }
 });
 
 test('logs are structured JSON and contain no secrets', async () => {

@@ -3,6 +3,7 @@ import {
   CommunicationChannel, EscalationPolicy, MaintenanceWindow, Runbook, Deployment, BackupRecord,
   IntegrationStatus, HttpProbeResult, TcpProbeResult, ServerMetricPoint, DrReadinessItem, OpsUser,
   LoadBalancerState, FailoverPreflight, DrOverall, CheckRecord, BackupStatus, DatabaseHealth, DatabaseReport, HostingerInfo,
+  ReliabilityInsights,
 } from '../types';
 
 export interface HealthCheckResponse {
@@ -53,6 +54,8 @@ export interface SystemSummary {
   totalMonitors: number; healthyMonitors: number;
   openIncidents: number; criticalIncidents: number;
   drReadinessCount: number; backupsCurrentCount: number;
+  /** Backup status per application (absent from older servers) */
+  backupApps?: { total: number; healthy: number; failed: number; stale: number; unknown: number };
   cloudflareStatus: 'HEALTHY' | 'DEGRADED' | 'NOT_CONFIGURED' | 'UNKNOWN';
   deadManStatus: string; deadManLastHeartbeat: string | null;
   overallHealth: 'OPERATIONAL' | 'WARNING' | 'CRITICAL' | 'UNKNOWN';
@@ -102,7 +105,22 @@ export interface AgentHealthRow {
   serverId: string; hostname: string; ip: string; environment: 'PRD' | 'DR';
   state: 'ONLINE' | 'STALE' | 'OFFLINE' | 'NOT_CONNECTED'; version: string | null; lastSeen: string | null;
   startedAt: string | null; restartCount: number; errors: string[];
+  /** Added with agent 3.3 telemetry */
+  expectedVersion?: string; outdated?: boolean | null; clockSkewMs?: number | null; transportDelayMs?: number | null;
+  ntpSynchronized?: boolean | null; clockIssue?: boolean; failedServices?: number; pm2Issues?: number; dbIssues?: number;
+  warnings?: number; critical?: number;
 }
+
+/** Fleet-wide agent / server health (GET /api/v1/health/agents → summary) */
+export interface AgentFleetSummary {
+  expectedVersion: string;
+  total: number; connected: number; stale: number; disconnected: number; neverConnected: number;
+  outdated: number; clockIssues: number; withErrors: number;
+  failedServices: number; pm2Issues: number; dbIssues: number;
+}
+
+/** GET /api/v1/health/databases → summary */
+export interface DatabaseHealthSummary { total: number; healthy: number; warning: number; critical: number; unavailable: number; notConfigured: number }
 
 export interface AvailabilityStats {
   total: number; ok: number; availabilityPercent: number | null;
@@ -275,8 +293,9 @@ export const api = {
   createApplication: (data: Partial<Application>) => unwrap(api.post<ApiResponse<Application>>('/api/v1/applications', data)),
   updateApplication: (id: string, data: Partial<Application>) => unwrap(api.patch<ApiResponse<Application>>(`/api/v1/applications/${encodeURIComponent(id)}`, data)),
   deleteApplication: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean; removedMonitors: number }>>(`/api/v1/applications/${encodeURIComponent(id)}`)),
-  triggerFailover: (id: string, target: 'DR' | 'PRIMARY', reason?: string) =>
-    unwrap(api.post<ApiResponse<{ app: Application; changed: Array<{ from: string; to: string }> }>>(`/api/v1/applications/${encodeURIComponent(id)}/failover`, { target, reason })),
+  /** force = proceed although the pre-flight failed (the server answers 412 otherwise; the override is audited) */
+  triggerFailover: (id: string, target: 'DR' | 'PRIMARY', reason?: string, force = false) =>
+    unwrap(api.post<ApiResponse<{ app: Application; changed: Array<{ from: string; to: string }> }>>(`/api/v1/applications/${encodeURIComponent(id)}/failover`, { target, reason, ...(force ? { force: true } : {}) })),
   getDrReadiness: (id: string) => unwrap(api.get<ApiResponse<DrReadiness>>(`/api/v1/applications/${encodeURIComponent(id)}/dr-readiness`)),
   getAvailability: (id: string, range: '24h' | '7d' | '30d' | '90d' = '24h') =>
     unwrap(api.get<ApiResponse<ApplicationAvailability>>(`/api/v1/applications/${encodeURIComponent(id)}/availability?range=${range}`)),
@@ -339,6 +358,12 @@ export const api = {
   getBackupStatus: () => unwrap(api.get<ApiResponse<BackupStatus[]>>('/api/v1/backups/status')),
   getDatabaseHealth: () => unwrap(api.get<ApiResponse<DatabaseHealthRow[]>>('/api/v1/health/databases')),
   getAgentHealth: () => unwrap(api.get<ApiResponse<AgentHealthRow[]>>('/api/v1/health/agents')),
+  /** Rows plus the fleet summary (same endpoint as getAgentHealth) */
+  getAgentFleet: () => api.get<ApiResponse<AgentHealthRow[]> & { summary: AgentFleetSummary }>('/api/v1/health/agents').then(r => ({ rows: r.data, summary: r.summary })),
+  getDatabaseFleet: () => api.get<ApiResponse<DatabaseHealthRow[]> & { summary: DatabaseHealthSummary }>('/api/v1/health/databases').then(r => ({ rows: r.data, summary: r.summary })),
+  /** Agent events (connected, source-IP mismatch, token rotated) of one server, newest first */
+  getAgentEvents: (serverId: string) => api.get<PaginatedApiResponse<AuditLog>>(`/api/v1/audit?category=INFRASTRUCTURE&q=${encodeURIComponent(serverId)}&pageSize=50`)
+    .then(r => r.data.filter(l => l.action.startsWith('AGENT_')).slice(0, 10)),
 
   // ── Providers ───────────────────────────────────────────────────────────────
   getCloudflareZones: () => api.get<{ success: boolean; configured: boolean; lastSyncAt: string | null; lastError: string | null; data: CloudflareZone[] }>('/api/v1/cloudflare/zones'),
@@ -362,6 +387,7 @@ export const api = {
   },
   getSummary: () => unwrap(api.get<ApiResponse<SystemSummary>>('/api/v1/reports/summary')),
   getDailyReport: () => unwrap(api.get<ApiResponse<{ report: string; generatedAt: string }>>('/api/v1/reports/daily')),
+  getInsights: () => unwrap(api.get<ApiResponse<ReliabilityInsights>>('/api/v1/insights')),
 
   // ── Realtime (Server-Sent Events) ───────────────────────────────────────────
   connectRealtimeStream(onEvent: (event: string, data: unknown) => void, onStatus?: (connected: boolean) => void): () => void {

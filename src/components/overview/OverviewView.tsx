@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { THRESHOLDS } from '../../lib/thresholds';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
@@ -16,6 +17,8 @@ import { TelemetryAreaGraph } from '../visuals/TelemetryAreaGraph';
 import { EmptyState } from '../ui/EmptyState';
 import { IctStatusPanel } from './IctStatusPanel';
 import { routeState } from '../ui/routing';
+import { Ago } from '../ui/Freshness';
+import { deadManLabel, lastServerHeartbeat } from '../ui/deadman';
 
 // ── Formatting helpers (null-safe) ───────────────────────────────────────────
 const fmtPct = (v: number | null | undefined, digits = 2) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : `${v.toFixed(digits)}%`);
@@ -55,10 +58,12 @@ interface MetricCardProps {
   isDark: boolean;
   badge?: string;
   badgeColor?: string;
+  /** Extra label / value pairs, stacked under the value (each on its own line; values wrap, never overflow) */
+  details?: Array<[string, React.ReactNode]>;
 }
 
 const MetricCard: React.FC<MetricCardProps> = ({
-  label, value, sub, icon: Icon, status = 'ok', onClick, isDark, badge, badgeColor
+  label, value, sub, icon: Icon, status = 'ok', onClick, isDark, badge, badgeColor, details,
 }) => {
   const borderColor =
     status === 'crit'    ? (isDark ? 'border-rose-800/70 bg-[#180E13]'   : 'border-rose-300 bg-rose-50/80') :
@@ -75,25 +80,35 @@ const MetricCard: React.FC<MetricCardProps> = ({
   return (
     <button
       onClick={onClick}
-      className={`p-3 rounded-lg border text-left transition-all group cursor-pointer hover:scale-[1.02] hover:shadow-md ${borderColor}`}
+      className={`p-3 rounded-lg border text-left transition-all group cursor-pointer hover:shadow-md hover:border-blue-500/50 min-w-0 flex flex-col ${borderColor}`}
     >
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-[9px] font-mono font-semibold tracking-widest text-slate-400 uppercase">{label}</span>
-        <Icon className={`w-3.5 h-3.5 transition-colors ${
+      <div className="flex items-center justify-between gap-2 mb-2 min-w-0">
+        <span className="text-[9px] font-mono font-semibold tracking-widest text-slate-400 uppercase truncate" title={label}>{label}</span>
+        <Icon className={`w-3.5 h-3.5 shrink-0 transition-colors ${
           status === 'crit' ? 'text-rose-500' :
           status === 'warn' ? 'text-amber-500' :
           'text-slate-400 group-hover:text-blue-400'
         }`} />
       </div>
-      <div className={`text-xl font-bold font-mono tabular-nums leading-none ${valueColor}`}>{value}</div>
-      <div className="flex items-center justify-between mt-1.5 gap-1">
-        <span className="text-[10px] text-slate-500 font-mono truncate">{sub}</span>
+      <div className={`text-xl font-bold font-mono tabular-nums leading-tight break-words ${valueColor}`}>{value}</div>
+      <div className="flex items-start justify-between mt-1.5 gap-1 min-w-0">
+        <span className="text-[10px] text-slate-500 font-mono break-words min-w-0 line-clamp-2" title={sub}>{sub}</span>
         {badge && (
           <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded shrink-0 ${badgeColor ?? 'text-emerald-400 bg-emerald-950/60'}`}>
             {badge}
           </span>
         )}
       </div>
+      {details && details.length > 0 && (
+        <dl className={`mt-2 pt-2 border-t grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] font-mono ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+          {details.map(([k, v]) => (
+            <div key={k} className="min-w-0">
+              <dt className="text-slate-500 truncate" title={k}>{k}</dt>
+              <dd className={`min-w-0 break-words font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{v}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
     </button>
   );
 };
@@ -160,25 +175,30 @@ export const OverviewView: React.FC = () => {
   }, [reportingKey]);
 
   const fleetHistory = useMemo(() => {
-    const buckets = new Map<number, { cpu: number[]; ram: number[]; net: number }>();
-    Object.values(metricSeries).forEach(points => {
+    // Per minute, first average each server's samples (agents report every 5–10 s), then combine
+    // servers: CPU / RAM = mean of the server means, network = sum of the server means.
+    const buckets = new Map<number, Map<string, { cpu: number[]; ram: number[]; net: number[] }>>();
+    Object.entries(metricSeries).forEach(([serverId, points]) => {
       points.forEach(p => {
         const k = minuteKey(p.t);
         if (k === null) return;
-        const b = buckets.get(k) ?? { cpu: [], ram: [], net: 0 };
-        b.cpu.push(p.cpu);
-        b.ram.push(p.ram);
-        b.net += (p.netIn + p.netOut) / 1000; // kbps → Mbps
-        buckets.set(k, b);
+        const minute = buckets.get(k) ?? new Map();
+        const s = minute.get(serverId) ?? { cpu: [], ram: [], net: [] };
+        s.cpu.push(p.cpu);
+        s.ram.push(p.ram);
+        s.net.push((p.netIn + p.netOut) / 1000); // kbps → Mbps
+        minute.set(serverId, s);
+        buckets.set(k, minute);
       });
     });
     const keys = [...buckets.keys()].sort((a, b) => a - b);
-    const avg = (v: number[]) => +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(1);
+    const mean = (v: number[]) => (v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0);
+    const per = (k: number, f: 'cpu' | 'ram' | 'net') => [...buckets.get(k)!.values()].map(s => mean(s[f]));
     return {
       labels: keys.map(hhmm),
-      cpu: keys.map(k => avg(buckets.get(k)!.cpu)),
-      ram: keys.map(k => avg(buckets.get(k)!.ram)),
-      net: keys.map(k => +buckets.get(k)!.net.toFixed(2)),
+      cpu: keys.map(k => +mean(per(k, 'cpu')).toFixed(1)),
+      ram: keys.map(k => +mean(per(k, 'ram')).toFixed(1)),
+      net: keys.map(k => +per(k, 'net').reduce((a, b) => a + b, 0).toFixed(2)),
     };
   }, [metricSeries]);
 
@@ -218,7 +238,14 @@ export const OverviewView: React.FC = () => {
   const criticalMonitors = enabledMonitors.filter(m => m.status === 'CRITICAL').length;
   const criticalApps = applications.filter(a => a.status === 'CRITICAL').length;
   const cfConfigured = Boolean(integrations?.cloudflare.configured);
-  const deadManConfigured = deadMan.status !== 'NOT_CONFIGURED';
+  const backupApps = systemSummary.backupApps;
+  const hbServers = deadMan.servers;
+  const hbConnected = hbServers.filter(s => s.server.state === 'HEALTHY').length;
+  const hbGroup = (k: 'applications' | 'services' | 'databases') => {
+    const total = hbServers.reduce((a, s) => a + s[k].total, 0);
+    return total ? `${hbServers.reduce((a, s) => a + s[k].healthy, 0)}/${total}` : '—';
+  };
+  const hbLast = lastServerHeartbeat(deadMan);
 
   const isEmpty = !isLoading && servers.length === 0 && applications.length === 0;
 
@@ -284,7 +311,7 @@ export const OverviewView: React.FC = () => {
             </>
           )}
           <span className={isDark ? 'text-slate-700' : 'text-slate-300'}>·</span>
-          <span className={overallUptime === null ? '' : overallUptime >= 99.9 ? 'text-emerald-500 font-semibold' : 'text-amber-500 font-semibold'}>
+          <span className={overallUptime === null ? '' : overallUptime >= THRESHOLDS.uptimePercent.good ? 'text-emerald-500 font-semibold' : 'text-amber-500 font-semibold'}>
             {overallUptime === null ? 'No uptime data yet' : `${overallUptime.toFixed(2)}% avg uptime (30d, ${uptimeVals.length} app${uptimeVals.length === 1 ? '' : 's'})`}
           </span>
         </p>
@@ -501,7 +528,8 @@ export const OverviewView: React.FC = () => {
       </div>
 
       {/* ── 8-Column Metric Cards ────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+      {/* auto-fit: as many ≥ 10.5rem columns as fit, stretched to the full row — 8 across on wide screens, fewer (never cramped) on laptops */}
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(10.5rem,1fr))] items-start gap-2">
         <MetricCard
           label="Applications"
           value={`${systemSummary.healthyApps}/${systemSummary.totalApps}`}
@@ -551,10 +579,15 @@ export const OverviewView: React.FC = () => {
         />
         <MetricCard
           label="Backups"
-          value={systemSummary.backupsCurrentCount}
-          sub="Successful, last 26h"
+          value={backupApps && backupApps.total ? `${backupApps.healthy}/${backupApps.total}` : systemSummary.backupsCurrentCount}
+          sub={!backupApps ? 'Successful, last 26h'
+            : backupApps.total === 0 ? 'No applications'
+              : backupApps.failed ? `${backupApps.failed} app(s) FAILED`
+                : backupApps.stale ? `${backupApps.stale} app(s) stale`
+                  : backupApps.unknown ? `${backupApps.unknown} app(s) never reported` : 'All apps current'}
           icon={Database}
-          status={systemSummary.backupsCurrentCount === 0 ? 'unknown' : 'ok'}
+          status={!backupApps || backupApps.total === 0 ? (systemSummary.backupsCurrentCount === 0 ? 'unknown' : 'ok')
+            : backupApps.failed ? 'crit' : backupApps.stale ? 'warn' : backupApps.unknown ? 'unknown' : 'ok'}
           onClick={() => go('backups')}
           isDark={isDark}
         />
@@ -569,14 +602,19 @@ export const OverviewView: React.FC = () => {
         />
         <MetricCard
           label="Dead-Man"
-          value={!deadManConfigured ? 'Not set' : deadMan.status === 'HEALTHY' ? 'Active' : 'SILENT'}
-          sub={deadManConfigured ? deadMan.nodeLocation : 'DEADMAN_HEARTBEAT_URL unset'}
+          value={deadManLabel(deadMan.status)}
+          sub={hbServers.length ? `${hbServers.map(s => `${s.environment} VPS`).join(' + ')} · apps · services · DB` : 'Register servers in Setup'}
           icon={Activity}
-          status={!deadManConfigured ? 'unknown' : deadMan.status === 'HEALTHY' ? 'ok' : 'crit'}
+          status={deadMan.status === 'HEALTHY' ? 'ok' : deadMan.status === 'DEGRADED' ? 'warn' : deadMan.status === 'FAILING' ? 'crit' : 'unknown'}
           onClick={() => go('monitors')}
           isDark={isDark}
-          badge={deadManConfigured ? (deadMan.status === 'HEALTHY' ? `${deadMan.intervalSec}s hb` : 'ALERT') : undefined}
-          badgeColor={deadMan.status === 'HEALTHY' ? 'text-emerald-400 bg-emerald-950/60' : 'text-rose-400 bg-rose-950/60'}
+          // Monitored infrastructure heartbeats (only when servers exist — no rows of dashes)
+          details={!hbServers.length ? undefined : [
+            ['Servers', `${hbConnected}/${hbServers.length} live`],
+            ['Last report', hbLast ? <Ago iso={hbLast} staleAfterSec={deadMan.staleAfterSec} /> : '—'],
+            ['Apps', hbGroup('applications')],
+            ['Services · DB', `${hbGroup('services')} · ${hbGroup('databases')}`],
+          ]}
         />
       </div>
 
@@ -673,12 +711,12 @@ export const OverviewView: React.FC = () => {
 
         <div className="grid grid-cols-1 md:grid-cols-5">
           {answers.map(item => (
-            <div key={item.n} className={`p-3.5 border-r last:border-r-0 ${highlightBg(item.highlight)} ${isDark ? 'border-[#1A2436]' : 'border-slate-100'}`}>
+            <div key={item.n} className={`p-3.5 border-r last:border-r-0 min-w-0 ${highlightBg(item.highlight)} ${isDark ? 'border-[#1A2436]' : 'border-slate-100'}`}>
               <div className="flex items-center gap-1.5 mb-2">
                 <span className={`text-[9px] font-mono font-bold ${item.color}`}>{item.n}</span>
                 <span className={`text-[9px] uppercase tracking-wider font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{item.q}</span>
               </div>
-              <div className={`text-xs font-bold font-mono ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{item.answer}</div>
+              <div className={`text-xs font-bold font-mono break-words ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{item.answer}</div>
               <div className={`text-[11px] font-sans mt-1 leading-snug break-words ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{item.detail}</div>
             </div>
           ))}
@@ -823,7 +861,7 @@ export const OverviewView: React.FC = () => {
                       </td>
 
                       <td className="py-2.5 px-3.5 text-right tabular-nums font-semibold">
-                        <span className={app.uptime30d === null ? 'text-slate-500' : app.uptime30d < 99.9 ? 'text-amber-400' : 'text-emerald-400'}>
+                        <span className={app.uptime30d === null ? 'text-slate-500' : app.uptime30d < THRESHOLDS.uptimePercent.good ? 'text-amber-400' : 'text-emerald-400'}>
                           {fmtPct(app.uptime30d)}
                         </span>
                       </td>

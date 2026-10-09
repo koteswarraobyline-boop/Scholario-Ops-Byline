@@ -124,6 +124,8 @@ export interface DatabaseReport {
   connections: number | null;
   maxConnections: number | null;
   longRunningQueries: number | null;
+  /** connections / maxConnections % (computed by the server; null when either is unknown) */
+  connectionUsagePercent?: number | null;
   replication: {
     role: 'primary' | 'replica' | 'none' | 'unknown';
     state: 'running' | 'stopped' | 'error' | 'unknown';
@@ -133,7 +135,12 @@ export interface DatabaseReport {
   } | null;
   error: string | null;
   observedAt: string;
+  /** Last probe with available = true, and consecutive unavailable probes (computed by the server) */
+  lastSuccessAt?: string | null;
+  consecutiveFailures?: number;
 }
+/** Database probe reported by the telemetry agent */
+export type DatabaseTelemetry = DatabaseReport;
 
 export type ProviderStatus = 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE' | 'UNKNOWN';
 
@@ -203,7 +210,197 @@ export interface VpsTelemetry {
   diskUsedGb?: number | null;
   diskFreeGb?: number | null;
   uptimeSec?: number | null;
+  /** Agent >= 3.3 (null = not available on this platform / older agent; never a made-up 0) */
+  cpuIowaitPercent?: number | null;
+  cpuStealPercent?: number | null;
+  /** 1-minute load / CPU cores (computed by the server) */
+  loadPerCore?: number | null;
+  swapTotalMb?: number | null;
+  swapUsedMb?: number | null;
+  swapFreeMb?: number | null;
+  /** null when no swap is configured */
+  swapPercent?: number | null;
+  pressure?: PressureTelemetry | null;
+  /** Disk I/O summed over physical disks (utilisation = busiest disk) */
+  diskReadBytesPerSec?: number | null;
+  diskWriteBytesPerSec?: number | null;
+  diskReadOpsPerSec?: number | null;
+  diskWriteOpsPerSec?: number | null;
+  diskUtilPercent?: number | null;
 }
+/** Current host telemetry of a server (alias used by the telemetry UI) */
+export type ServerTelemetry = VpsTelemetry;
+
+/** Pressure stall information: % of time some tasks waited for the resource (avg over 60 s). null = kernel without PSI */
+export interface PressureTelemetry { cpu: number | null; memory: number | null; io: number | null }
+
+export interface FilesystemTelemetry {
+  mountPoint: string;
+  filesystem: string;
+  device: string;
+  totalGb: number | null;
+  usedGb: number | null;
+  freeGb: number | null;
+  usedPercent: number | null;
+  /** null for filesystems without a fixed inode table (btrfs, vfat) */
+  inodeTotal: number | null;
+  inodeUsed: number | null;
+  inodeFree: number | null;
+  inodePercent: number | null;
+}
+
+export interface NetworkInterfaceTelemetry {
+  name: string;
+  rxBytesPerSec: number | null;
+  txBytesPerSec: number | null;
+  rxPacketsPerSec: number | null;
+  txPacketsPerSec: number | null;
+  /** Cumulative counters since boot */
+  rxErrors: number | null;
+  txErrors: number | null;
+  rxDrops: number | null;
+  txDrops: number | null;
+  /** Errors + drops since the previous report (computed by the server; null on the first report) */
+  newErrors: number | null;
+  newDrops: number | null;
+  operationalState: string | null;
+  /** true for bridges / veth / tunnels (no physical device) */
+  virtual: boolean | null;
+}
+
+export interface DiskIOTelemetry {
+  device: string;
+  readBytesPerSec: number | null;
+  writeBytesPerSec: number | null;
+  readOpsPerSec: number | null;
+  writeOpsPerSec: number | null;
+  ioUtilizationPercent: number | null;
+  readLatencyMs: number | null;
+  writeLatencyMs: number | null;
+}
+
+export type Pm2Status = 'online' | 'stopping' | 'stopped' | 'launching' | 'errored' | 'one-launch-status' | 'waiting restart' | 'unknown';
+
+/** One PM2 application. Built from allow-listed `pm2 jlist` fields only — environments are never collected. */
+export interface PM2ProcessTelemetry {
+  id: number | null;
+  name: string;
+  status: Pm2Status;
+  pid: number | null;
+  cpuPercent: number | null;
+  memoryMb: number | null;
+  uptimeSec: number | null;
+  startedAt: string | null;
+  restartCount: number | null;
+  unstableRestarts: number | null;
+  /** Restarts within THRESHOLDS.pm2Restarts.restartWindowMinutes (computed by the server; null until known) */
+  recentRestarts: number | null;
+  nodeVersion: string | null;
+  interpreter: string | null;
+  execMode: string | null;
+  instances: number | null;
+  /** package.json version reported by PM2 */
+  version: string | null;
+  /** Release directory (deploy/release.sh layout), e.g. 20261008-101500-abc1234 */
+  release: string | null;
+  gitRevision: string | null;
+  /** System user that owns the PM2 daemon */
+  owner: string | null;
+  /** TCP ports this process listens on */
+  ports: number[];
+}
+
+/** Local application health check run by the agent against 127.0.0.1:<port><path> */
+export interface ApplicationHealthTelemetry {
+  applicationId: string;
+  name: string;
+  environment: Environment | null;
+  port: number;
+  path: string;
+  listening: boolean | null;
+  status: 'HEALTHY' | 'DOWN' | 'UNKNOWN';
+  statusCode: number | null;
+  latencyMs: number | null;
+  error: string | null;
+  checkedAt: string;
+  /** Consecutive DOWN results (computed by the server) */
+  consecutiveFailures: number;
+  /** Last HEALTHY result (kept across failures; null = never healthy since Scholario Ops started tracking) */
+  lastSuccessAt?: string | null;
+}
+
+export interface ListeningPortTelemetry {
+  address: string;
+  port: number;
+  process: string | null;
+  pids: number[];
+  /** loopback = 127.0.0.1 / ::1 only · all = every interface (0.0.0.0 / ::) · address = one specific address */
+  scope: 'loopback' | 'all' | 'address';
+}
+
+export interface NtpTelemetry {
+  /** timedatectl NTPSynchronized (null = unknown) */
+  synchronized: boolean | null;
+  ntpEnabled: boolean | null;
+  /** Active time service (chronyd, systemd-timesyncd, ntpd …) */
+  service: string | null;
+  /** Offset from NTP time as reported by the time service (ms) */
+  clockOffsetMs: number | null;
+  /** Clock frequency error (ppm, chrony only) */
+  clockDriftPpm: number | null;
+  observedAt: string;
+}
+
+export interface SystemInfoTelemetry {
+  kernelVersion: string | null;
+  architecture: string | null;
+  bootTime: string | null;
+  timezone: string | null;
+  osName: string | null;
+  osVersion: string | null;
+  nodeVersion: string | null;
+  npmVersion: string | null;
+}
+
+export interface FailedUnitsTelemetry { count: number; units: string[]; observedAt: string }
+
+/** Delivery timing of the last report (agent >= 3.3) */
+export interface AgentTimingTelemetry {
+  sentAt: string | null;
+  /** Half the round trip of the previous report (ms) */
+  transportDelayMs: number | null;
+  /** Server clock − agent clock, corrected for the transport delay (ms; + = agent clock behind) */
+  clockSkewMs: number | null;
+}
+
+export interface AgentHealthTelemetry {
+  /** ONLINE = reporting now; STALE = missed reports; OFFLINE = stopped reporting; NOT_CONNECTED = never reported */
+  state: 'ONLINE' | 'STALE' | 'OFFLINE' | 'NOT_CONNECTED';
+  version: string | null;
+  /** Current agent version (server/agent.ts AGENT_VERSION) */
+  expectedVersion: string;
+  /** null when the agent never reported a version */
+  outdated: boolean | null;
+  startedAt: string | null;
+  restartCount: number;
+  lastSeen: string | null;
+  observedAt: string | null;
+  receivedAt: string | null;
+  sentAt: string | null;
+  transportDelayMs: number | null;
+  clockSkewMs: number | null;
+  sourceIp: string | null;
+  errors: string[];
+}
+
+export type TelemetryLevel = 'HEALTHY' | 'WARNING' | 'CRITICAL' | 'UNKNOWN';
+export type HealthCategoryKey = 'agent' | 'time' | 'cpu' | 'memory' | 'swap' | 'disk' | 'diskio' | 'network' | 'systemd' | 'pm2' | 'apps' | 'database';
+
+/** One line of a server's health summary (computed by the server from the latest telemetry) */
+export interface HealthCategory { key: HealthCategoryKey; label: string; level: TelemetryLevel; detail: string }
+
+/** A condition that needs attention. `alert` = also raised as an incident (sustained / significant only). */
+export interface ServerWarning { key: string; category: HealthCategoryKey; level: 'WARNING' | 'CRITICAL'; message: string; alert: boolean }
 
 export interface VpsProcess {
   pid: number;
@@ -222,7 +419,14 @@ export interface VpsService {
   memoryMb: number;
   cpuPercent: number;
   lastRestart: string;
+  /** Agent >= 3.3: raw systemd states and restart counter (NRestarts) */
+  activeState?: string | null;
+  subState?: string | null;
+  failed?: boolean;
+  restartCount?: number | null;
+  result?: string | null;
 }
+export type SystemdServiceTelemetry = VpsService;
 
 export interface VpsLogEntry {
   id: string;
@@ -270,6 +474,27 @@ export interface VpsServer {
   processes: VpsProcess[];
   services: VpsService[];
   logs: VpsLogEntry[];
+  // ── Agent >= 3.3 (undefined = never reported by this server's agent) ──
+  filesystems?: FilesystemTelemetry[];
+  networkInterfaces?: NetworkInterfaceTelemetry[];
+  diskIo?: DiskIOTelemetry[];
+  /** null = PM2 is not running on this server */
+  pm2?: PM2ProcessTelemetry[] | null;
+  pm2ObservedAt?: string;
+  appHealth?: ApplicationHealthTelemetry[];
+  listeningPorts?: ListeningPortTelemetry[] | null;
+  ntp?: NtpTelemetry | null;
+  system?: SystemInfoTelemetry | null;
+  failedUnits?: FailedUnitsTelemetry | null;
+  agentTiming?: AgentTimingTelemetry;
+  /** Seconds between the last two accepted agent reports (the real heartbeat interval) */
+  reportIntervalSec?: number | null;
+  /** When the watched systemd services were last reported */
+  servicesObservedAt?: string;
+  // ── Computed by the server for every response (not stored) ──
+  agent?: AgentHealthTelemetry;
+  health?: HealthCategory[];
+  warnings?: ServerWarning[];
 }
 
 /** Classified result of a single synthetic check */
@@ -321,6 +546,10 @@ export interface Monitor {
   responseTimeMs: number;
   uptimePercent: number;
   history: MonitorCheckHistory[];
+  /** Pass/fail keeps alternating in the recent checks (intermittent failure below the confirmation threshold) */
+  flapping?: boolean;
+  /** Pass↔fail changes in the last 20 checks */
+  flapTransitions?: number;
   runbookId?: string;
   enabled: boolean;
   activeMaintenance: boolean;
@@ -550,17 +779,68 @@ export interface AuditLog {
   details: string;
 }
 
+/**
+ * Dead-man heartbeat of the MONITORED infrastructure (server/heartbeat.ts) — PRD / DR servers and the
+ * applications, services and databases on them. Scholario Ops is the monitoring control plane, not a
+ * target. Built only from what the agents push; no external watchdog is involved.
+ * HEALTHY = fresh and passing · DEGRADED = late / slow / first failure · FAILING = down, failed or
+ * disconnected · UNKNOWN = no (fresh) data · NOT_CONFIGURED = no server registered.
+ */
+export type HeartbeatState = 'HEALTHY' | 'DEGRADED' | 'FAILING' | 'UNKNOWN';
+export type DeadManStatus = HeartbeatState | 'NOT_CONFIGURED';
+export type HeartbeatKind = 'SERVER' | 'APPLICATION' | 'SERVICE' | 'DATABASE';
+
+/** One monitored target (a server's telemetry delivery, an application check, a service, a database probe) */
+export interface HeartbeatCheck {
+  kind: HeartbeatKind;
+  /** Stable id within the server, e.g. "server", "app:<appId>:<port>", "service:nginx", "db:mysql:moodle" */
+  key: string;
+  name: string;
+  state: HeartbeatState;
+  detail: string;
+  /** What is checked, e.g. "127.0.0.1:4100/api/health" (never a credential or token) */
+  target: string | null;
+  lastCheckAt: string | null;
+  lastSuccessAt: string | null;
+  latencyMs: number | null;
+  /** Consecutive failures / missed heartbeats (null = not tracked for this target) */
+  failures: number | null;
+  httpStatus: number | null;
+  restartCount: number | null;
+  /** How often this target is observed (seconds; from the agent's actual report rate) */
+  intervalSec: number | null;
+  /** Freshness window: older than this is not live */
+  toleranceSec: number | null;
+}
+
+export interface HeartbeatGroup { state: HeartbeatState; total: number; healthy: number; checks: HeartbeatCheck[] }
+
+export interface ServerHeartbeat {
+  serverId: string;
+  hostname: string;
+  ip: string;
+  environment: Environment;
+  /** Agent version from the last report (null = never reported) */
+  agentVersion: string | null;
+  state: HeartbeatState;
+  server: HeartbeatCheck;
+  applications: HeartbeatGroup;
+  services: HeartbeatGroup;
+  databases: HeartbeatGroup;
+}
+
 export interface DeadManControlPlane {
   id: string;
   name: string;
-  nodeLocation: string;
-  targetControlPlane: string;
-  lastHeartbeatReceivedAt: string;
-  intervalSec: number;
-  toleranceSec: number;
-  status: 'HEALTHY' | 'CRITICAL_SILENCE' | 'NOT_CONFIGURED';
-  consecutiveMisses: number;
-  lastAlertSentAt?: string;
+  status: DeadManStatus;
+  evaluatedAt: string;
+  /** Agent report interval observed across servers (seconds; null until two reports arrived) */
+  telemetryIntervalSec: number | null;
+  /** Server heartbeat freshness: CONNECTED ≤ staleAfterSec, STALE ≤ disconnectedAfterSec, then DISCONNECTED */
+  staleAfterSec: number;
+  disconnectedAfterSec: number;
+  servers: ServerHeartbeat[];
+  counts: { healthy: number; degraded: number; failing: number; unknown: number; total: number };
 }
 
 /** NOT_CONFIGURED = the check cannot run because something is not set up yet (never a pass) */
@@ -676,19 +956,6 @@ export interface TcpProbeResult {
   testedAt: string;
 }
 
-export interface SyntheticTransactionResult {
-  url: string;
-  method: string;
-  reachable: boolean;
-  statusCode: number | null;
-  latencyMs: number;
-  expectedMatch: boolean;
-  matchText?: string;
-  responseSnippet: string;
-  headers?: Record<string, string>;
-  testedAt: string;
-}
-
 export interface HttpProbeResult {
   target: string;
   reachable: boolean;
@@ -710,8 +977,37 @@ export interface IntegrationStatus {
   notifications: { status: 'CONFIGURED' | 'NOT_CONFIGURED'; enabledChannels: number };
   loadBalancing: { configured: boolean; status: LbSyncStatus; lastSyncAt: string | null; lastError: string | null; poolCount: number };
   smtp: { configured: boolean };
-  deadMan: { configured: boolean };
   publicUrl: string;
+}
+
+// ── Reliability insights (GET /api/v1/insights) ─────────────────────────────
+export type InsightForecast = import('../lib/insights').Forecast;
+export type InsightErrorBudget = import('../lib/insights').ErrorBudget;
+
+export interface ServerInsight {
+  serverId: string;
+  hostname: string;
+  environment: Environment;
+  agentState: 'ONLINE' | 'STALE' | 'OFFLINE' | 'NOT_CONNECTED';
+  /** null until there are at least 6 h of per-minute rollups */
+  disk: InsightForecast | null;
+  memory: InsightForecast | null;
+}
+
+export interface ApplicationSlo {
+  applicationId: string;
+  name: string;
+  tier: 'TIER_1' | 'TIER_2' | 'TIER_3';
+  /** Enabled PRD monitors whose checks count towards the SLO */
+  monitorCount: number;
+  budget: InsightErrorBudget;
+}
+
+export interface ReliabilityInsights {
+  generatedAt: string;
+  servers: ServerInsight[];
+  applications: ApplicationSlo[];
+  flapping: Array<{ monitorId: string; name: string; applicationId: string; environment: Environment; transitions: number }>;
 }
 
 export interface ServerMetricPoint {
@@ -722,6 +1018,15 @@ export interface ServerMetricPoint {
   load1: number;
   netIn: number;
   netOut: number;
+  /** Agent >= 3.3; null / absent = not reported (charts leave a gap, never a 0) */
+  swap?: number | null;
+  iowait?: number | null;
+  steal?: number | null;
+  /** Disk I/O, bytes per second */
+  diskRead?: number | null;
+  diskWrite?: number | null;
+  /** Busiest disk utilisation % */
+  diskUtil?: number | null;
 }
 
 export interface OpsUser {
@@ -734,104 +1039,6 @@ export interface OpsUser {
   isOnCall: boolean;
   lastLoginAt?: string | null;
   createdAt?: string;
-}
-
-// ── Real VPS Testbench Types (added from remote merge) ──────────────────────
-
-export type RealVpsProbeState =
-  | 'HEALTHY'
-  | 'UNREACHABLE'
-  | 'TIMEOUT'
-  | 'CONNECTION_REFUSED'
-  | 'HTTP_ERROR'
-  | 'INVALID_HEALTH_RESPONSE'
-  | 'UNKNOWN';
-
-export type RealVpsErrorCategory =
-  | 'TIMEOUT'
-  | 'CONNECTION_REFUSED'
-  | 'NETWORK_UNREACHABLE'
-  | 'DNS_FAILURE'
-  | 'HTTP_ERROR'
-  | 'INVALID_RESPONSE';
-
-export interface RealVpsNode {
-  id: string;
-  name: string;
-  role?: string;
-  ip: string;
-  hostname: string;
-  port: number;
-  healthUrl: string;
-  healthPath?: string;
-  provider: string;
-  region: string;
-  environment: 'PRD' | 'DR';
-  status: OperationalStatus;
-  probeState?: RealVpsProbeState;
-  lastCheckedAt: string | null;
-  latencyMs: number | null;
-  httpStatus: number | null;
-  tlsStatus: string | null;
-  responseSnippet: string;
-  errorReason?: string | null;
-  errorCategory?: RealVpsErrorCategory | null;
-  healthData?: Record<string, string | number | boolean> | null;
-  telemetry: {
-    cpuPercent: number;
-    ramPercent: number;
-    diskPercent: number;
-    loadAvg?: number[];
-    observedAt: string;
-  };
-}
-
-export interface RealVpsConfig {
-  activeMode: 'real_pair' | 'sample_cluster';
-  routing: 'MAIN' | 'DR';
-  autoFailover: boolean;
-  healthCheckIntervalSec: number;
-  main: RealVpsNode;
-  dr: RealVpsNode;
-  testApp: {
-    id: string;
-    name: string;
-    codeName: string;
-    domain: string;
-    healthPath: string;
-    failoverState: 'PRIMARY_ACTIVE' | 'DR_ACTIVE';
-    mainServerId: string;
-    drServerId: string;
-    lastFailoverAt?: string;
-  };
-}
-
-export interface RealVpsProbeResult {
-  target?: string;
-  vpsType?: 'main' | 'dr' | 'custom';
-  reachable: boolean;
-  probeState?: RealVpsProbeState;
-  statusCode: number | null;
-  latencyMs: number;
-  health?: string | null;
-  healthPath?: string;
-  healthData?: Record<string, string | number | boolean> | null;
-  tlsValid?: boolean;
-  tlsInfo?: string;
-  headers?: Record<string, string>;
-  bodySnippet?: string;
-  error?: string;
-  errorCategory?: RealVpsErrorCategory | null;
-  timestamp: string;
-}
-
-export interface RealVpsTcpProbeResult {
-  host: string;
-  port: number;
-  open: boolean;
-  latencyMs: number;
-  error?: string;
-  testedAt: string;
 }
 
 export interface SyntheticTransactionResult {

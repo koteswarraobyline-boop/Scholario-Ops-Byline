@@ -334,7 +334,8 @@ let lastFlushOk = true;
 /** Writes all changed rows to PostgreSQL. Safe to call concurrently. Resolves to false if the write failed. */
 export async function flush(): Promise<boolean> {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
-  if (flushing) { await flushing; if (!dirty) return lastFlushOk; }
+  // Wait for every flush in progress (another caller may start a new one that includes our change)
+  while (flushing) await flushing;
   if (!dirty || !ready) return lastFlushOk;
   dirty = false;
   const snaps = TABLES.map(def => ({ def, snap: snapshot(def) }));
@@ -374,18 +375,23 @@ export function queueMetric(serverId: string, p: ServerMetricPoint) { metricQueu
 export async function flushMetrics(): Promise<void> {
   if (!ready || metricQueue.length === 0) return;
   const batch = metricQueue.splice(0, metricQueue.length);
+  let written = 0;
   try {
     for (let i = 0; i < batch.length; i += 200) {
       const params: unknown[] = [];
       const tuples = batch.slice(i, i + 200).map(([id, p]) => {
-        params.push(id, p.t, p.cpu, p.ram, p.disk, p.load1, p.netIn, p.netOut);
+        params.push(id, p.t, p.cpu, p.ram, p.disk, p.load1, p.netIn, p.netOut,
+          p.swap ?? null, p.iowait ?? null, p.steal ?? null, p.diskRead ?? null, p.diskWrite ?? null, p.diskUtil ?? null);
         const n = params.length;
-        return `($${n - 7},$${n - 6},$${n - 5},$${n - 4},$${n - 3},$${n - 2},$${n - 1},$${n})`;
+        return `(${Array.from({ length: 14 }, (_, k) => `$${n - 13 + k}`).join(',')})`;
       });
-      await query(`INSERT INTO ${T('server_metrics')} (server_id,t,cpu,ram,disk,load1,net_in,net_out) VALUES ${tuples.join(',')} ON CONFLICT DO NOTHING`, params);
+      await query(`INSERT INTO ${T('server_metrics')} (server_id,t,cpu,ram,disk,load1,net_in,net_out,swap,iowait,steal,disk_read,disk_write,disk_util) VALUES ${tuples.join(',')} ON CONFLICT DO NOTHING`, params);
+      written = i + 200;
     }
   } catch (err) {
-    metricQueue.unshift(...batch);
+    // Re-queue only what was not written, bounded (1-minute rollups: 50k ≈ a day for 30 servers)
+    const rest = batch.slice(written).concat(metricQueue.splice(0, metricQueue.length));
+    metricQueue.push(...rest.slice(Math.max(0, rest.length - 50_000)));
     log.error('store', `Failed to save metrics: ${(err as Error).message}`);
   }
 }
@@ -445,7 +451,8 @@ async function importLegacyJson(): Promise<string | null> {
   metaExtra.set('legacy_json_imported', new Date().toISOString());
   dirty = true;
   ready = true;
-  await flush();
+  // Never rename the source files unless the data is really in PostgreSQL
+  if (!(await flush())) { ready = false; throw new Error('Legacy JSON import could not be saved to PostgreSQL — the JSON files were left in place; fix the error above and restart'); }
 
   let checks = 0;
   if (fs.existsSync(LEGACY_CHECKS)) {
@@ -483,10 +490,14 @@ async function loadAll() {
   Object.assign(db, fresh);
   for (const def of TABLES) lastHashes.set(def.table, new Map([...snapshot(def)].map(([k, v]) => [k, v.hash])));
   const since = new Date(Date.now() - config.metricsRetentionHours * 3600 * 1000).toISOString();
-  const m = await query(`SELECT server_id, t, cpu, ram, disk, load1, net_in, net_out FROM ${T('server_metrics')} WHERE t >= $1 ORDER BY t`, [since]);
+  const m = await query(`SELECT server_id, t, cpu, ram, disk, load1, net_in, net_out, swap, iowait, steal, disk_read, disk_write, disk_util FROM ${T('server_metrics')} WHERE t >= $1 ORDER BY t`, [since]);
   for (const k of Object.keys(minuteMetrics)) delete minuteMetrics[k];
+  const opt = (v: unknown) => (v === null || v === undefined ? null : Number(v));
   for (const r of m.rows) {
-    (minuteMetrics[r.server_id as string] ??= []).push({ t: iso(r.t), cpu: Number(r.cpu), ram: Number(r.ram), disk: Number(r.disk), load1: Number(r.load1), netIn: Number(r.net_in), netOut: Number(r.net_out) });
+    (minuteMetrics[r.server_id as string] ??= []).push({
+      t: iso(r.t), cpu: Number(r.cpu), ram: Number(r.ram), disk: Number(r.disk), load1: Number(r.load1), netIn: Number(r.net_in), netOut: Number(r.net_out),
+      swap: opt(r.swap), iowait: opt(r.iowait), steal: opt(r.steal), diskRead: opt(r.disk_read), diskWrite: opt(r.disk_write), diskUtil: opt(r.disk_util),
+    });
   }
 }
 

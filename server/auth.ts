@@ -179,11 +179,18 @@ const attempts = new Map<string, { count: number; resetAt: number }>();
 const WINDOW_MS = 15 * 60 * 1000;
 const MAX_ATTEMPTS = 10;
 
-export function loginRateLimited(key: string): boolean {
+export function loginRateLimited(key: string, max = MAX_ATTEMPTS): boolean {
   const now = Date.now();
   const entry = attempts.get(key);
   if (!entry || entry.resetAt < now) return false;
-  return entry.count >= MAX_ATTEMPTS;
+  return entry.count >= max;
+}
+
+let dummyHash: string | null = null;
+/** Hash of a random password, used to spend the same time on unknown accounts as on real ones */
+export function dummyPasswordHash(): string {
+  dummyHash ??= hashPassword(crypto.randomBytes(16).toString('hex'));
+  return dummyHash;
 }
 
 export function recordLoginFailure(key: string) {

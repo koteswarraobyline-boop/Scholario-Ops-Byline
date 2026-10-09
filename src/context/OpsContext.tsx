@@ -37,7 +37,8 @@ interface OpsContextType {
   isLoading: boolean;
   loadError: string | null;
   realtimeStatus: RealtimeStatus;
-  refreshAll: () => Promise<void>;
+  /** Resolves true when the data was reloaded */
+  refreshAll: () => Promise<boolean>;
 
   // Navigation & selection
   activeTab: string;
@@ -67,8 +68,8 @@ interface OpsContextType {
   triggerFailover: (appId: string, targetOrigin: 'DR' | 'PRIMARY', reason?: string) => Promise<boolean>;
 
   // Monitors
-  runProbeCheck: (monitorId: string) => Promise<void>;
-  runAllProbes: () => Promise<void>;
+  runProbeCheck: (monitorId: string) => Promise<boolean>;
+  runAllProbes: () => Promise<boolean>;
   addMonitor: (input: Partial<Monitor>) => Promise<Monitor | null>;
   updateMonitor: (monitorId: string, input: Partial<Monitor>) => Promise<Monitor | null>;
   deleteMonitor: (monitorId: string) => Promise<boolean>;
@@ -139,6 +140,7 @@ interface OpsContextType {
     criticalIncidents: number;
     drReadinessCount: number;
     backupsCurrentCount: number;
+    backupApps: SystemSummary['backupApps'] | null;
     cloudflareStatus: SystemSummary['cloudflareStatus'];
     overallHealth: SystemSummary['overallHealth'];
     /** When the backend computed the health / DR / Cloudflare figures (null until loaded) */
@@ -150,16 +152,37 @@ interface OpsContextType {
 const OpsContext = createContext<OpsContextType | undefined>(undefined);
 
 const EMPTY_DEADMAN: DeadManControlPlane = {
-  id: 'deadman-outbound',
-  name: 'External Dead-Man Heartbeat',
-  nodeLocation: 'Not configured',
-  targetControlPlane: '',
-  lastHeartbeatReceivedAt: '',
-  intervalSec: 60,
-  toleranceSec: 180,
+  id: 'deadman-infrastructure',
+  name: 'Dead-Man Watchdog Heartbeat Stream',
   status: 'NOT_CONFIGURED',
-  consecutiveMisses: 0,
+  evaluatedAt: '',
+  telemetryIntervalSec: null,
+  staleAfterSec: 60,
+  disconnectedAfterSec: 600,
+  servers: [],
+  counts: { healthy: 0, degraded: 0, failing: 0, unknown: 0, total: 0 },
 };
+
+/**
+ * Accepts whatever the API sends for the dead-man heartbeat and returns a complete object. An older
+ * backend (or a partial payload) must never crash the UI: missing lists become empty, an unknown
+ * status becomes UNKNOWN.
+ */
+export function normalizeDeadMan(raw: unknown): DeadManControlPlane {
+  const d = (raw && typeof raw === 'object' ? raw : {}) as Partial<DeadManControlPlane>;
+  const statuses: DeadManControlPlane['status'][] = ['HEALTHY', 'DEGRADED', 'FAILING', 'UNKNOWN', 'NOT_CONFIGURED'];
+  const servers = Array.isArray(d.servers) ? d.servers.filter(s => s && typeof s === 'object' && s.server && s.applications && s.services && s.databases) : [];
+  return {
+    ...EMPTY_DEADMAN,
+    ...d,
+    status: statuses.includes(d.status as DeadManControlPlane['status']) ? d.status as DeadManControlPlane['status'] : (servers.length ? 'UNKNOWN' : 'NOT_CONFIGURED'),
+    servers,
+    counts: d.counts && typeof d.counts === 'object' ? { ...EMPTY_DEADMAN.counts, ...d.counts } : EMPTY_DEADMAN.counts,
+    telemetryIntervalSec: typeof d.telemetryIntervalSec === 'number' ? d.telemetryIntervalSec : null,
+    staleAfterSec: typeof d.staleAfterSec === 'number' ? d.staleAfterSec : EMPTY_DEADMAN.staleAfterSec,
+    disconnectedAfterSec: typeof d.disconnectedAfterSec === 'number' ? d.disconnectedAfterSec : EMPTY_DEADMAN.disconnectedAfterSec,
+  };
+}
 
 const upsert = <T extends { id: string }>(list: T[], item: T, prepend = true): T[] =>
   list.some(x => x.id === item.id) ? list.map(x => (x.id === item.id ? item : x)) : prepend ? [item, ...list] : [...list, item];
@@ -262,19 +285,25 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setBackups(d.backups);
     setAuditLogs(d.auditLogs);
     setCloudflareZones(d.cloudflareZones);
-    setDeadMan(d.deadMan);
+    setDeadMan(normalizeDeadMan(d.deadMan));
     setIntegrations(d.integrations);
     setLoadBalancer(d.loadBalancer ?? null);
     setServerSummary(d.summary);
     lastEventAt.current = Date.now();
   }, []);
 
+  // The full-page error is only for a first load that failed; later failures keep the last data on
+  // screen (the shell shows "API unreachable — data may be stale")
+  const loadedOnce = useRef(false);
   const refreshAll = useCallback(async () => {
     try {
       applyBootstrap(await api.bootstrap());
+      loadedOnce.current = true;
       setLoadError(null);
+      return true;
     } catch (err) {
-      setLoadError(errMessage(err));
+      if (!loadedOnce.current) setLoadError(errMessage(err));
+      return false;
     } finally {
       setIsLoading(false);
     }
@@ -354,7 +383,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         case 'deployments_changed': refetch('deployments', async () => setDeployments(await api.getDeployments())); break;
         case 'backups_changed': refetch('backups', async () => setBackups(await api.getBackups())); break;
         case 'cloudflare_update': setCloudflareZones(raw as CloudflareZone[]); refetch('integrations', async () => setIntegrations(await api.integrations())); break;
-        case 'deadman_update': setDeadMan(raw as DeadManControlPlane); break;
+        case 'deadman_update': setDeadMan(normalizeDeadMan(raw)); break;
         case 'loadbalancer_update':
           setLoadBalancer(raw as LoadBalancerState);
           refetch('integrations', async () => setIntegrations(await api.integrations()));
@@ -426,7 +455,20 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // ── Failover ──────────────────────────────────────────────────────────────
   const triggerFailover = useCallback(async (appId: string, target: 'DR' | 'PRIMARY', reason?: string) => {
-    const res = await run(() => api.triggerFailover(appId, target, reason));
+    // A failed pre-flight (412) is shown to the operator, who can explicitly override it
+    const res = await run(async () => {
+      try {
+        return await api.triggerFailover(appId, target, reason);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 412 && typeof window !== 'undefined'
+          && window.confirm(`${err.message}
+
+Fail over anyway? The override is recorded in the audit log.`)) {
+          return api.triggerFailover(appId, target, reason, true);
+        }
+        throw err;
+      }
+    });
     if (!res) return false;
     setApplications(prev => upsert(prev, res.app, false));
     notify('success', res.changed.length
@@ -439,6 +481,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const runProbeCheck = useCallback(async (id: string) => {
     const m = await run(() => api.probeMonitor(id));
     if (m) setMonitors(prev => upsert(prev, m));
+    return Boolean(m);
   }, [run]);
   const runAllProbes = useCallback(async () => {
     const list = await run(() => api.probeAllMonitors());
@@ -446,6 +489,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setMonitors(list);
       notify('info', `Ran ${list.filter(m => m.enabled).length} monitor check(s)`);
     }
+    return Boolean(list);
   }, [run, notify]);
   const addMonitor = useCallback(async (input: Partial<Monitor>) => {
     const m = await run(() => api.createMonitor(input), `Monitor "${input.name}" created`);
@@ -630,12 +674,14 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           healthyApps,
           totalServers: servers.length,
           healthyServers: servers.filter(s => s.status === 'HEALTHY').length,
-          totalMonitors: monitors.length,
-          healthyMonitors: monitors.filter(m => m.status === 'HEALTHY').length,
+          // Paused monitors are not counted (they would keep the totals permanently "not all healthy")
+          totalMonitors: monitors.filter(m => m.enabled).length,
+          healthyMonitors: monitors.filter(m => m.enabled && m.status === 'HEALTHY').length,
           openIncidents: openIncidentList.length,
           criticalIncidents,
           drReadinessCount: serverSummary?.drReadinessCount ?? 0,
           backupsCurrentCount: serverSummary?.backupsCurrentCount ?? 0,
+          backupApps: serverSummary?.backupApps ?? null,
           cloudflareStatus: serverSummary?.cloudflareStatus ?? 'UNKNOWN',
           // Never "OPERATIONAL" without the backend's evaluation
           overallHealth: criticalIncidents > 0 ? 'CRITICAL' : serverSummary?.overallHealth ?? 'UNKNOWN',

@@ -5,6 +5,7 @@ import {
   Copy, RefreshCw, KeyRound, Activity, Layers, Bell, Wrench, X, AlertTriangle,
 } from 'lucide-react';
 import { useOps } from '../../context/OpsContext';
+import { deadManLabel } from '../ui/deadman';
 import { useAuth } from '../../context/AuthContext';
 import { api, AgentInstallInfo, CloudflarePoolOption } from '../../services/api';
 import { Application, VpsServer } from '../../types';
@@ -120,10 +121,17 @@ const IntegrationsPanel: React.FC = () => {
       detail: integrations.smtp.configured ? <>Email channels can deliver.</> : <>Optional. Set <code className={st.code}>SMTP_HOST</code>, <code className={st.code}>SMTP_FROM</code> (+ user/pass) for email alerts.</>,
     },
     {
-      key: 'deadman', icon: HeartPulse, title: 'Dead-man heartbeat', ok: deadMan.status === 'HEALTHY', configured: integrations.deadMan.configured,
-      detail: !integrations.deadMan.configured
-        ? <>Recommended. Set <code className={st.code}>DEADMAN_HEARTBEAT_URL</code> (e.g. healthchecks.io ping URL) so you are alerted if this Ops server itself dies.</>
-        : <>{deadMan.status} · last ping {timeAgo(deadMan.lastHeartbeatReceivedAt)}</>,
+      // Built in: derived from the agents' reports — nothing to configure, no external watchdog
+      key: 'deadman', icon: HeartPulse, title: 'Dead-man heartbeat', ok: deadMan.status === 'HEALTHY', configured: deadMan.servers.length > 0,
+      detail: (
+        <span className="block space-y-1 break-words">
+          <span className="block">
+            Status: <b>{deadManLabel(deadMan.status)}</b>
+            {deadMan.servers.length > 0 && <> · {deadMan.servers.map(s => `${s.environment} VPS ${deadManLabel(s.state).toLowerCase()}`).join(' · ')}</>}
+          </span>
+          <span className="block">Built in — no setup needed. Heartbeats of the monitored PRD / DR servers, their applications, services and databases come from the telemetry agent's reports; a heartbeat that goes stale or fails opens an incident.</span>
+        </span>
+      ),
     },
     {
       key: 'url', icon: Link2, title: 'Public URL', ok: !publicUrlMissing, configured: !publicUrlMissing,
@@ -754,20 +762,20 @@ const ApplicationsSection: React.FC = () => {
             const record = zone?.dnsRecords.find(r => r.name === a.dnsRecordName && (r.type === 'A' || r.type === 'AAAA'));
             const appMonitors = monitors.filter(m => m.applicationId === a.id);
             return (
-              <div key={a.id} className={`${st.card} space-y-2`}>
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <div className="text-sm font-bold">{a.name} <span className={`text-[10px] font-mono ${st.faint}`}>{a.codeName}</span></div>
+              <div key={a.id} className={`${st.card} space-y-2 min-w-0`}>
+                <div className="flex items-start justify-between gap-2 min-w-0">
+                  <div className="min-w-0">
+                    <div className="text-sm font-bold break-words">{a.name} <span className={`text-[10px] font-mono ${st.faint}`}>{a.codeName}</span></div>
                     <div className={`text-[11px] font-mono font-bold ${statusColor(a.status)}`}>{a.status} · {a.failoverState.replace('_', ' ')}</div>
                   </div>
                   {isAdmin && (
-                    <div className="flex gap-1.5">
+                    <div className="flex gap-1.5 shrink-0">
                       <button onClick={() => setEditing(a)} className={`${st.btn} ${st.ghost} !px-2`}><Pencil className="w-3.5 h-3.5" /></button>
                       <button onClick={() => remove(a)} className={`${st.btn} ${st.danger} !px-2`}><Trash2 className="w-3.5 h-3.5" /></button>
                     </div>
                   )}
                 </div>
-                <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono [&>*]:min-w-0 [&>*]:break-words">
                   <div><span className={st.faint}>PRD:</span> {prd ? `${prd.hostname} (${prd.ip})` : <span className="text-amber-500">not set</span>}</div>
                   <div><span className={st.faint}>DR:</span> {dr ? `${dr.hostname} (${dr.ip})` : <span className="text-amber-500">not set</span>}</div>
                   <div className="col-span-2 break-all"><span className={st.faint}>PRD URL:</span> {a.prdUrl || <span className={st.faint}>not set</span>}</div>

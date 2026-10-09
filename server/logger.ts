@@ -17,7 +17,9 @@ export function scrub(text: string): string {
   return text
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1[REDACTED]')
     .replace(/([a-z][a-z0-9+.-]*:\/\/[^:/\s]+:)[^@\s]+@/gi, '$1[REDACTED]@')
-    .replace(/([?&](?:token|ticket|key|access_token)=)[^&\s]+/gi, '$1[REDACTED]');
+    .replace(/([?&](?:token|ticket|key|access_token)=)[^&\s]+/gi, '$1[REDACTED]')
+    // Push-heartbeat tokens are path segments: /api/v1/heartbeat/<token>
+    .replace(/(\/heartbeat\/)[^/?\s"]+/gi, '$1[REDACTED]');
 }
 
 function clean(value: unknown, depth = 0): unknown {

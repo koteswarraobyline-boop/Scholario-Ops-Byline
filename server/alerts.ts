@@ -8,8 +8,10 @@
  * nothing is sent anywhere.
  *
  * evaluateAlerts() derives alerts from real state every minute:
- *   agent offline · database unavailable · replication broken · backup stale/failed ·
- *   DR not ready · SSL certificate expiring. (Application down/recovered and Cloudflare origin
+ *   server heartbeat stale → offline (one incident, escalated) · database unavailable · replication broken · backup stale/failed ·
+ *   DR not ready · SSL certificate expiring · server telemetry conditions (sustained CPU / memory /
+ *   swap, full disk / inodes, failed systemd service, PM2 app errored / restart spike, local health
+ *   check failing, clock not synchronised — see server/telemetryHealth.ts, warnings with alert: true). (Application down/recovered and Cloudflare origin
  *   unhealthy are raised by the monitor engine / Load Balancer poller.)
  */
 import crypto from 'crypto';
@@ -20,7 +22,11 @@ import { notifyIncident } from './notify.ts';
 import { nextIncidentId } from './engine.ts';
 import { agentState, backupStatus, databaseHealth } from './health.ts';
 import { readiness } from './readiness.ts';
+import { serverHealth } from './telemetryHealth.ts';
+import { config } from './config.ts';
 import { log } from './logger.ts';
+import { serverInsight, applicationSlo } from './insights.ts';
+import { formatEta } from '../src/lib/insights.ts';
 
 export interface AlertInput {
   fingerprint: string;
@@ -49,7 +55,11 @@ export function openAlert(a: AlertInput): { incident: Incident; created: boolean
   if (existing) {
     if (existing.rootCause !== a.detail) {
       existing.rootCause = a.detail;
-      existing.timeline.push(ev(a.source, 'WARN', `Still failing: ${a.detail}`));
+      // Details often carry live values (CPU %, skew ms): note them in the timeline at most every 30 min
+      const lastNote = [...existing.timeline].reverse().find(e => e.message.startsWith('Still failing'));
+      if (!lastNote || Date.now() - Date.parse(lastNote.timestamp) >= 30 * 60_000) {
+        existing.timeline.push(ev(a.source, 'WARN', `Still failing: ${a.detail}`));
+      }
       persist();
       broadcast('incident_update', existing);
     }
@@ -89,17 +99,114 @@ export function resolveAlert(fingerprint: string, source: string, recovery: stri
   return inc;
 }
 
+/** openAlert, and raise the severity of an already-open incident in place (with a FIRING notification) */
+function openOrEscalate(a: AlertInput) {
+  const { incident, created } = openAlert(a);
+  const rank: Record<IncidentSeverity, number> = { INFO: 0, WARNING: 1, HIGH: 2, CRITICAL: 3, EMERGENCY: 4 };
+  if (!created && rank[a.severity] > rank[incident.severity]) {
+    incident.severity = a.severity;
+    incident.title = a.title;
+    incident.timeline.push(ev(a.source, 'CRITICAL', `Escalated to ${a.severity}: ${a.detail}`));
+    persist();
+    broadcast('incident_update', incident);
+    notifyIncident(incident, 'FIRING');
+  }
+}
+
+/** Predictive alerts: disk-full forecast, flapping monitors, SLO error-budget burn. */
+export function evaluateInsightAlerts() {
+  // Disk predicted to reach the critical threshold. Opens at ≤ 72 h, closes only beyond 96 h (no flicker).
+  // An ETA of 0 (already over the threshold) is the telemetry disk alert's job, not a forecast.
+  for (const srv of db.servers) {
+    if (agentState(srv) !== 'ONLINE') continue;
+    const f = serverInsight(srv.id)?.disk;
+    if (!f) continue; // not enough history: never open or close on a guess
+    const fp = `capacity-disk:${srv.id}`;
+    if (f.etaHours !== null && f.etaHours > 0 && f.etaHours <= 72 && f.confidence !== 'LOW') {
+      openOrEscalate({
+        fingerprint: fp, title: `${srv.hostname} (${srv.environment}): disk predicted to reach ${f.threshold}% in ~${formatEta(f.etaHours)}`,
+        severity: f.etaHours <= 24 && srv.environment === 'PRD' ? 'HIGH' : 'WARNING',
+        detail: `Disk ${f.current}% rising ${f.slopePerDay}%/day (fit r²=${f.r2}, ${f.spanHours} h of data, ${f.confidence} confidence)`,
+        applicationId: srv.applicationId, environment: srv.environment, source: 'Capacity Forecast', affected: [srv.hostname],
+      });
+    } else if (f.etaHours === null || f.etaHours > 96) {
+      resolveAlert(fp, 'Capacity Forecast', `Disk on ${srv.hostname} no longer trending to full (${f.current}%, ${f.slopePerDay}%/day)`);
+    }
+  }
+
+  // Flapping monitors (a confirmed outage is already its own monitor incident)
+  for (const m of db.monitors) {
+    const fp = `flapping:${m.id}`;
+    if (m.enabled && m.flapping && !m.activeMaintenance && m.status !== 'CRITICAL') {
+      openAlert({
+        fingerprint: fp, title: `${m.name} (${m.environment}) is flapping`, severity: 'WARNING',
+        detail: `${m.flapTransitions ?? 0} pass/fail changes in the last 20 checks — intermittent failure below the confirmation threshold`,
+        applicationId: m.applicationId, environment: m.environment, source: 'Flap Detection', affected: [m.target],
+      });
+    } else if (!m.flapping || !m.enabled) resolveAlert(fp, 'Flap Detection', `${m.name} stable again`);
+  }
+
+  // SLO error budget burn (PRD monitors of each application)
+  for (const app of db.applications) {
+    const slo = applicationSlo(app.id);
+    if (!slo || slo.monitorCount === 0) continue;
+    const b = slo.budget;
+    const fp = `slo-burn:${app.id}`;
+    if (b.alert !== 'NONE') {
+      const fast = b.alert === 'FAST_BURN';
+      openOrEscalate({
+        fingerprint: fp, title: `${app.name}: SLO error budget ${fast ? 'burning fast' : 'burning'} (${b.targetPercent}% target)`,
+        severity: fast ? 'HIGH' : 'WARNING',
+        detail: `Burn rate 1h ${b.burnRate1h ?? '—'}× · 6h ${b.burnRate6h ?? '—'}× · 24h ${b.burnRate24h ?? '—'}× · ${b.remainingPercent ?? '—'}% of the ${b.windowDays}-day budget left`,
+        applicationId: app.id, environment: 'PRD', source: 'SLO Monitor', affected: [app.name],
+      });
+    } else if (b.burnRate1h !== null) resolveAlert(fp, 'SLO Monitor', `${app.name} error budget burn back within SLO (${b.remainingPercent}% left)`);
+  }
+}
+
 /** Derives alerts from current state. Unknown / not-configured states never open or close alerts. */
 export function evaluateAlerts() {
   try {
-    // Agent offline (only servers whose agent reported at least once)
+    // Server heartbeat (only servers whose agent reported at least once). One incident per outage:
+    // opened when the heartbeat is STALE and escalated in place when it becomes DISCONNECTED.
     for (const srv of db.servers) {
       const st = agentState(srv);
       const fp = `agent-offline:${srv.id}`;
-      if (st === 'OFFLINE') {
-        openAlert({ fingerprint: fp, title: `Telemetry agent offline on ${srv.hostname} (${srv.ip})`, severity: srv.environment === 'PRD' ? 'HIGH' : 'WARNING',
-          detail: `No agent report since ${srv.lastSeen}`, applicationId: srv.applicationId, environment: srv.environment, source: 'Agent Monitor', affected: [srv.hostname] });
+      if (st === 'STALE' || st === 'OFFLINE') {
+        const disconnected = st === 'OFFLINE';
+        const title = disconnected ? `Telemetry agent offline on ${srv.hostname} (${srv.ip})` : `Server heartbeat stale on ${srv.hostname} (${srv.ip})`;
+        const severity = disconnected && srv.environment === 'PRD' ? 'HIGH' : 'WARNING';
+        const detail = disconnected ? `No agent report since ${srv.lastSeen} (disconnected after ${config.telemetryStaleSec * 10}s)`
+          : `Agent heartbeat late: last report ${srv.lastSeen} (stale after ${config.telemetryStaleSec}s)`;
+        const { incident } = openAlert({ fingerprint: fp, title, severity, detail, applicationId: srv.applicationId, environment: srv.environment, source: 'Agent Monitor', affected: [srv.hostname] });
+        if (disconnected && (incident.title !== title || incident.severity !== severity)) {
+          incident.title = title;
+          incident.severity = severity;
+          incident.timeline.push({ id: crypto.randomUUID(), timestamp: new Date().toISOString(), source: 'Agent Monitor', level: severity === 'HIGH' ? 'CRITICAL' : 'WARN', message: `Escalated: heartbeat stale → disconnected. ${detail}` });
+          persist();
+          broadcast('incident_update', incident);
+          notifyIncident(incident, 'FIRING');
+        }
       } else if (st === 'ONLINE') resolveAlert(fp, 'Agent Monitor', `Agent on ${srv.hostname} reporting again`);
+
+      // Telemetry conditions. Only evaluated with a live agent: without data nothing opens or closes.
+      if (st === 'ONLINE') {
+        const prefix = `telemetry:${srv.id}:`;
+        const firing = serverHealth(srv).warnings.filter(w => w.alert);
+        for (const w of firing) {
+          openAlert({
+            fingerprint: prefix + w.key, title: `${srv.hostname} (${srv.environment}): ${w.message}`,
+            severity: w.level === 'CRITICAL' && srv.environment === 'PRD' ? 'HIGH' : 'WARNING',
+            detail: w.message, applicationId: srv.applicationId, environment: srv.environment, source: 'Server Telemetry', affected: [srv.hostname],
+          });
+        }
+        const keys = new Set(firing.map(w => prefix + w.key));
+        for (const inc of db.incidents) {
+          if (inc.fingerprint?.startsWith(prefix) && !keys.has(inc.fingerprint) && inc.status !== 'RESOLVED' && inc.status !== 'CLOSED') {
+            resolveAlert(inc.fingerprint, 'Server Telemetry', `Condition cleared on ${srv.hostname}`);
+          }
+        }
+      }
     }
 
     for (const app of db.applications) {
@@ -133,6 +240,8 @@ export function evaluateAlerts() {
         openAlert({ fingerprint: dfp, title: `${app.name} DR is NOT READY`, severity: 'HIGH', detail: failing.map(c => `${c.label}: ${c.detail}`).join(' · '), applicationId: app.id, environment: 'DR', source: 'DR Readiness', affected: [app.name] });
       } else if (r.overall === 'READY' || r.overall === 'PARTIALLY_READY') resolveAlert(dfp, 'DR Readiness', `DR readiness is ${r.overall}`);
     }
+
+    evaluateInsightAlerts();
 
     // SSL certificates expiring soon (expired / invalid certificates are monitor incidents already)
     for (const m of db.monitors.filter(x => x.type === 'SSL' && x.enabled)) {
