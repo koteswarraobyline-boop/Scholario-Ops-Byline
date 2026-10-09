@@ -134,7 +134,7 @@ export function serverHeartbeat(srv: ServerRecord, now = Date.now()): ServerHear
   // A server's state: its heartbeat, then the components that exist on it
   const parts = [server.state, ...[applications, services, databases].filter(g => g.total > 0).map(g => g.state)];
   return {
-    serverId: srv.id, hostname: srv.hostname, ip: srv.ip, environment: srv.environment,
+    serverId: srv.id, hostname: srv.hostname, ip: srv.ip, environment: srv.environment, agentVersion: srv.agentVersion || null,
     state: worstState(parts), server, applications, services, databases,
   };
 }
