@@ -39,6 +39,7 @@ let server: ChildProcess | null = null;
 let chrome: ChildProcess | null = null;
 let watchdog: http.Server | null = null;
 let watchdogHits = 0;
+let seed: { prdId: string; drId: string; tokens: Record<string, string> } | null = null;
 let token = '';
 let login: { tokens: { accessToken: string; refreshToken: string }; user: unknown } | null = null;
 
@@ -109,6 +110,7 @@ before(async () => {
   await pgc.connect();
   const tokens = Object.fromEntries((await pgc.query(`select id, agent_token from ${SCHEMA}.servers`)).rows.map(r => [r.id, r.agent_token]));
   await pgc.end();
+  seed = { prdId: prd.id, drId: dr.id, tokens };
   for (const srv of [prd, dr]) {
     const now = new Date().toISOString();
     await fetch(`${BASE}/api/v1/agent/ingest`, {
@@ -271,17 +273,70 @@ for (const width of WIDTHS) {
   });
 }
 
-test('dead-man heartbeat stream shows the monitored PRD / DR infrastructure from agent reports; no external watchdog', { skip: SKIP }, async () => {
+/** Sends a fresh agent report (the agents seeded in before() have gone stale by now) */
+async function report(serverId: string, extra: Record<string, unknown>) {
+  const now = new Date().toISOString();
+  const r = await fetch(`${BASE}/api/v1/agent/ingest`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${seed!.tokens[serverId]}` },
+    body: JSON.stringify({ agentVersion: '3.3.0', observedAt: now, sentAt: now, lastReportRttMs: 20, cpuPercent: 10, ramPercent: 20, diskPercent: 30, ...extra }) });
+  assert.equal(r.status, 200);
+}
+const setSelect = (label: string, value: string) => page!.eval(`(() => {
+  const s = document.querySelector('select[aria-label="${label}"]');
+  Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, ${JSON.stringify(value)});
+  s.dispatchEvent(new Event('change', { bubbles: true }));
+  return true;
+})()`);
+const bodyText = () => page!.eval<string>('document.body.innerText');
+const waitText = async (pred: (t: string) => boolean, what: string) => {
+  for (let i = 0; i < 60; i++) { if (pred(await bodyText())) return; await sleep(250); }
+  assert.fail(`timed out waiting for: ${what}
+${(await bodyText()).slice(0, 3000)}`);
+};
+
+test('heartbeat stream in the browser: ICT stopped on PRD → server stays CONNECTED, node FAILING; expand; filters; recovery; no watchdog', { skip: SKIP }, async () => {
+  const svc = [{ name: 'nginx', status: 'active', pid: 1, memoryMb: 20, since: '' }, { name: 'pm2-root', status: 'active', pid: 2, memoryMb: 30, since: '' }];
+  const ict = (status: 'HEALTHY' | 'DOWN') => [{ applicationId: 'ict', name: 'ICT Production', environment: 'PRD', port: 4100, path: '/health', listening: status === 'HEALTHY', status,
+    statusCode: status === 'HEALTHY' ? 200 : null, latencyMs: status === 'HEALTHY' ? 5 : null, error: status === 'DOWN' ? 'timed out' : null, checkedAt: new Date().toISOString() }];
+  // ICT stops: two failed checks in a row while the PRD agent keeps reporting
+  await report(seed!.prdId, { services: svc, appChecks: ict('DOWN') });
+  await report(seed!.prdId, { services: svc, appChecks: ict('DOWN') });
+  await report(seed!.drId, { services: svc });
   await visit('/monitors', 1366, 'Dead-Man Watchdog Heartbeat Stream');
-  const text = await page!.eval<string>('document.body.innerText');
-  for (const t of ['PRD VPS', 'DR VPS', 'Server heartbeat', 'Application checks', 'Services', 'Database', 'UI stream: 1 Hz refresh (animation only)']) assert.ok(text.includes(t), t);
-  assert.match(text, /HEARTBEAT FAILING|DEGRADED/, 'seeded failed service / failing app check');
+  await waitText(t => t.includes('Reason: 1 application heartbeat failing (ICT Production)'), 'collapsed PRD reason');
+  await shot('heartbeat-ict-down-collapsed');
+  let t = await bodyText();
+  for (const x of ['PRD VPS · 198.51.100.71', 'DR VPS · 198.51.100.72', 'Overall node', 'UI stream: 1 Hz refresh (animation only)', 'Heartbeat type']) assert.ok(t.includes(x), x);
+  assert.match(t, /Server\s*CONNECTED/, 'the server heartbeat itself stays connected');
+  assert.equal(t.includes('pm2-root'), false, 'collapsed by default');
+  // Expand PRD
+  await page!.eval(`[...document.querySelectorAll('button[aria-expanded]')].find(b => b.textContent.includes('PRD VPS ·')).click(), true`);
+  await waitText(x => x.includes('pm2-root'), 'expanded PRD');
+  await shot('heartbeat-ict-down-expanded');
+  t = await bodyText();
+  for (const x of ['APPLICATIONS', 'SERVICES', 'DATABASE', 'ICT Production', 'consecutive failure']) assert.ok(t.toUpperCase().includes(x.toUpperCase()), x);
+  // Filters: failing applications → only ICT on PRD
+  await setSelect('Heartbeat type', 'APPLICATION');
+  await setSelect('Status', 'FAILING');
+  await waitText(x => x.toLowerCase().includes('1 matching heartbeat'), 'filtered list');
+  t = await bodyText();
+  assert.ok(/ICT Production\s*— PRD/.test(t), 'only ICT on PRD');
+  assert.equal(t.includes('pm2-root'), false);
+  await setSelect('Server', 'DR');
+  await waitText(x => x.includes('No heartbeats match these filters'), 'DR has no failing application');
+  await setSelect('Heartbeat type', 'SERVICE'); await setSelect('Status', 'HEALTHY'); await setSelect('Server', 'PRD');
+  await waitText(x => /2 matching heartbeats/i.test(x), 'healthy PRD services');
+  await page!.eval(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('Clear filters')).click(), true`);
+  await waitText(x => x.includes('Overall node'), 'back to the server-first view');
+  // Recovery arrives over the live stream; the parent recalculates without a reload
+  await report(seed!.prdId, { services: svc, appChecks: ict('HEALTHY') });
+  await waitText(x => !x.includes('Reason: 1 application heartbeat failing'), 'PRD recovered without reload');
   await visit('/overview', 1366, 'Dead-Man');
-  const overview = await page!.eval<string>('document.body.innerText');
-  assert.ok(overview.includes("PRD VPS + DR VPS"), "dead-man card names the monitored servers");
+  assert.ok((await bodyText()).includes('PRD VPS + DR VPS'), 'dead-man card names the monitored servers');
   const html = await page!.eval<string>('document.documentElement.outerHTML');
   assert.equal(html.includes('secret-uuid'), false, 'old watchdog URL in the DOM');
+  for (const tok of Object.values(seed!.tokens)) assert.equal(html.includes(tok), false, 'agent token in the DOM');
   assert.equal(watchdogHits, 0, 'no request to the deprecated external watchdog');
 });
+
 
 if (SKIP) test(`responsive browser checks skipped: ${SKIP}`, { skip: SKIP }, () => {});

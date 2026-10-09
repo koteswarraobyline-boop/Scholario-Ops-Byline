@@ -816,6 +816,8 @@ export interface ServerHeartbeat {
   hostname: string;
   ip: string;
   environment: Environment;
+  /** Agent version from the last report (null = never reported) */
+  agentVersion: string | null;
   state: HeartbeatState;
   server: HeartbeatCheck;
   applications: HeartbeatGroup;
