@@ -3,7 +3,7 @@
  * Missing values (older agent, no swap, platform without the counter) are gaps in the line —
  * never drawn as 0. "No historical data available" when a series has no samples at all.
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { ServerMetricPoint } from '../../types';
 import { api } from '../../services/api';
@@ -125,21 +125,28 @@ export const ServerMetricsPanel: React.FC<{ serverId: string; isDark: boolean; c
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Only the response for the current server + range may update the chart (a slow 48h request must
+  // not overwrite a newer 1h one)
+  const current = useRef(`${serverId}|${range}`);
+  current.current = `${serverId}|${range}`;
   const load = useCallback(async () => {
+    const key = `${serverId}|${range}`;
     try {
       const data = await api.getServerMetrics(serverId, range);
+      if (current.current !== key) return;
       setPoints(Array.isArray(data) ? data : []);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load metrics');
+      if (current.current === key) setError(err instanceof Error ? err.message : 'Failed to load metrics');
     } finally {
-      setLoading(false);
+      if (current.current === key) setLoading(false);
     }
   }, [serverId, range]);
 
   // History is not part of the realtime stream: refresh it at the rate new points can appear
   useEffect(() => {
     setLoading(true);
+    setPoints([]);
     void load();
     const timer = setInterval(() => { void load(); }, range === '1h' ? 30_000 : 60_000);
     return () => clearInterval(timer);

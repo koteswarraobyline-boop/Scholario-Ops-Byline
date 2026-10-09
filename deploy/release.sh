@@ -37,6 +37,7 @@ HEALTH_ATTEMPTS="${HEALTH_ATTEMPTS:-12}"
 HEALTH_INTERVAL="${HEALTH_INTERVAL:-5}"
 KEEP_RELEASES="${KEEP_RELEASES:-5}"            # successful releases kept (never fewer than 3)
 KEEP_FAILED="${KEEP_FAILED:-2}"                # failed releases kept for diagnosis
+BACKUP_SCRIPT="${BACKUP_SCRIPT:-/usr/local/sbin/scholario-ops-backup-db}"  # root-installed copy of deploy/backup-db.sh
 PRE_DEPLOY_BACKUP="${PRE_DEPLOY_BACKUP:-always}"  # always | never  (pg_dump of the ops schema via deploy/backup-db.sh)
 PM2_HOME="${PM2_HOME:-/root/.pm2}"             # PM2 daemon that owns the scholario-ops process
 EXTRA_PATH="${EXTRA_PATH:-}"                   # e.g. the bin dir of an nvm-installed Node
@@ -225,7 +226,14 @@ cmd_deploy() {
   # 5. Database backup before switching
   if [ "$PRE_DEPLOY_BACKUP" = always ]; then
     say "pre-deploy database backup"
-    APP_DIR="$APP_HOME" bash "$new/deploy/backup-db.sh" || { touch "$new/$FAIL_MARK"; die "pre-deploy backup failed — live release untouched"; }
+    # Run a root-installed copy when present: code from the uploaded artifact should not run as root
+    # before its health checks. Install once:  sudo install -m 0755 -o root -g root deploy/backup-db.sh $BACKUP_SCRIPT
+    local backup_script="$BACKUP_SCRIPT"
+    if [ ! -x "$backup_script" ]; then
+      warn "$BACKUP_SCRIPT is not installed — using the copy from the new artifact (install the root-owned copy to remove this risk)"
+      backup_script="$new/deploy/backup-db.sh"
+    fi
+    APP_DIR="$APP_HOME" bash "$backup_script" || { touch "$new/$FAIL_MARK"; die "pre-deploy backup failed — live release untouched"; }
   fi
 
   # 6. Switch + restart. From here on, any failure rolls back to $prev.
@@ -294,8 +302,9 @@ cmd_rollback() {
   pm2_ready
   local live target="${1:-}"
   live="$(live_release)"
-  if [ -z "$target" ]; then  # newest successful release that is not the live one
-    target="$(find "$RELEASES_DIR" -mindepth 2 -maxdepth 2 -name "$OK_MARK" -printf '%h\n' | xargs -rn1 basename | grep -vx "$live" | sort -r | head -1 || true)"
+  if [ -z "$target" ]; then  # newest successful release OLDER than the live one (a 2nd rollback never rolls forward)
+    target="$(find "$RELEASES_DIR" -mindepth 2 -maxdepth 2 -name "$OK_MARK" -printf '%h\n' | xargs -rn1 basename | sort -r \
+      | awk -v live="$live" 'live == "" || $0 < live' | head -1 || true)"
   fi
   [[ "$target" =~ ^[0-9A-Za-z._-]+$ ]] || die "no previous successful release to roll back to"
   [ "$target" != "$live" ] || die "$target is already live"

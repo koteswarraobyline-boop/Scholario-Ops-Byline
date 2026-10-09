@@ -53,4 +53,16 @@ assert c["mysql unavailable"]["available"] is False and "Can't connect" in c["my
 assert c["mysql replication broken"]["replication"]["state"] == "error" and c["mysql replication broken"]["replication"]["lagSec"] is None
 assert c["postgresql replica"]["replication"] == {"role": "replica", "state": "running", "lagSec": 7, "lastSuccessAt": "2026-10-06T10:00:00Z", "error": None}
 assert c["not configured"] is None
+# Remote database: the replica-status call keeps -h / -P (only -N / -B are dropped for the vertical output)
+seen = []
+def mysql_remote(args, env=None, timeout=10):
+    seen.append(list(args))
+    return mysql_ok(args, env, timeout)
+remote = run(mysql_remote, {"DB_ENGINE": "mysql", "DB_NAME": "moodle", "DB_HOST": "10.0.0.5", "DB_PORT": "3307"})
+status_calls = [c for c in seen if "REPLICA STATUS" in c[-1] or "SLAVE STATUS" in c[-1]]
+assert status_calls, "replica status queried"
+for c in status_calls:
+    assert "-h" in c and "10.0.0.5" in c and "-P" in c and "3307" in c, c
+    assert "-N" not in c and "-B" not in c, c
+assert remote["replication"]["state"] == "running"
 print("ALL AGENT DB PROBE CHECKS PASSED")

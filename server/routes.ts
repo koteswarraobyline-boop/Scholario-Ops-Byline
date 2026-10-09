@@ -1,6 +1,7 @@
 import express, { Request, Response, NextFunction, Router } from 'express';
 import crypto from 'crypto';
 import net from 'net';
+import dns from 'dns';
 import {
   Application, Monitor, Incident, CommunicationChannel, EscalationPolicy, MaintenanceWindow, Runbook,
   Deployment, BackupRecord, IncidentStatus, IncidentSeverity, MonitorType, IntegrationStatus, CheckRecord,
@@ -10,14 +11,14 @@ import { db, persist, flush, liveMetrics, minuteMetrics, deleteServerMetrics, Se
 import { broadcast, audit, addSseClient } from './events.ts';
 import {
   requireAuth, requireRole, operatorName, hashPassword, verifyPassword, validatePasswordStrength, issueTokens,
-  consumeRefreshToken, revokeRefreshToken, safeUser, loginRateLimited, recordLoginFailure, clearLoginFailures, ROLES, Role, issueStreamTicket,
+  consumeRefreshToken, revokeRefreshToken, safeUser, loginRateLimited, recordLoginFailure, clearLoginFailures, dummyPasswordHash, ROLES, Role, issueStreamTicket,
 } from './auth.ts';
 import {
   ValidationError, body, reqStr, optStr, optInt, optBool, oneOf, optOneOf, optDate, strArray, isHostname, isDomain, isEmail,
 } from './validate.ts';
 import {
   HTTP_TYPES, TCP_TYPES, INFRA_TYPES, PUSH_TYPES, runMonitorNow, registerNewMonitor, recomputeDerived,
-  ingestAgentReport, publicServer, performFailover, FailoverError, nextIncidentId, AgentReport, closeMonitorIncident,
+  ingestAgentReport, publicServer, performFailover, FailoverError, nextIncidentId, isFailoverInProgress, closeIncidentsReferencing, forgetMonitor, forgetServer, AgentReport, closeMonitorIncident,
 } from './engine.ts';
 import { httpProbe, tcpProbe, dnsProbe, sslProbe, parseHostPort, normalizeUrl } from './probes.ts';
 import { sendToChannel, notifyIncident } from './notify.ts';
@@ -32,6 +33,7 @@ import { syncAppUrlMonitors, DEFAULT_HEALTH_CHECK } from './appMonitors.ts';
 import { readiness, failoverPreflight, applicationAvailability } from './readiness.ts';
 import { readChecks } from './history.ts';
 import { backupStatus, databaseHealth, agentState } from './health.ts';
+import { reliabilityInsights } from './insights.ts';
 import { notificationStatus } from './alerts.ts';
 import { log } from './logger.ts';
 
@@ -51,6 +53,21 @@ const h = (fn: Handler) => (req: Request, res: Response, next: NextFunction) => 
 
 /** Upper bound for one agent report (the global JSON limit is 1 MB) */
 const AGENT_REPORT_MAX_BYTES = 512 * 1024;
+/** True when a URL resolves to a link-local address (cloud instance metadata lives there) */
+async function isLinkLocalTarget(rawUrl: string): Promise<boolean> {
+  let host: string;
+  try { host = new URL(rawUrl).hostname.replace(/^\[|\]$/g, ''); } catch { return false; }
+  const bad = (ip: string) => /^169\.254\./.test(ip) || /^fe[89ab][0-9a-f]:/i.test(ip) || /^::ffff:169\.254\./i.test(ip);
+  if (net.isIP(host)) return bad(host);
+  if (/^metadata(\.google\.internal)?$/i.test(host)) return true;
+  try { return (await dns.promises.lookup(host, { all: true })).some(a => bad(a.address)); } catch { return false; }
+}
+
+/** Constant-time string compare that never throws (byte lengths are compared, not string lengths) */
+const safeEqual = (a: string, b: string) => {
+  const x = Buffer.from(a), y = Buffer.from(b);
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+};
 const ok = (res: Response, data: unknown, status = 200) => res.status(status).json({ success: true, data });
 const fail = (res: Response, status: number, message: string) => res.status(status).json({ success: false, message });
 const newToken = () => crypto.randomBytes(24).toString('hex');
@@ -124,6 +141,11 @@ function summary() {
     criticalIncidents: critical.length,
     drReadinessCount: drReady,
     backupsCurrentCount: backupsCurrent,
+    // Per application (an app with failing backups is never hidden by another app's fresh backup)
+    backupApps: (() => {
+      const st = db.applications.map(a => backupStatus(a).status);
+      return { total: st.length, healthy: st.filter(s => s === 'HEALTHY').length, failed: st.filter(s => s === 'FAILED').length, stale: st.filter(s => s === 'STALE').length, unknown: st.filter(s => s === 'UNKNOWN').length };
+    })(),
     cloudflareStatus,
     // Dead-man heartbeat of the monitored infrastructure; "last heartbeat" = the most recent agent report
     deadManStatus: heartbeat.status,
@@ -477,18 +499,25 @@ export function buildRouter(): Router {
     const b = body(req);
     const email = String(b.email ?? '').trim().toLowerCase();
     const password = String(b.password ?? '');
+    // Hard limits per IP and per account+IP: failures from elsewhere cannot lock the real user out.
+    // A much higher per-account ceiling (all IPs) still stops a distributed password guess.
     const ipKey = `ip:${req.ip}`;
-    const acctKey = `acct:${email}`;
-    if (loginRateLimited(ipKey) || loginRateLimited(acctKey)) return fail(res, 429, 'Too many login attempts. Try again in 15 minutes.');
+    const acctKey = `acct:${email}|${req.ip}`;
+    const acctAllKey = `acct-all:${email}`;
+    if (loginRateLimited(ipKey) || loginRateLimited(acctKey) || loginRateLimited(acctAllKey, 50)) return fail(res, 429, 'Too many login attempts. Try again in 15 minutes.');
     if (!email || !password) return fail(res, 400, 'Email and password are required');
     const user = db.users.find(u => u.email === email);
-    if (!user || !user.isActive || !verifyPassword(password, user.passwordHash)) {
+    // Unknown accounts take as long as known ones (no account enumeration by timing)
+    const passwordOk = user ? verifyPassword(password, user.passwordHash) : (verifyPassword(password, dummyPasswordHash()), false);
+    if (!user || !user.isActive || !passwordOk) {
       recordLoginFailure(ipKey);
       recordLoginFailure(acctKey);
+      recordLoginFailure(acctAllKey);
       if (user) audit(email, 'LOGIN_FAILED', 'AUTH', user.id, `Failed login from ${req.ip}`);
       return fail(res, 401, 'Invalid email or password');
     }
     clearLoginFailures(acctKey);
+    clearLoginFailures(acctAllKey);
     user.lastLoginAt = nowIso();
     const tokens = issueTokens(user);
     audit(user.displayName || user.email, 'LOGIN', 'AUTH', user.id, `Signed in from ${req.ip}`);
@@ -513,7 +542,7 @@ export function buildRouter(): Router {
     const header = req.headers.authorization;
     const token = header?.startsWith('Bearer ') ? header.slice(7).trim() : '';
     if (!token) return undefined;
-    return db.servers.find(s => s.agentToken.length === token.length && crypto.timingSafeEqual(Buffer.from(s.agentToken), Buffer.from(token)));
+    return db.servers.find(s => safeEqual(s.agentToken, token));
   };
 
   r.post('/v1/agent/ingest', h((req, res) => {
@@ -551,7 +580,7 @@ export function buildRouter(): Router {
   r.get('/v1/agent/install/:serverId', h((req, res) => {
     const srv = db.servers.find(s => s.id === req.params.serverId);
     const key = String(req.query.key ?? '');
-    if (!srv || key.length !== srv.agentToken.length || !crypto.timingSafeEqual(Buffer.from(key), Buffer.from(srv.agentToken))) {
+    if (!srv || !safeEqual(key, srv.agentToken)) {
       return res.status(404).type('text/plain').send('echo "Unknown server or invalid key" >&2; exit 1\n');
     }
     const services = String(req.query.services ?? 'nginx apache2 mysql mariadb postgresql redis-server docker php8.3-fpm php8.2-fpm php8.1-fpm pm2-root');
@@ -581,7 +610,7 @@ export function buildRouter(): Router {
   r.post('/v1/deployments/report', h((req, res) => {
     const header = req.headers.authorization ?? '';
     const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-    if (!config.deployReportToken || token.length !== config.deployReportToken.length || !crypto.timingSafeEqual(Buffer.from(token), Buffer.from(config.deployReportToken))) {
+    if (!config.deployReportToken || !safeEqual(token, config.deployReportToken)) {
       return fail(res, 401, 'Invalid deploy report token');
     }
     const b = body(req);
@@ -657,7 +686,7 @@ export function buildRouter(): Router {
     const send = res.json.bind(res);
     res.json = ((payload: unknown) => {
       void flush().then(saved => {
-        if (!saved && res.statusCode < 400) { res.status(503); send({ success: false, message: 'The change could not be saved to the database — check the PostgreSQL connection and try again' }); return; }
+        if (!saved && res.statusCode < 400) { res.status(503); send({ success: false, message: 'The change was applied but is not in the database yet (PostgreSQL unreachable) — it is saved automatically when the database is back. Do not repeat it.' }); return; }
         send(payload);
       });
       return res;
@@ -670,7 +699,11 @@ export function buildRouter(): Router {
   r.post('/auth/change-password', h((req, res) => {
     const b = body(req);
     const user = req.user!;
-    if (!verifyPassword(String(b.currentPassword ?? ''), user.passwordHash)) return fail(res, 400, 'Current password is incorrect');
+    // A stolen access token must not allow guessing the current password without limit
+    const pwKey = `pwchange:${user.id}`;
+    if (loginRateLimited(pwKey)) return fail(res, 429, 'Too many attempts. Try again in 15 minutes.');
+    if (!verifyPassword(String(b.currentPassword ?? ''), user.passwordHash)) { recordLoginFailure(pwKey); return fail(res, 400, 'Current password is incorrect'); }
+    clearLoginFailures(pwKey);
     const err = validatePasswordStrength(String(b.newPassword ?? ''));
     if (err) return fail(res, 400, err);
     user.passwordHash = hashPassword(String(b.newPassword));
@@ -720,6 +753,8 @@ export function buildRouter(): Router {
   r.get('/v1/health/heartbeats', (_req, res) => { ok(res, infraHeartbeat()); });
 
   // ── Servers ────────────────────────────────────────────────────────────────
+  // Capacity forecasts, SLO error budgets and flapping monitors (computed from stored data only)
+  r.get('/v1/insights', (_req, res) => { ok(res, reliabilityInsights()); });
   r.get('/v1/servers', (_req, res) => { ok(res, db.servers.map(publicServer)); });
   r.get('/v1/servers/:id', (req, res) => {
     const s = db.servers.find(x => x.id === req.params.id);
@@ -764,9 +799,11 @@ export function buildRouter(): Router {
     if (usedBy.length) return fail(res, 409, `Server is used by ${usedBy.map(a => a.name).join(', ')} — unlink it first`);
     const removedMonitors = db.monitors.filter(m => m.serverId === srv.id);
     db.monitors = db.monitors.filter(m => m.serverId !== srv.id);
-    for (const m of removedMonitors) delete db.monitorBuckets[m.id];
+    for (const m of removedMonitors) { delete db.monitorBuckets[m.id]; forgetMonitor(m.id); }
     db.servers = db.servers.filter(x => x.id !== srv.id);
     void deleteServerMetrics(srv.id);
+    forgetServer(srv.id);
+    closeIncidentsReferencing([srv.id, ...removedMonitors.map(m => m.id)], operatorName(req), `server ${srv.hostname} was removed`);
     persist();
     audit(operatorName(req), 'SERVER_REMOVED', 'INFRASTRUCTURE', srv.id, `${srv.hostname} (${srv.ip}) removed with ${removedMonitors.length} monitor(s)`);
     broadcast('servers_changed', null);
@@ -854,6 +891,7 @@ export function buildRouter(): Router {
     ok(res, app, 201);
   }));
   r.patch('/v1/applications/:id', requireRole('it_administrator'), h((req, res) => {
+    if (isFailoverInProgress(req.params.id)) return fail(res, 409, 'A failover for this application is in progress — try again in a moment');
     const idx = db.applications.findIndex(x => x.id === req.params.id);
     if (idx === -1) return fail(res, 404, 'Application not found');
     const before = db.applications[idx];
@@ -878,8 +916,9 @@ export function buildRouter(): Router {
     if (!app) return fail(res, 404, 'Application not found');
     const removed = db.monitors.filter(m => m.applicationId === app.id);
     db.monitors = db.monitors.filter(m => m.applicationId !== app.id);
-    for (const m of removed) delete db.monitorBuckets[m.id];
+    for (const m of removed) { delete db.monitorBuckets[m.id]; forgetMonitor(m.id); }
     db.applications = db.applications.filter(a => a.id !== app.id);
+    closeIncidentsReferencing([app.id, ...removed.map(m => m.id)], operatorName(req), `application ${app.name} was deleted`);
     for (const s of db.servers) if (s.applicationId === app.id) s.applicationId = '';
     persist();
     audit(operatorName(req), 'APPLICATION_DELETED', 'APPLICATION', app.id, `${app.name} deleted with ${removed.length} monitor(s)`);
@@ -893,6 +932,14 @@ export function buildRouter(): Router {
     const b = body(req);
     const target = oneOf(b, 'target', 'Target', ['DR', 'PRIMARY'] as const);
     const reason = optStr(b, 'reason', 'Reason', 500) || 'Manual failover';
+    // Pre-flight before moving traffic: refuse when a check FAILs unless the operator explicitly overrides
+    if (!app.loadBalancer) {
+      const failing = failoverPreflight(app, target).checks.filter(c => c.status === 'FAIL');
+      if (failing.length && b.force !== true) {
+        return fail(res, 412, `Pre-flight failed: ${failing.map(c => `${c.label} — ${c.detail}`).join('; ')}`);
+      }
+      if (failing.length) audit(operatorName(req), 'FAILOVER_PREFLIGHT_OVERRIDDEN', 'FAILOVER', app.id, `${app.name} → ${target} despite: ${failing.map(c => c.label).join(', ')}`);
+    }
     try {
       const result = await performFailover(app, target, operatorName(req), reason);
       ok(res, result);
@@ -939,7 +986,7 @@ export function buildRouter(): Router {
     const m = db.monitors.find(x => x.id === req.params.id);
     if (!m) return fail(res, 404, 'Monitor not found');
     m.enabled = !m.enabled;
-    if (!m.enabled) { closeMonitorIncident(m, operatorName(req), 'monitor paused'); m.status = 'UNKNOWN'; }
+    if (!m.enabled) { closeMonitorIncident(m, operatorName(req), 'monitor paused'); m.status = 'UNKNOWN'; m.consecutiveFailures = 0; m.consecutiveRecoveries = 0; }
     persist();
     audit(operatorName(req), m.enabled ? 'MONITOR_RESUMED' : 'MONITOR_PAUSED', 'MONITOR', m.id, m.name);
     broadcast('monitor_update', m);
@@ -951,8 +998,10 @@ export function buildRouter(): Router {
     const m = db.monitors.find(x => x.id === req.params.id);
     if (!m) return fail(res, 404, 'Monitor not found');
     closeMonitorIncident(m, operatorName(req), 'monitor deleted');
+    closeIncidentsReferencing([m.id], operatorName(req), `monitor ${m.name} was deleted`); // flapping alert
     db.monitors = db.monitors.filter(x => x.id !== m.id);
     delete db.monitorBuckets[m.id];
+    forgetMonitor(m.id);
     persist();
     audit(operatorName(req), 'MONITOR_DELETED', 'MONITOR', m.id, `${m.name} (${m.target})`);
     broadcast('monitor_deleted', { id: m.id });
@@ -1009,6 +1058,7 @@ export function buildRouter(): Router {
     const url = reqStr(b, 'url', 'URL', 2000);
     const method = oneOf(b, 'method', 'Method', ['GET', 'HEAD', 'POST', 'PUT'] as const, 'GET');
     const timeoutSec = optInt(b, 'timeoutSec', 'Timeout', 1, 60) ?? 10;
+    if (await isLinkLocalTarget(url)) return fail(res, 400, 'Link-local / cloud metadata addresses (169.254.0.0/16, fe80::/10) cannot be probed');
     const result = await httpProbe(url, { timeoutMs: timeoutSec * 1000, method, body: optStr(b, 'body', 'Body', 100_000) });
     const { body: respBody, ...rest } = result;
     const expectedStatus = optInt(b, 'expectedStatus', 'Expected status', 100, 599);
@@ -1219,12 +1269,14 @@ export function buildRouter(): Router {
     });
     audit(operatorName(req), result.ok ? 'CHANNEL_TEST_DELIVERED' : 'CHANNEL_TEST_FAILED', 'NOTIFICATION', ch.id, result.ok ? ch.name : `${ch.name}: ${result.error}`);
     if (!result.ok) return fail(res, 502, `Delivery failed: ${result.error}`);
-    ok(res, ch);
+    ok(res, isAdmin(req) ? ch : { ...ch, targetEndpoint: ch.targetEndpoint ? '••••••' : '' });
   }));
   r.get('/v1/escalation-policies', (_req, res) => { ok(res, db.escalationPolicies); });
   r.put('/v1/escalation-policies', requireRole('it_administrator'), h((req, res) => {
     const list = (req.body as { policies?: unknown }).policies;
     if (!Array.isArray(list)) return fail(res, 400, 'policies must be a list');
+    const ids = list.map(raw => (raw && typeof raw === 'object' ? (raw as Record<string, unknown>).id : undefined)).filter(Boolean);
+    if (new Set(ids).size !== ids.length) return fail(res, 400, 'Each escalation policy must have a unique id');
     const policies: EscalationPolicy[] = list.map(raw => {
       const b = (raw ?? {}) as Record<string, unknown>;
       const severity = oneOf(b, 'severity', 'Severity', SEVERITIES);
@@ -1520,8 +1572,9 @@ export function buildRouter(): Router {
     const b = body(req);
     const me = req.user!;
     const roleName = optOneOf(b, 'roleName', 'Role', ROLES);
-    if ((roleName === 'super_admin' || user.roleName === 'super_admin') && me.roleName !== 'super_admin' && roleName !== undefined && roleName !== user.roleName) {
-      return fail(res, 403, 'Only a super admin can change super admin roles');
+    // Only a super admin may change a super admin account at all (password, status, name, role) or grant the role
+    if ((user.roleName === 'super_admin' || roleName === 'super_admin') && me.roleName !== 'super_admin') {
+      return fail(res, 403, 'Only a super admin can change a super admin account or grant the super admin role');
     }
     const isActive = optBool(b, 'isActive');
     if (user.id === me.id && (isActive === false || (roleName && roleName !== user.roleName))) return fail(res, 400, 'You cannot deactivate or change the role of your own account');

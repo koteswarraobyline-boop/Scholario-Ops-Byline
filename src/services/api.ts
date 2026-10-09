@@ -3,6 +3,7 @@ import {
   CommunicationChannel, EscalationPolicy, MaintenanceWindow, Runbook, Deployment, BackupRecord,
   IntegrationStatus, HttpProbeResult, TcpProbeResult, ServerMetricPoint, DrReadinessItem, OpsUser,
   LoadBalancerState, FailoverPreflight, DrOverall, CheckRecord, BackupStatus, DatabaseHealth, DatabaseReport, HostingerInfo,
+  ReliabilityInsights,
 } from '../types';
 
 export interface HealthCheckResponse {
@@ -53,6 +54,8 @@ export interface SystemSummary {
   totalMonitors: number; healthyMonitors: number;
   openIncidents: number; criticalIncidents: number;
   drReadinessCount: number; backupsCurrentCount: number;
+  /** Backup status per application (absent from older servers) */
+  backupApps?: { total: number; healthy: number; failed: number; stale: number; unknown: number };
   cloudflareStatus: 'HEALTHY' | 'DEGRADED' | 'NOT_CONFIGURED' | 'UNKNOWN';
   deadManStatus: string; deadManLastHeartbeat: string | null;
   overallHealth: 'OPERATIONAL' | 'WARNING' | 'CRITICAL' | 'UNKNOWN';
@@ -290,8 +293,9 @@ export const api = {
   createApplication: (data: Partial<Application>) => unwrap(api.post<ApiResponse<Application>>('/api/v1/applications', data)),
   updateApplication: (id: string, data: Partial<Application>) => unwrap(api.patch<ApiResponse<Application>>(`/api/v1/applications/${encodeURIComponent(id)}`, data)),
   deleteApplication: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean; removedMonitors: number }>>(`/api/v1/applications/${encodeURIComponent(id)}`)),
-  triggerFailover: (id: string, target: 'DR' | 'PRIMARY', reason?: string) =>
-    unwrap(api.post<ApiResponse<{ app: Application; changed: Array<{ from: string; to: string }> }>>(`/api/v1/applications/${encodeURIComponent(id)}/failover`, { target, reason })),
+  /** force = proceed although the pre-flight failed (the server answers 412 otherwise; the override is audited) */
+  triggerFailover: (id: string, target: 'DR' | 'PRIMARY', reason?: string, force = false) =>
+    unwrap(api.post<ApiResponse<{ app: Application; changed: Array<{ from: string; to: string }> }>>(`/api/v1/applications/${encodeURIComponent(id)}/failover`, { target, reason, ...(force ? { force: true } : {}) })),
   getDrReadiness: (id: string) => unwrap(api.get<ApiResponse<DrReadiness>>(`/api/v1/applications/${encodeURIComponent(id)}/dr-readiness`)),
   getAvailability: (id: string, range: '24h' | '7d' | '30d' | '90d' = '24h') =>
     unwrap(api.get<ApiResponse<ApplicationAvailability>>(`/api/v1/applications/${encodeURIComponent(id)}/availability?range=${range}`)),
@@ -383,6 +387,7 @@ export const api = {
   },
   getSummary: () => unwrap(api.get<ApiResponse<SystemSummary>>('/api/v1/reports/summary')),
   getDailyReport: () => unwrap(api.get<ApiResponse<{ report: string; generatedAt: string }>>('/api/v1/reports/daily')),
+  getInsights: () => unwrap(api.get<ApiResponse<ReliabilityInsights>>('/api/v1/insights')),
 
   // ── Realtime (Server-Sent Events) ───────────────────────────────────────────
   connectRealtimeStream(onEvent: (event: string, data: unknown) => void, onStatus?: (connected: boolean) => void): () => void {

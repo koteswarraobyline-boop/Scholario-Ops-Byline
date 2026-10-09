@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { IncidentMinutes } from '../ui/IncidentMinutes';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
 import { deadManDot, deadManLabel } from '../ui/deadman';
@@ -31,7 +32,9 @@ import {
   Sun,
   Moon,
   LogOut,
-  Settings
+  Settings,
+  Users,
+  Gauge
 } from 'lucide-react';
 import { CommandPalette } from './CommandPalette';
 import { CreateMonitorModal } from '../monitors/CreateMonitorModal';
@@ -64,7 +67,6 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     incidents,
     setSelectedIncidentId,
     deadMan,
-    runAllProbes,
     apiHealth,
     triggerHealthCheck,
     theme,
@@ -91,14 +93,14 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  const activeCriticalIncident = incidents.find(i => (i.severity === 'CRITICAL' || i.severity === 'EMERGENCY') && (i.status === 'OPEN' || i.status === 'INVESTIGATING' || i.status === 'MITIGATING' || i.status === 'ACKNOWLEDGED'));
+  const activeCriticalIncident = incidents.find(i => (i.severity === 'CRITICAL' || i.severity === 'EMERGENCY') && i.status !== 'RESOLVED' && i.status !== 'CLOSED');
 
   const handleManualRefresh = async () => {
     if (isRefreshing) return;
     setIsRefreshing(true);
     try {
-      await Promise.all([runAllProbes(), triggerHealthCheck()]);
-      await refreshAll();
+      // Reload data and API health only — running every probe is "Probe all" (operators) on the monitoring pages
+      await Promise.all([refreshAll(), triggerHealthCheck()]);
     } finally {
       setIsRefreshing(false);
     }
@@ -138,7 +140,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       title: 'Resilience',
       items: [
         { id: 'resilience', label: 'PRD / DR Readiness', icon: Cloud, badge: `${systemSummary.drReadinessCount}/${systemSummary.totalApps}` },
-        { id: 'backups', label: 'Backups', icon: Database, badge: systemSummary.backupsCurrentCount > 0 ? `${systemSummary.backupsCurrentCount}` : undefined }
+        { id: 'backups', label: 'Backups', icon: Database, badge: systemSummary.backupApps?.total ? `${systemSummary.backupApps.healthy}/${systemSummary.backupApps.total}` : systemSummary.backupsCurrentCount > 0 ? `${systemSummary.backupsCurrentCount}` : undefined }
       ]
     },
     {
@@ -165,6 +167,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     {
       title: 'Analytics & Compliance',
       items: [
+        { id: 'reliability', label: 'Reliability & SLOs', icon: Gauge },
         { id: 'reports', label: 'Reports', icon: FileText },
         { id: 'audit', label: 'Audit Logs', icon: Shield }
       ]
@@ -172,7 +175,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     {
       title: 'Admin',
       items: [
-        { id: 'users', label: 'Users & Account', icon: Activity }
+        { id: 'users', label: 'Users & Account', icon: Users }
       ]
     }
   ];
@@ -473,23 +476,23 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
         {/* ACTIVE CRITICAL INCIDENT BANNER - Crisp Industrial Severity Strip */}
         {activeCriticalIncident && (
-          <div className={`px-5 py-2 flex items-center justify-between text-xs shrink-0 font-mono animate-in fade-in border-b ${
+          <div className={`px-5 py-2 flex items-center justify-between gap-3 text-xs shrink-0 font-mono animate-in fade-in border-b ${
             isDark 
               ? 'bg-[#170B0E] border-rose-900/60 text-slate-200' 
               : 'bg-rose-50 border-rose-200 text-rose-950'
           }`}>
-            <div className="flex items-center gap-3">
-              <span className={`flex items-center gap-1.5 font-bold text-[11px] ${
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <span className={`flex items-center gap-1.5 font-bold text-[11px] whitespace-nowrap shrink-0 ${
                 isDark ? 'text-rose-400' : 'text-rose-700'
               }`}>
                 <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
                 CRITICAL [{activeCriticalIncident.id}]
               </span>
-              <span className={`text-[11px] font-sans ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+              <span title={activeCriticalIncident.title} className={`text-[11px] font-sans min-w-0 truncate ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
                 {activeCriticalIncident.title}
               </span>
-              <span className={`text-[10px] hidden md:inline ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
-                Opened {activeCriticalIncident.durationMinutes}m ago · Owner: {(activeCriticalIncident.owner ?? 'Unassigned').split('(')[0]}
+              <span className={`text-[10px] hidden md:inline whitespace-nowrap shrink-0 ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
+                Opened <IncidentMinutes incident={activeCriticalIncident} />m ago · Owner: {(activeCriticalIncident.owner ?? 'Unassigned').split('(')[0]}
               </span>
             </div>
             <button
@@ -497,7 +500,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                 setSelectedIncidentId(activeCriticalIncident.id);
                 navigate('/incidents');
               }}
-              className={`flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-mono transition-colors border cursor-pointer ${
+              className={`flex items-center gap-1 shrink-0 px-2.5 py-0.5 rounded text-[11px] font-mono transition-colors border cursor-pointer ${
                 isDark 
                   ? 'bg-rose-950 hover:bg-rose-900 border-rose-800 text-rose-200' 
                   : 'bg-rose-600 hover:bg-rose-700 border-rose-700 text-white shadow-xs'

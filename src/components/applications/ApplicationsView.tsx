@@ -668,7 +668,7 @@ export const ApplicationsView: React.FC = () => {
       )}
 
       {/* Header */}
-      <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b ${
+      <div className={`flex flex-wrap items-center justify-between gap-3 pb-3 border-b ${
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
       }`}>
         <div>
@@ -688,7 +688,7 @@ export const ApplicationsView: React.FC = () => {
             <button
               key={f}
               onClick={() => setFilter(f)}
-              className={`px-2.5 py-1 transition-colors rounded cursor-pointer ${
+              className={`px-2.5 py-1 whitespace-nowrap transition-colors rounded cursor-pointer ${
                 filter === f
                   ? 'bg-blue-600 text-white font-medium shadow-xs'
                   : isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-600 hover:text-slate-900'
@@ -714,7 +714,7 @@ export const ApplicationsView: React.FC = () => {
       ) : filteredApps.length === 0 ? (
         <EmptyState title="No applications match this filter" />
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] gap-3">
           {filteredApps.map(app => {
             const prdServer = servers.find(s => s.id === app.prdServerId);
             const appMonitorCount = monitors.filter(m => m.applicationId === app.id).length;
@@ -734,12 +734,12 @@ export const ApplicationsView: React.FC = () => {
                 }`}
               >
                 <div>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDot(app.status)}`} />
-                      <h3 className="font-bold text-sm truncate">{app.name}</h3>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-start gap-2 min-w-0">
+                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${statusDot(app.status)}`} />
+                      <h3 title={app.name} className="font-bold text-sm line-clamp-2 break-words min-w-0">{app.name}</h3>
                     </div>
-                    <span className={`font-mono text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                    <span className={`font-mono text-[10px] whitespace-nowrap shrink-0 mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                       {app.tier.replace('_', ' ')}
                     </span>
                   </div>
@@ -778,11 +778,11 @@ export const ApplicationsView: React.FC = () => {
                 </div>
 
                 {/* Footer */}
-                <div className={`pt-2 border-t flex items-center justify-between text-[11px] font-mono ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
-                  <span className={`truncate max-w-[140px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                <div className={`pt-2 border-t flex items-center justify-between gap-2 text-[11px] font-mono ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
+                  <span title={prdServer?.hostname} className={`truncate min-w-0 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                     {prdServer ? prdServer.hostname.split('.')[0] : 'No PRD server'}
                   </span>
-                  <span className="text-blue-500 font-semibold flex items-center gap-1">
+                  <span className="text-blue-500 font-semibold flex items-center gap-1 shrink-0">
                     <span>Inspect</span>
                     <ArrowRight className="w-3 h-3" />
                   </span>

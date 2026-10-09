@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
@@ -41,26 +41,31 @@ export const DrDashboardView: React.FC = () => {
   const selectedApp = applications.find(a => a.id === selectedAppId) || applications[0];
   const appId = selectedApp?.id;
 
+  // A slow response for the previously selected application must not overwrite the current one
+  const currentApp = useRef(appId);
+  currentApp.current = appId;
   const loadReadiness = useCallback(async () => {
     if (!appId) return;
     setReadinessLoading(true);
     try {
       const r = await api.getDrReadiness(appId);
+      if (currentApp.current !== appId) return;
       setChecks(r.checks ?? []);
       setOverall(r.overall ?? null);
       setScore(typeof r.passed === 'number' ? { passed: r.passed, total: r.total } : null);
       setReadinessError(null);
       setReadinessAt(r.evaluatedAt ?? '');
     } catch (err) {
-      setReadinessError(err instanceof Error ? err.message : 'Failed to load DR readiness');
+      if (currentApp.current === appId) setReadinessError(err instanceof Error ? err.message : 'Failed to load DR readiness');
     } finally {
-      setReadinessLoading(false);
+      if (currentApp.current === appId) setReadinessLoading(false);
     }
   }, [appId]);
 
   useEffect(() => {
     setChecks([]);
     setOverall(null);
+    setScore(null);
     setReadinessError(null);
     if (!appId) return;
     void loadReadiness();
@@ -271,7 +276,7 @@ export const DrDashboardView: React.FC = () => {
         {/* Failover Controls */}
         <div className={`pt-3 border-t space-y-2 text-xs ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
           {lbMapped ? (
-            <LbFailoverConsole app={selectedApp} />
+            <LbFailoverConsole key={selectedApp.id} app={selectedApp} />
           ) : !canFailover ? (
             <div className={`font-sans ${muted}`}>Only super administrators can switch traffic between PRD and DR.</div>
           ) : blockers.length > 0 ? (

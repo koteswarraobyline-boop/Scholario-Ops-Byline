@@ -70,6 +70,8 @@ function recentRestarts(key: string, count: number | null, now: number): number 
   log.push({ t: now, count });
   log = log.filter(e => now - e.t <= windowMs);
   pm2RestartLog.set(key, log);
+  // Bounded: apps that disappeared (renamed / deleted / server removed) are forgotten after the window
+  if (pm2RestartLog.size > 2000) for (const [k, v] of pm2RestartLog) if (!v.length || now - v[v.length - 1].t > windowMs) pm2RestartLog.delete(k);
   return count - log[0].count;
 }
 

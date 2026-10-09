@@ -81,7 +81,7 @@ export const DependencyMapView: React.FC = () => {
           <span className={`w-2 h-2 rounded-full shrink-0 ${statusDot(srv.status)}`} />
           <span className={`text-[9px] uppercase ${env === 'PRD' ? 'text-blue-500' : muted}`}>{env} server</span>
         </div>
-        <div className={`font-bold text-xs mt-1 truncate ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{srv.hostname}</div>
+        <div title={srv.hostname} className={`font-bold text-xs mt-1 truncate ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{srv.hostname}</div>
         <div className={`text-[10px] truncate ${muted}`}>{srv.ip || 'No IP'} · agent {srv.agentStatus}</div>
         <div className={`text-[10px] font-semibold ${statusText(srv.status)}`}>{srv.status}</div>
       </button>
@@ -99,7 +99,7 @@ export const DependencyMapView: React.FC = () => {
         {list.map(m => (
           <button key={m.id} onClick={() => setSelected({ kind: 'monitor', id: m.id })} className={`${nodeClass(isSel('monitor', m.id), m.status)} !p-1.5 flex items-center gap-2`}>
             <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDot(m.status)}`} />
-            <span className={`truncate flex-1 text-[11px] ${isDark ? 'text-slate-200' : 'text-slate-800'} ${!m.enabled ? 'opacity-50' : ''}`}>{m.name}</span>
+            <span title={m.name} className={`truncate flex-1 text-[11px] ${isDark ? 'text-slate-200' : 'text-slate-800'} ${!m.enabled ? 'opacity-50' : ''}`}>{m.name}</span>
             <span className={`text-[9px] shrink-0 ${muted}`}>{m.type}</span>
             <span className={`text-[9px] font-bold shrink-0 ${statusText(m.status)}`}>{m.status}</span>
           </button>
@@ -119,7 +119,7 @@ export const DependencyMapView: React.FC = () => {
           }`}
         >
           <span className={`${arrowColor} font-bold`}>{arrow}</span>
-          <span className="min-w-0 truncate">{it.label}</span>
+          <span title={typeof it.label === 'string' ? it.label : undefined} className="min-w-0 truncate">{it.label}</span>
         </button>
       )) : <div className={`italic ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>{empty}</div>}
     </div>
@@ -291,8 +291,8 @@ export const DependencyMapView: React.FC = () => {
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0">
                     <span className={`w-2 h-2 rounded-full shrink-0 ${statusDot(app.status)}`} />
-                    <span className={`font-bold text-sm truncate font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{app.name}</span>
-                    <span className={`text-[10px] truncate ${muted}`}>{app.dnsRecordName || app.codeName}</span>
+                    <span title={app.name} className={`font-bold text-sm truncate font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{app.name}</span>
+                    <span title={app.dnsRecordName || app.codeName} className={`text-[10px] truncate ${muted}`}>{app.dnsRecordName || app.codeName}</span>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <span className={`text-[10px] ${muted}`}>{app.failoverState === 'DR_ACTIVE' ? 'DR active' : app.failoverState === 'FAILING_OVER' ? 'switching' : 'PRD active'}</span>

@@ -53,7 +53,7 @@ function checkReachable(app: Application, env: Env, key: string): DrReadinessIte
 
 function checkApp(app: Application, env: Env, key: string): DrReadinessItem {
   const h = appHealth(app, env);
-  const verdict: CheckVerdict = h.status === 'HEALTHY' ? 'PASS' : h.status === 'DOWN' ? 'FAIL' : h.status === 'NOT_CONFIGURED' ? 'NOT_CONFIGURED' : h.status === 'DEGRADED' ? 'FAIL' : 'UNKNOWN';
+  const verdict: CheckVerdict = h.status === 'HEALTHY' ? 'PASS' : h.status === 'DOWN' ? 'FAIL' : h.status === 'NOT_CONFIGURED' ? 'NOT_CONFIGURED' : h.status === 'DEGRADED' ? 'WARNING' : 'UNKNOWN';
   return item(key, `${envLabel(env)} application healthy`, verdict, h.status === 'DEGRADED' ? `DEGRADED — ${h.detail}` : h.detail, h.observedAt);
 }
 
@@ -127,7 +127,7 @@ function checkSsl(app: Application, env: Env, key: string): DrReadinessItem {
   if (!url) return item(key, L, 'NOT_CONFIGURED', `No ${envLabel(env)} URL configured`);
   if (!url.startsWith('https://')) return item(key, L, 'NOT_CONFIGURED', `${url} is not https`);
   const http = urlMonitor(app, env);
-  if (http?.lastProbeStatus === 'TLS_ERROR') return item(key, L, 'FAIL', `TLS failure: ${http.history[0]?.detail ?? ''}`, http.lastCheck);
+  if (http?.lastProbeStatus === 'TLS_ERROR') return item(key, L, http.status === 'CRITICAL' ? 'FAIL' : 'WARNING', `TLS failure${http.status === 'CRITICAL' ? '' : ' (not yet confirmed)'}: ${http.history[0]?.detail ?? ''}`, http.lastCheck);
   const ssl = sslMonitor(app, env);
   if (!ssl) return item(key, L, 'NOT_CONFIGURED', 'TLS certificate monitoring is off for this application');
   if (!ssl.lastCheck) return item(key, L, 'UNKNOWN', `${ssl.name}: not checked yet`);
@@ -141,7 +141,8 @@ function checkUrl(app: Application, env: Env, key: string): DrReadinessItem {
   const m = urlMonitor(app, env);
   if (!m) return item(key, L, 'NOT_CONFIGURED', `No ${envLabel(env)} URL configured`);
   if (!m.lastCheck || !m.lastProbeStatus) return item(key, L, 'UNKNOWN', `${m.name}: not checked yet`);
-  if (m.lastStatusCode == null) return item(key, L, 'FAIL', `No HTTP response (${m.lastProbeStatus}) from ${m.target}`, m.lastCheck);
+  // One timeout is not an outage: FAIL only once the monitor has confirmed it (failure confirmation threshold)
+  if (m.lastStatusCode == null) return item(key, L, m.status === 'CRITICAL' ? 'FAIL' : 'WARNING', `No HTTP response (${m.lastProbeStatus}) from ${m.target}${m.status === 'CRITICAL' ? '' : ' — not yet confirmed'}`, m.lastCheck);
   const good = m.expectedStatusCode ? m.lastStatusCode === m.expectedStatusCode : m.lastStatusCode < 400;
   return item(key, L, good ? 'PASS' : 'FAIL', `${m.target} → HTTP ${m.lastStatusCode}${m.expectedStatusCode ? ` (expected ${m.expectedStatusCode})` : ''} in ${m.history[0]?.responseTimeMs ?? '?'} ms`, m.lastCheck);
 }
@@ -218,14 +219,18 @@ export function readiness(app: Application): ReadinessResult {
     checkSsl(app, 'DR', 'dr_ssl'),
     checkUrl(app, 'DR', 'dr_url'),
   ];
-  const passed = core.filter(c => c.status === 'PASS').length;
+  // Cloudflare pool / origin checks only apply to Load-Balancer-routed applications; DNS-failover
+  // applications are judged on the other checks (they could otherwise never be READY)
+  const LB_ONLY = new Set(['dr_pool', 'dr_origin']);
+  const applicable = core.filter(c => app.loadBalancer || !LB_ONLY.has(c.key));
+  const passed = applicable.filter(c => c.status === 'PASS').length;
   // DR cannot be judged at all without evidence that the DR application answers
   const essential = core.filter(c => ['dr_app', 'dr_url'].includes(c.key));
   const overall: DrOverall = core.some(c => c.status === 'FAIL') ? 'NOT_READY'
-    : passed === core.length ? 'READY'
+    : passed === applicable.length ? 'READY'
       : essential.every(c => c.status !== 'PASS') ? 'UNKNOWN'
         : 'PARTIALLY_READY';
-  return { checks: [...core, ...capacityChecks(app)], overall, passed, total: core.length, evaluatedAt: new Date().toISOString() };
+  return { checks: [...core, ...capacityChecks(app)], overall, passed, total: applicable.length, evaluatedAt: new Date().toISOString() };
 }
 
 export function failoverPreflight(app: Application, target: 'DR' | 'PRIMARY'): FailoverPreflight {

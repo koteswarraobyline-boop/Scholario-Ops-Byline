@@ -215,6 +215,8 @@ async function main() {
   });
 
   app.use('/api', rateLimit);
+  // Agent reports have their own, smaller limit (enforced while reading, not after); everything else 1 MB
+  app.use('/api/v1/agent/ingest', express.json({ limit: '512kb' }));
   app.use(express.json({ limit: '1mb' }));
   app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
     const type = (err as { type?: string }).type;

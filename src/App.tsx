@@ -20,6 +20,7 @@ import { RunbooksView }      from './components/operations/RunbooksView';
 import { MaintenanceView }   from './components/operations/MaintenanceView';
 import { CommunicationsView} from './components/communications/CommunicationsView';
 import { ReportsView }       from './components/analytics/ReportsView';
+import { ReliabilityView }   from './components/analytics/ReliabilityView';
 import { AuditLogsView }     from './components/admin/AuditLogsView';
 import { UsersView }         from './components/admin/UsersView';
 import { SetupView }         from './components/setup/SetupView';
@@ -68,6 +69,7 @@ const DashboardView: React.FC<{ tab: string }> = ({ tab }) => {
     runbooks:       <RunbooksView />,
     maintenance:    <MaintenanceView />,
     communications: <CommunicationsView />,
+    reliability:    <ReliabilityView />,
     reports:        <ReportsView />,
     audit:          <AuditLogsView />,
     users:          <UsersView />,
@@ -122,6 +124,7 @@ const DashboardRoutes: React.FC = () => (
     <Route path="/runbooks"      element={<DashboardView tab="runbooks" />} />
     <Route path="/maintenance"   element={<DashboardView tab="maintenance" />} />
     <Route path="/communications"element={<DashboardView tab="communications" />} />
+    <Route path="/reliability"   element={<DashboardView tab="reliability" />} />
     <Route path="/reports"       element={<DashboardView tab="reports" />} />
     <Route path="/audit"         element={<DashboardView tab="audit" />} />
     <Route path="/users"         element={<DashboardView tab="users" />} />
