@@ -606,8 +606,12 @@ export interface Incident {
   acknowledgedBy?: string;
   /** The first notification is held back by the escalation policy's initial delay (not sent yet) */
   notificationDeferred?: boolean;
-  /** When the incident was escalated for staying unacknowledged (escalation happens once) */
+  /** When the incident was first escalated for staying unacknowledged */
   escalatedAt?: string;
+  /** Multi-step escalation progress */
+  escalation?: IncidentEscalation;
+  /** A notification held back by quiet hours, sent when they end */
+  quietHeld?: { status: 'FIRING' | 'RESOLVED'; since: string; extra?: string };
   affectedServices: string[];
   affectedMonitors: string[];
   dependentFailures: string[];
@@ -762,6 +766,66 @@ export interface CommunicationChannel {
   failureCount: number;
 }
 
+export type NotificationDeliveryKind = 'FIRING' | 'RESOLVED' | 'ESCALATED' | 'INFO' | 'TEST';
+
+/** One notification sent to one channel (GET /api/v1/notifications/deliveries) */
+export interface NotificationDelivery {
+  id: string;
+  t: string;
+  channelId: string;
+  channelName: string;
+  channelType: string;
+  kind: NotificationDeliveryKind;
+  incidentId?: string;
+  severity: string;
+  title: string;
+  result: 'DELIVERED' | 'FAILED';
+  /** Delivery attempts (temporary failures are retried) */
+  attempts: number;
+  durationMs: number;
+  error?: string;
+  /** Set when this row is a manual resend of another delivery */
+  resendOf?: string;
+  /** Read by the signed-in user (delivery log list only) */
+  read?: boolean;
+  message: { title: string; text: string; severity: string; status: NotificationDeliveryKind; incidentId?: string; link?: string };
+}
+
+/** GET /api/v1/notifications/deliveries/:id */
+export interface NotificationDeliveryDetail {
+  delivery: NotificationDelivery & { read: boolean };
+  /** Original + resends on this channel, oldest first */
+  chain: NotificationDelivery[];
+  channel: { id: string; name: string; type: string; enabled: boolean; exists: boolean };
+  incident: { id: string; title: string; severity: IncidentSeverity; status: IncidentStatus; environment: Environment; owner: string; acknowledged: boolean; startedAt: string; resolvedAt: string | null } | null;
+  /** The notification names an incident that no longer exists */
+  incidentMissing: boolean;
+  application: { id: string; name: string } | null;
+  monitor: { id: string; name: string; type: string; environment: Environment; status: OperationalStatus } | null;
+}
+
+/** GET /api/v1/notifications/health */
+export interface NotificationHealth {
+  status: 'HEALTHY' | 'DEGRADED' | 'NOT_CONFIGURED';
+  /** leader = this process sends escalations / reminders; follower = another process does; standalone = no lock in use */
+  worker: 'leader' | 'follower' | 'standalone';
+  enabledChannels: number;
+  pending: { inFlight: number; waitingRetry: number; grouped: number; heldQuietHours: number; heldInitialDelay: number; logWritesPending: number };
+  last24h: {
+    hours: number; total: number; delivered: number; failed: number; retries: number;
+    successRate: number | null; p50Ms: number | null; p95Ms: number | null;
+    channels: Array<{ channelId: string; channelName: string; delivered: number; failed: number; p95Ms: number | null; lastDeliveredAt: string | null; lastFailedAt: string | null; lastError: string | null }>;
+  };
+  failingChannels: Array<{ channelId: string; name: string; type: string; consecutiveFailures: number; lastError: string | null }>;
+  /** 'OK', or why channel secrets cannot be encrypted / decrypted (e.g. the key file is lost) */
+  secretsKey?: string;
+}
+
+export interface NotificationDeliveryStats {
+  hours: number;
+  channels: Record<string, { delivered: number; failed: number; lastError: string | null }>;
+}
+
 export interface EscalationPolicy {
   id: string;
   severity: IncidentSeverity;
@@ -775,6 +839,35 @@ export interface EscalationPolicy {
   escalateToTeam: string;
   /** Channels for the escalation message; empty = all enabled channels */
   escalationChannels?: string[];
+  /**
+   * Ordered escalation steps (multi-level). When set, they replace autoEscalateAfterMin /
+   * escalateToTeam / escalationChannels (which still work as a single step for older policies).
+   */
+  steps?: EscalationStep[];
+  /** Hold non-critical notifications in this window (never allowed for CRITICAL / EMERGENCY) */
+  quietHours?: import('../lib/quietHours').QuietHours;
+}
+
+export interface EscalationStep {
+  /** Minutes after the incident opened (strictly increasing between steps) */
+  afterMin: number;
+  /** Channels for this step; empty = all enabled channels */
+  channels: string[];
+  /** Also email every active user marked On-Call */
+  notifyOnCall: boolean;
+  /** Who this step reaches, shown in the message (e.g. "DBA team", "Head of IT") */
+  label: string;
+}
+
+/** Durable escalation progress of one incident (stored with the incident; survives restarts) */
+export interface IncidentEscalation {
+  /** Steps already executed (each step runs once) */
+  stepsDone: number;
+  /** When the next step is due; null = no further step */
+  nextAt: string | null;
+  stoppedAt?: string;
+  stoppedReason?: 'acknowledged' | 'resolved';
+  history: Array<{ step: number; at: string; label: string; channels: number; onCall: number }>;
 }
 
 export interface AuditLog {

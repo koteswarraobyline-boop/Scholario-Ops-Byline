@@ -5,6 +5,8 @@
  *   npm test
  */
 import { test, before, after } from 'node:test';
+import { execSync } from 'node:child_process';
+import net from 'node:net';
 import assert from 'node:assert/strict';
 import { spawn, ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
@@ -19,6 +21,26 @@ const DATABASE_URL = process.env.DATABASE_URL ?? '';
 const SCHEMA = `ops_prodtest_${process.pid}`;
 const PORT = 3990 + (process.pid % 9);
 const BASE = `http://127.0.0.1:${PORT}`;
+/**
+ * Ports the WHATWG Fetch standard refuses to connect to — Node's fetch fails at once with "bad port"
+ * (https://fetch.spec.whatwg.org/#port-blocking). The startup test used to listen on PORT + 50, which
+ * is 4045 (on this list) whenever process.pid % 9 === 5: about one run in nine failed after 30 s.
+ */
+const FETCH_BLOCKED_PORTS = new Set([1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103, 104,
+  109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548,
+  554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667,
+  6668, 6669, 6679, 6697, 10080]);
+/** A free port chosen by the OS, never one fetch refuses */
+async function freePort(): Promise<number> {
+  for (;;) {
+    const port = await new Promise<number>((resolve, reject) => {
+      const probe = net.createServer();
+      probe.on('error', reject);
+      probe.listen(0, '127.0.0.1', () => { const p = (probe.address() as net.AddressInfo).port; probe.close(() => resolve(p)); });
+    });
+    if (!FETCH_BLOCKED_PORTS.has(port)) return port;
+  }
+}
 const ADMIN = { email: 'prod-admin@example.com', password: 'ProdTestPassw0rd!' };
 const SECRETS = { cf: 'prodtest-fake-cloudflare-token-9d2e', jwt: 'x'.repeat(16) + 'prodtest-jwt-secret-value-0123456789' };
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'scholario-prodtest-'));
@@ -91,13 +113,44 @@ test('health: liveness and readiness', async () => {
 });
 
 test('startup with the database unavailable: process stays up, readiness 503, API 503 (no crash loop)', async () => {
-  const port = PORT + 50;
+  const port = await freePort();
+  const t0 = Date.now();
   const child = spawnServer({ DATABASE_URL: 'postgresql://nobody:nothing@127.0.0.1:1/none' }, port);
+  // Evidence for a failure: this child's own output, how it ended, the last connection error, timings
+  let childOut = '';
+  let exited: { code: number | null; signal: string | null; afterMs: number } | null = null;
+  child.stdout?.on('data', d => { childOut += d; });
+  child.stderr?.on('data', d => { childOut += d; });
+  child.on('exit', (code, signal) => { exited = { code, signal, afterMs: Date.now() - t0 }; });
   try {
     let live = 0;
+    let lastError = '';
+    const attempts: string[] = [];
     // Up to 30 s: a freshly spawned tsx process occasionally needs > 10 s to start on a busy machine (flaky before at 10 s)
-    for (let i = 0; i < 120 && live !== 200; i++) { try { live = (await fetch(`http://127.0.0.1:${port}/api/health/live`)).status; } catch { /* starting */ } await new Promise(r => setTimeout(r, 250)); }
-    assert.equal(live, 200, 'liveness must answer while the database is down');
+    for (let i = 0; i < 120 && live !== 200; i++) {
+      const ta = Date.now();
+      try { live = (await fetch(`http://127.0.0.1:${port}/api/health/live`)).status; } catch (e) {
+        const c = (e as { cause?: { code?: string; name?: string; message?: string } }).cause;
+        lastError = `${c?.code ?? c?.name ?? 'no cause'}: ${c?.message ?? (e as Error).message} (attempt took ${Date.now() - ta} ms)`;
+        attempts.push(`${Date.now() - t0}ms ${c?.code ?? c?.name ?? '?'}`);
+      }
+      if (live !== 200) await new Promise(r => setTimeout(r, 250));
+    }
+    // Raw TCP connect + who holds the port, for the failure report
+    const tcp = await new Promise<string>(resolve => {
+      const sock = net.connect({ host: '127.0.0.1', port });
+      const timer = setTimeout(() => { sock.destroy(); resolve('no answer within 3 s'); }, 3000);
+      sock.on('connect', () => { clearTimeout(timer); sock.destroy(); resolve('connected'); });
+      sock.on('error', (err: NodeJS.ErrnoException) => { clearTimeout(timer); resolve(`error ${err.code}`); });
+    });
+    let portState = '';
+    try { portState = execSync('netstat -ano -p tcp', { encoding: 'utf8', timeout: 5000 }).split(/\r?\n/).filter(l => l.includes(`:${port} `)).slice(0, 12).join(' | '); } catch (err) { portState = (err as Error).message; }
+    const evidence = () => `waited ${Date.now() - t0} ms on port ${port}; child pid ${child.pid}; child exit: ${JSON.stringify(exited)}; last error: ${lastError}; ${attempts.length} failed attempts (last: ${attempts.slice(-5).join(', ')}); raw TCP connect: ${tcp}; netstat for the port:
+${portState}
+child output (tail):
+${childOut.slice(-1500)}`;
+    assert.equal(live, 200, `liveness must answer while the database is down — ${evidence()}`);
+    console.log(`# startup-without-db: liveness after ${Date.now() - t0} ms on port ${port}`);
     const ready = await fetch(`http://127.0.0.1:${port}/api/health/ready`);
     assert.equal(ready.status, 503);
     const apiRes = await fetch(`http://127.0.0.1:${port}/api/v1/bootstrap`);
@@ -107,6 +160,18 @@ test('startup with the database unavailable: process stays up, readiness 503, AP
   } finally {
     child.kill();
   }
+});
+
+test('test servers never listen on a port fetch refuses ("bad port") — root cause of the old flaky startup test', async () => {
+  // The cause, demonstrated: fetch rejects a blocked port before any connection is made
+  await assert.rejects(fetch('http://127.0.0.1:4045/'), (e: Error & { cause?: Error }) => /bad port/i.test(String(e.cause?.message ?? e.message)));
+  // Every fixed test-server port range in this suite is clear of the list…
+  const ranges: Array<[string, number, number]> = [['production.test PORT', 3990, 3998], ['config-flow.test PORT', 3900, 3989], ['responsive.test PORT', 4300, 4349]];
+  for (const [name, lo, hi] of ranges) {
+    for (let p = lo; p <= hi; p++) assert.equal(FETCH_BLOCKED_PORTS.has(p), false, `${name} can be ${p}, which fetch refuses`);
+  }
+  // …and the OS-chosen ports never are
+  for (let n = 0; n < 25; n++) assert.equal(FETCH_BLOCKED_PORTS.has(await freePort()), false);
 });
 
 test('security fixes over HTTP: no super-admin takeover, viewers never get push tokens on the live stream, odd tokens are 401 not 500, manual failover needs the pre-flight', async () => {
@@ -179,6 +244,87 @@ test('security fixes over HTTP: no super-admin takeover, viewers never get push 
   } finally {
     broken.close();
   }
+});
+
+test('notification read state over HTTP: viewers are refused, operators keep their own unread count; bulk resend reports per item', async () => {
+  const mk = async (email: string, roleName: string) => {
+    const u = await api('POST', '/api/v1/users', { email, password: 'NotifyPassw0rd!', fullName: email, roleName });
+    assert.equal(u.status, 201, u.raw);
+    return (await api('POST', '/api/auth/login', { email, password: 'NotifyPassw0rd!' }, '')).body.data.tokens.accessToken as string;
+  };
+  const viewer = await mk('notify-viewer@example.com', 'viewer');
+  const operator = await mk('notify-operator@example.com', 'operator');
+  for (const [method, path, body] of [
+    ['GET', '/api/v1/notifications/deliveries', undefined], ['GET', '/api/v1/notifications/unread-count', undefined],
+    ['POST', '/api/v1/notifications/read', { ids: ['00000000-0000-0000-0000-000000000000'] }], ['POST', '/api/v1/notifications/read-all', {}],
+    ['POST', '/api/v1/notifications/resend', { ids: ['00000000-0000-0000-0000-000000000000'] }],
+    ['GET', '/api/v1/notifications/health', undefined],
+  ] as const) {
+    assert.equal((await api(method, path, body, viewer)).status, 403, `viewer: ${method} ${path}`);
+  }
+  const health = await api('GET', '/api/v1/notifications/health', undefined, operator);
+  assert.equal(health.status, 200, health.raw);
+  assert.ok(['HEALTHY', 'DEGRADED', 'NOT_CONFIGURED'].includes(health.body.data.status));
+  assert.ok(['leader', 'follower', 'standalone'].includes(health.body.data.worker));
+  for (const k of ['inFlight', 'waitingRetry', 'grouped', 'heldQuietHours', 'heldInitialDelay', 'logWritesPending']) assert.equal(typeof health.body.data.pending[k], 'number', k);
+  assert.equal(typeof health.body.data.last24h.total, 'number');
+  assert.ok(Array.isArray(health.body.data.failingChannels));
+  assert.equal(health.body.data.secretsKey, 'OK', 'the secrets key is usable and every channel target decrypts');
+  const c0 = await api('GET', '/api/v1/notifications/unread-count', undefined, operator);
+  assert.equal(c0.status, 200, c0.raw);
+  assert.equal(typeof c0.body.data.unread, 'number');
+  assert.equal((await api('POST', '/api/v1/notifications/read', { ids: [] }, operator)).status, 400, 'empty id list rejected');
+  assert.equal((await api('POST', '/api/v1/notifications/read', { ids: Array.from({ length: 501 }, (_, i) => String(i)) }, operator)).status, 400, 'too many ids rejected');
+  assert.equal((await api('POST', '/api/v1/notifications/resend', { ids: Array.from({ length: 26 }, (_, i) => `00000000-0000-0000-0000-${String(i).padStart(12, '0')}`) }, operator)).status, 400, 'bulk resend is capped at 25');
+  const all = await api('POST', '/api/v1/notifications/read-all', {}, operator);
+  assert.equal(all.status, 200, all.raw);
+  assert.equal(all.body.data.unread, 0);
+  const bulk = await api('POST', '/api/v1/notifications/resend', { ids: ['00000000-0000-0000-0000-000000000000'] }, operator);
+  assert.equal(bulk.status, 200, bulk.raw);
+  assert.deepEqual({ delivered: bulk.body.data.delivered, failed: bulk.body.data.failed }, { delivered: 0, failed: 1 });
+  assert.equal(bulk.body.data.results[0].message, 'Delivery not found');
+
+  // Saving a webhook channel: internal destinations are refused with the reason (SSRF), public ones accepted
+  for (const [url, why] of [
+    ['https://10.0.0.5/hook', /private address/], ['https://192.168.1.20/hook', /private address/],
+    ['https://127.0.0.1/hook', /loopback address/], ['https://[::1]/hook', /loopback address/],
+    ['https://169.254.169.254/latest/meta-data/', /cloud-metadata/], ['https://2130706433/hook', /loopback address/],
+    ['https://localhost/hook', /internal host name/], ['https://user:pw@8.8.8.8/hook', /Credentials/],
+  ] as const) {
+    const r = await api('POST', '/api/v1/channels', { name: 'ssrf', type: 'WEBHOOK', targetEndpoint: url });
+    assert.equal(r.status, 400, `${url}: ${r.raw}`);
+    assert.match(r.body.message, why, url);
+  }
+  const okCh = await api('POST', '/api/v1/channels', { name: 'public hook', type: 'WEBHOOK', targetEndpoint: 'https://8.8.8.8/hook', enabled: false });
+  assert.equal(okCh.status, 201, okCh.raw);
+  assert.equal((await api('PATCH', `/api/v1/channels/${okCh.body.data.id}`, { targetEndpoint: 'https://10.1.1.1/x' })).status, 400, 'editing to an internal target is refused too');
+  assert.equal((await api('DELETE', `/api/v1/channels/${okCh.body.data.id}`)).status, 200);
+
+  // Escalation steps: ordered, strictly later, at most 5; saved and returned as sent
+  const put = (steps: unknown) => api('PUT', '/api/v1/escalation-policies', { policies: [{ severity: 'HIGH', channels: [], steps }] });
+  assert.equal((await put([{ afterMin: 10, channels: [] }, { afterMin: 10, channels: [] }])).status, 400, 'same minute twice');
+  assert.equal((await put([{ afterMin: 30, channels: [] }, { afterMin: 10, channels: [] }])).status, 400, 'out of order');
+  assert.equal((await put(Array.from({ length: 6 }, (_, i) => ({ afterMin: i + 1, channels: [] })))).status, 400, 'more than 5');
+  assert.equal((await put([{ afterMin: 0, channels: [] }])).status, 400, 'minutes required');
+  assert.equal((await put([{ afterMin: 5, channels: ['no-such-channel'] }])).status, 400, 'unknown channel');
+  const good = await put([{ afterMin: 5, channels: [], notifyOnCall: false, label: 'L1' }, { afterMin: 20, channels: [], label: 'L2' }]);
+  assert.equal(good.status, 200, good.raw);
+  assert.deepEqual(good.body.data[0].steps.map((x: { afterMin: number; label: string; notifyOnCall: boolean }) => [x.afterMin, x.label, x.notifyOnCall]), [[5, 'L1', false], [20, 'L2', true]]);
+  // Quiet hours: never for CRITICAL / EMERGENCY; valid times and a real IANA time zone required
+  const quiet = (severity: string, quietHours: unknown) => api('PUT', '/api/v1/escalation-policies', { policies: [{ severity, channels: [], quietHours }] });
+  const night = { enabled: true, start: '22:00', end: '07:00', timezone: 'Asia/Kolkata', days: [1, 2, 3, 4, 5] };
+  const crit = await quiet('CRITICAL', night);
+  assert.equal(crit.status, 400); assert.match(crit.body.message, /never held/);
+  assert.equal((await quiet('EMERGENCY', night)).status, 400);
+  const tz = await quiet('WARNING', { ...night, timezone: 'Mars/Olympus' });
+  assert.equal(tz.status, 400); assert.match(tz.body.message, /Unknown time zone/);
+  assert.equal((await quiet('WARNING', { ...night, start: '7pm' })).status, 400);
+  assert.equal((await quiet('WARNING', { ...night, days: [9] })).status, 400);
+  const okQuiet = await quiet('WARNING', night);
+  assert.equal(okQuiet.status, 200, okQuiet.raw);
+  assert.deepEqual(okQuiet.body.data[0].quietHours, night);
+  assert.equal((await quiet('CRITICAL', { ...night, enabled: false })).status, 200, 'switched off is fine for any severity');
+  assert.equal((await api('PUT', '/api/v1/escalation-policies', { policies: [] })).status, 200);
 });
 
 test('auth: bad password rejected, lockout after repeated failures, RBAC enforced', async () => {

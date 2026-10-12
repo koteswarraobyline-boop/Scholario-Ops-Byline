@@ -21,6 +21,8 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'scholario-montest-
 process.env.HOSTINGER_API_TOKEN = 'montest-fake-hostinger-token';
 process.env.HOSTINGER_TIMEOUT_MS = '800';
 process.env.CLOUDFLARE_API_TOKEN = 'montest-fake-cloudflare-token';
+// Local test webhook receiver on 127.0.0.1: allowed explicitly (the SSRF guard blocks loopback otherwise)
+process.env.NOTIFY_ALLOWED_PRIVATE_TARGETS = '127.0.0.1';
 process.env.ALERT_COOLDOWN_MIN = '10';
 process.env.TELEMETRY_STALE_THRESHOLD_SEC = '10';
 process.env.BACKUP_MAX_AGE_HOURS = '24';

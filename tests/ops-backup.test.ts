@@ -123,6 +123,8 @@ test('backup-db.sh + verify-backup.sh end to end (real pg_dump / psql, throw-awa
 
   // A scratch database (needs CREATEDB; otherwise the restore part is skipped)
   const scratch = `ops_restore_test_${process.pid}`;
+  // Creating a database is opt-in (only the local disposable test database is used by default)
+  if (process.env.ALLOW_TEST_CREATEDB !== '1') { t.diagnostic('restore part skipped: set ALLOW_TEST_CREATEDB=1 to let this test create a scratch database'); return; }
   try { await pool!.query(`CREATE DATABASE ${scratch}`); } catch (e) { t.diagnostic(`restore part skipped: ${(e as Error).message}`); return; }
   cleanups.push(() => pool!.query(`DROP DATABASE IF EXISTS ${scratch}`).then(() => undefined));
   const scratchUrl = withDb(DATABASE_URL!, scratch);
