@@ -3,12 +3,12 @@ import crypto from 'crypto';
 import net from 'net';
 import dns from 'dns';
 import {
-  Application, Monitor, Incident, CommunicationChannel, EscalationPolicy, MaintenanceWindow, Runbook,
+  Application, Monitor, Incident, CommunicationChannel, EscalationPolicy, EscalationStep, MaintenanceWindow, Runbook,
   Deployment, BackupRecord, IncidentStatus, IncidentSeverity, MonitorType, IntegrationStatus, CheckRecord,
 } from '../src/types/index.ts';
 import { config, isCloudflareConfigured, isHostingerConfigured, isSmtpConfigured } from './config.ts';
 import { db, persist, flush, liveMetrics, minuteMetrics, deleteServerMetrics, ServerRecord, UserRecord } from './store.ts';
-import { broadcast, audit, addSseClient } from './events.ts';
+import { broadcast, audit, addSseClient, sseClientCount } from './events.ts';
 import {
   requireAuth, requireRole, operatorName, hashPasswordAsync, verifyPassword, validatePasswordStrength, issueTokens,
   consumeRefreshToken, revokeRefreshToken, safeUser, loginRateLimited, recordLoginFailure, clearLoginFailures, dummyPasswordHash, ROLES, Role, issueStreamTicket,
@@ -21,7 +21,7 @@ import {
   ingestAgentReport, publicServer, performFailover, FailoverError, nextIncidentId, isFailoverInProgress, closeIncidentsReferencing, forgetMonitor, forgetServer, AgentReport, closeMonitorIncident,
 } from './engine.ts';
 import { httpProbe, tcpProbe, dnsProbe, sslProbe, parseHostPort, normalizeUrl } from './probes.ts';
-import { sendToChannel, notifyIncident } from './notify.ts';
+import { sendToChannel, notifyIncident, notifyTargetPolicy, deliveryRuntime, pendingGroupedAlerts, CHANNEL_FAILING_AFTER } from './notify.ts';
 import { cfState, syncCloudflare, CloudflareError, listCloudflareAccounts, listLoadBalancerPools } from './cloudflare.ts';
 import { hostingerState, syncHostinger } from './hostinger.ts';
 import { buildInstaller, buildUninstaller, AGENT_VERSION } from './agent.ts';
@@ -35,6 +35,11 @@ import { readChecks } from './history.ts';
 import { backupStatus, databaseHealth, agentState } from './health.ts';
 import { reliabilityInsights } from './insights.ts';
 import { opsBackupHealth } from './opsBackup.ts';
+import { assertSafeTarget, UnsafeTargetError } from './netguard.ts';
+import { secretsKeyStatus, SecretsKeyMissingError, isSealed } from './secrets.ts';
+import { quietHoursProblem, type QuietHours } from '../src/lib/quietHours.ts';
+import { listDeliveries, getDelivery, getDeliveryForUser, deliveryChain, deliveryStats, unreadCounts, setRead, markAllRead, deliveryHealth, pendingLogWrites } from './deliveries.ts';
+import { workerState } from './leader.ts';
 import { notificationStatus } from './alerts.ts';
 import { log } from './logger.ts';
 
@@ -475,6 +480,8 @@ export function buildRouter(): Router {
       cluster: config.publicUrl || req.get('host') || '',
       healthCheckEndpoint: '/api/health',
       reachable: true,
+      /** Open live-update (SSE) connections: each signed-in browser tab holds one */
+      realtimeClients: sseClientCount(),
       checks: {
         api_gateway: 'UP',
         edge_ingress: 'UP',
@@ -1206,7 +1213,13 @@ export function buildRouter(): Router {
   }));
 
   // ── Notification channels & escalation ─────────────────────────────────────
-  const buildChannel = (req: Request, existing?: CommunicationChannel): CommunicationChannel => {
+  // "Get link to channel" opens Teams in a browser; it cannot receive messages (POST → 405)
+  const TEAMS_CHANNEL_LINK = /^https:\/\/teams\.(microsoft\.com|cloud\.microsoft|live\.com)\//i;
+  const TEAMS_CHANNEL_LINK_HELP = 'This is a link to a Teams channel, not a webhook — nothing was sent. In Teams open the channel → ⋯ → Workflows → "Post to a channel when a webhook request is received", then edit this channel and paste the URL it gives you.';
+  const buildChannel = async (req: Request, existing?: CommunicationChannel): Promise<CommunicationChannel> => {
+    // Channel targets are stored encrypted: no saving while the key is lost (it would not be encrypted)
+    const keyStatus = secretsKeyStatus();
+    if (!keyStatus.ok) throw new SecretsKeyMissingError(`Channel secrets cannot be stored safely: ${keyStatus.error}`);
     const b = body(req);
     const type = existing ? (optOneOf(b, 'type', 'Type', CHANNEL_TYPES) ?? existing.type) : oneOf(b, 'type', 'Type', CHANNEL_TYPES);
     const target = existing ? (optStr(b, 'targetEndpoint', 'Target', 2000) ?? existing.targetEndpoint) : reqStr(b, 'targetEndpoint', 'Target', 2000);
@@ -1217,6 +1230,13 @@ export function buildRouter(): Router {
       if (!/^[a-zA-Z0-9]{20,64}$/.test(target)) throw new ValidationError('Enter the PagerDuty Events v2 integration (routing) key');
     } else if (!/^https:\/\/\S+$/.test(target)) {
       throw new ValidationError('Webhook URL must start with https://');
+    } else if (type === 'TEAMS' && TEAMS_CHANNEL_LINK.test(target)) {
+      throw new ValidationError(TEAMS_CHANNEL_LINK_HELP);
+    }
+    // Webhook destinations: no loopback / private / link-local / metadata targets (SSRF), checked on every send too
+    if (type === 'TEAMS' || type === 'WEBHOOK') {
+      try { await assertSafeTarget(target, notifyTargetPolicy(), { requireHttps: true }); }
+      catch (err) { if (err instanceof UnsafeTargetError) throw new ValidationError(err.message); throw err; }
     }
     return {
       id: existing?.id ?? crypto.randomUUID(),
@@ -1232,18 +1252,22 @@ export function buildRouter(): Router {
   r.get('/v1/channels', (req, res) => {
     ok(res, isAdmin(req) ? db.channels : db.channels.map(c => ({ ...c, targetEndpoint: c.targetEndpoint ? '••••••' : '' })));
   });
-  r.post('/v1/channels', requireRole('it_administrator'), h((req, res) => {
-    const ch = buildChannel(req);
+  r.post('/v1/channels', requireRole('it_administrator'), h(async (req, res) => {
+    const ch = await buildChannel(req);
     db.channels.push(ch);
     persist();
     audit(operatorName(req), 'CHANNEL_CREATED', 'NOTIFICATION', ch.id, `${ch.type} channel ${ch.name}`);
     broadcast('channels_changed', null);
     ok(res, ch, 201);
   }));
-  r.patch('/v1/channels/:id', requireRole('it_administrator'), h((req, res) => {
+  r.patch('/v1/channels/:id', requireRole('it_administrator'), h(async (req, res) => {
+    const existing = db.channels.find(c => c.id === req.params.id);
+    if (!existing) return fail(res, 404, 'Channel not found');
+    const updated = await buildChannel(req, existing);
+    // The list may have changed while the destination was being checked
     const idx = db.channels.findIndex(c => c.id === req.params.id);
     if (idx === -1) return fail(res, 404, 'Channel not found');
-    db.channels[idx] = buildChannel(req, db.channels[idx]);
+    db.channels[idx] = updated;
     persist();
     audit(operatorName(req), 'CHANNEL_UPDATED', 'NOTIFICATION', db.channels[idx].id, db.channels[idx].name);
     broadcast('channels_changed', null);
@@ -1256,8 +1280,10 @@ export function buildRouter(): Router {
     for (const p of db.escalationPolicies) {
       p.channels = p.channels.filter(id => id !== ch.id);
       if (p.escalationChannels) p.escalationChannels = p.escalationChannels.filter(id => id !== ch.id);
+      for (const st of p.steps ?? []) st.channels = st.channels.filter(id => id !== ch.id);
     }
     persist();
+    closeIncidentsReferencing([ch.id], operatorName(req), `notification channel ${ch.name} was deleted`); // its "failing" alert
     audit(operatorName(req), 'CHANNEL_DELETED', 'NOTIFICATION', ch.id, ch.name);
     broadcast('channels_changed', null);
     ok(res, { deleted: true });
@@ -1265,6 +1291,7 @@ export function buildRouter(): Router {
   r.post('/v1/channels/:id/test', requireRole('operator'), h(async (req, res) => {
     const ch = db.channels.find(c => c.id === req.params.id);
     if (!ch) return fail(res, 404, 'Channel not found');
+    if (ch.type === 'TEAMS' && TEAMS_CHANNEL_LINK.test(ch.targetEndpoint)) return fail(res, 400, TEAMS_CHANNEL_LINK_HELP);
     const result = await sendToChannel(ch, {
       title: 'Scholario Ops test notification',
       text: `Test message sent by ${operatorName(req)} at ${new Date().toUTCString()}.`,
@@ -1275,6 +1302,118 @@ export function buildRouter(): Router {
     if (!result.ok) return fail(res, 502, `Delivery failed: ${result.error}`);
     ok(res, isAdmin(req) ? ch : { ...ch, targetEndpoint: ch.targetEndpoint ? '••••••' : '' });
   }));
+  // ── Notification delivery log (operators+: error messages can name recipients) ──
+  const DELIVERY_KINDS = ['FIRING', 'RESOLVED', 'ESCALATED', 'INFO', 'TEST'] as const;
+  r.get('/v1/notifications/deliveries', requireRole('operator'), h(async (req, res) => {
+    const q = req.query as Record<string, string | undefined>;
+    const pick = <T extends string>(v: string | undefined, allowed: readonly T[]) => (v && (allowed as readonly string[]).includes(v) ? v as T : undefined);
+    const page = Math.max(1, Number.parseInt(q.page ?? '1', 10) || 1);
+    const pageSize = Math.min(200, Math.max(1, Number.parseInt(q.pageSize ?? '25', 10) || 25));
+    const out = await listDeliveries({
+      channelId: q.channelId?.slice(0, 64) || undefined, result: pick(q.result, ['DELIVERED', 'FAILED'] as const),
+      kind: pick(q.kind, DELIVERY_KINDS), incidentId: q.incidentId?.slice(0, 64) || undefined,
+      q: q.q?.trim().slice(0, 100) || undefined, unread: q.unread === '1' || q.unread === 'true',
+      sort: q.sort === 'oldest' ? 'oldest' : 'newest', page, pageSize,
+    }, req.user!.id);
+    res.json({ success: true, ...out });
+  }));
+  r.get('/v1/notifications/stats', requireRole('operator'), h(async (_req, res) => { ok(res, await deliveryStats(24)); }));
+  /** One notification: what was sent, every attempt on this channel (original + resends), and the live incident context */
+  r.get('/v1/notifications/deliveries/:id', requireRole('operator'), h(async (req, res) => {
+    const d = await getDeliveryForUser(String(req.params.id), req.user!.id);
+    if (!d) return fail(res, 404, 'Delivery not found');
+    const inc = d.incidentId ? db.incidents.find(i => i.id === d.incidentId) : undefined;
+    const app = inc?.applicationId ? db.applications.find(a => a.id === inc.applicationId) : undefined;
+    const monId = inc?.fingerprint?.startsWith('monitor:') ? inc.fingerprint.slice('monitor:'.length) : undefined;
+    const mon = monId ? db.monitors.find(m => m.id === monId) : undefined;
+    const ch = db.channels.find(c => c.id === d.channelId);
+    ok(res, {
+      delivery: d,
+      chain: await deliveryChain(d.id),
+      channel: ch ? { id: ch.id, name: ch.name, type: ch.type, enabled: ch.enabled, exists: true } : { id: d.channelId, name: d.channelName, type: d.channelType, enabled: false, exists: false },
+      incident: inc ? {
+        id: inc.id, title: inc.title, severity: inc.severity, status: inc.status, environment: inc.environment, owner: inc.owner,
+        acknowledged: inc.acknowledged, startedAt: inc.startedAt, resolvedAt: inc.resolvedAt ?? null,
+      } : null,
+      incidentMissing: Boolean(d.incidentId && !inc),
+      application: app ? { id: app.id, name: app.name } : null,
+      monitor: mon ? { id: mon.id, name: mon.name, type: mon.type, environment: mon.environment, status: mon.status } : null,
+    });
+  }));
+  r.get('/v1/notifications/unread-count', requireRole('operator'), h(async (req, res) => { ok(res, await unreadCounts(req.user!.id)); }));
+  /**
+   * Notification health: is this process the sending worker, what is waiting (in flight, retry backoff,
+   * grouped, quiet hours, first-page delay, unwritten log rows), 24 h volume / success / retries /
+   * latency, and channels that keep failing (with the last reason).
+   */
+  r.get('/v1/notifications/health', requireRole('operator'), h(async (_req, res) => {
+    const stats = await deliveryHealth(24);
+    const enabled = db.channels.filter(c => c.enabled);
+    const failing = db.channels.filter(c => c.enabled && c.failureCount >= CHANNEL_FAILING_AFTER).map(c => ({
+      channelId: c.id, name: c.name, type: c.type, consecutiveFailures: c.failureCount,
+      lastError: stats.channels.find(x => x.channelId === c.id)?.lastError ?? null,
+    }));
+    const live = deliveryRuntime();
+    const key = secretsKeyStatus();
+    // Targets still in their encrypted form in memory could not be decrypted with the current key
+    const unreadable = db.channels.filter(c => isSealed(c.targetEndpoint)).length;
+    const status = enabled.length === 0 ? 'NOT_CONFIGURED'
+      : !key.ok || unreadable > 0 || failing.length > 0 || (stats.total >= 5 && (stats.successRate ?? 100) < 90) ? 'DEGRADED' : 'HEALTHY';
+    ok(res, {
+      status,
+      worker: workerState(),
+      enabledChannels: enabled.length,
+      pending: {
+        inFlight: live.inFlight, waitingRetry: live.waitingRetry, grouped: pendingGroupedAlerts(),
+        heldQuietHours: db.incidents.filter(i => i.quietHeld).length,
+        heldInitialDelay: db.incidents.filter(i => i.notificationDeferred).length,
+        logWritesPending: pendingLogWrites(),
+      },
+      last24h: stats,
+      failingChannels: failing,
+      secretsKey: !key.ok ? key.error : unreadable > 0 ? `${unreadable} channel target(s) cannot be decrypted with the current key — restore the matching key file, or edit those channels and enter the target again` : 'OK',
+    });
+  }));
+  r.post('/v1/notifications/read', requireRole('operator'), h(async (req, res) => {
+    const b = body(req);
+    // maxItems above the limit so an oversized list is refused, not silently cut
+    const ids = strArray(b, 'ids', 'ids', 501) ?? [];
+    if (ids.length === 0 || ids.length > 500) return fail(res, 400, 'Give 1–500 delivery ids');
+    const read = optBool(b, 'read') ?? true;
+    ok(res, { marked: await setRead(req.user!.id, ids, read), read });
+  }));
+  r.post('/v1/notifications/read-all', requireRole('operator'), h(async (req, res) => {
+    await markAllRead(req.user!.id);
+    ok(res, await unreadCounts(req.user!.id));
+  }));
+
+  /** Resends one logged notification to its channel (same message, linked to the original) */
+  const resendDelivery = async (id: string, operator: string): Promise<{ status: number; ok: boolean; message: string; deliveryId?: string }> => {
+    const original = await getDelivery(id);
+    if (!original) return { status: 404, ok: false, message: 'Delivery not found' };
+    const ch = db.channels.find(c => c.id === original.channelId);
+    if (!ch) return { status: 409, ok: false, message: original.channelId === 'on-call' ? 'On-call escalation emails cannot be resent from the log' : 'That channel no longer exists' };
+    if (!ch.enabled) return { status: 409, ok: false, message: `Channel "${ch.name}" is disabled — enable it first` };
+    const result = await sendToChannel(ch, original.message, original.id);
+    audit(operator, result.ok ? 'NOTIFICATION_RESENT' : 'NOTIFICATION_RESEND_FAILED', 'NOTIFICATION', ch.id, `${original.kind} "${original.title}" → ${ch.name}${result.ok ? '' : `: ${result.error}`}`);
+    return result.ok
+      ? { status: 200, ok: true, message: `Resent to ${ch.name}`, deliveryId: result.deliveryId }
+      : { status: 502, ok: false, message: `Delivery failed: ${result.error}`, deliveryId: result.deliveryId };
+  };
+  r.post('/v1/notifications/deliveries/:id/resend', requireRole('operator'), h(async (req, res) => {
+    const r1 = await resendDelivery(String(req.params.id), operatorName(req));
+    if (!r1.ok) return fail(res, r1.status, r1.message);
+    ok(res, { delivered: true, deliveryId: r1.deliveryId });
+  }));
+  /** Bulk resend (one after another, at most 25 per request) — each result is reported */
+  r.post('/v1/notifications/resend', requireRole('operator'), h(async (req, res) => {
+    const ids = [...new Set(strArray(body(req), 'ids', 'ids', 26) ?? [])];
+    if (ids.length === 0 || ids.length > 25) return fail(res, 400, 'Give 1–25 delivery ids');
+    const results = [];
+    for (const id of ids) results.push({ id, ...(await resendDelivery(id, operatorName(req))) });
+    ok(res, { results, delivered: results.filter(x => x.ok).length, failed: results.filter(x => !x.ok).length });
+  }));
+
   r.get('/v1/escalation-policies', (_req, res) => { ok(res, db.escalationPolicies); });
   r.put('/v1/escalation-policies', requireRole('it_administrator'), h((req, res) => {
     const list = (req.body as { policies?: unknown }).policies;
@@ -1288,6 +1427,39 @@ export function buildRouter(): Router {
       if (channels.some(id => !db.channels.some(c => c.id === id))) throw new ValidationError('Policy references an unknown channel');
       const escalationChannels = strArray(b, 'escalationChannels', 'Escalation channels') ?? [];
       if (escalationChannels.some(id => !db.channels.some(c => c.id === id))) throw new ValidationError('Policy references an unknown escalation channel');
+      // Multi-step escalation: ordered, strictly later steps (at most 5)
+      let steps: EscalationStep[] | undefined;
+      if (b.steps !== undefined && b.steps !== null) {
+        if (!Array.isArray(b.steps)) throw new ValidationError('steps must be a list');
+        if (b.steps.length > 5) throw new ValidationError('At most 5 escalation steps per severity');
+        steps = (b.steps as unknown[]).map((raw, i) => {
+          const o = (raw ?? {}) as Record<string, unknown>;
+          const afterMin = optInt(o, 'afterMin', `Step ${i + 1} minutes`, 1, 1440);
+          if (!afterMin) throw new ValidationError(`Escalation step ${i + 1}: enter after how many minutes it runs (1–1440)`);
+          const stepChannels = strArray(o, 'channels', `Step ${i + 1} channels`) ?? [];
+          if (stepChannels.some(id => !db.channels.some(c => c.id === id))) throw new ValidationError(`Escalation step ${i + 1} references an unknown channel`);
+          return { afterMin, channels: stepChannels, notifyOnCall: optBool(o, 'notifyOnCall') ?? true, label: optStr(o, 'label', `Step ${i + 1} label`, 120) ?? '' };
+        });
+        for (let i = 1; i < steps.length; i++) {
+          if (steps[i].afterMin <= steps[i - 1].afterMin) throw new ValidationError(`Escalation step ${i + 1} must come later than step ${i} (${steps[i - 1].afterMin} min)`);
+        }
+      }
+      // Quiet hours: valid HH:MM, a real IANA time zone, days 0–6; never for CRITICAL / EMERGENCY
+      let quietHours: QuietHours | undefined;
+      if (b.quietHours !== undefined && b.quietHours !== null) {
+        const o = (typeof b.quietHours === 'object' ? b.quietHours : {}) as Record<string, unknown>;
+        const qh: QuietHours = {
+          enabled: optBool(o, 'enabled') ?? true,
+          start: String(o.start ?? '').trim(), end: String(o.end ?? '').trim(), timezone: String(o.timezone ?? '').trim(),
+          ...(Array.isArray(o.days) ? { days: (o.days as unknown[]).map(Number) } : {}),
+        };
+        if (qh.enabled) {
+          if (severity === 'CRITICAL' || severity === 'EMERGENCY') throw new ValidationError(`Quiet hours cannot be set for ${severity}: those alerts are never held`);
+          const problem = quietHoursProblem(qh);
+          if (problem) throw new ValidationError(`${severity}: ${problem}`);
+        }
+        quietHours = qh;
+      }
       return {
         id: optStr(b, 'id', 'id', 64) || crypto.randomUUID(),
         severity,
@@ -1297,6 +1469,8 @@ export function buildRouter(): Router {
         autoEscalateAfterMin: optInt(b, 'autoEscalateAfterMin', 'Auto-escalate', 0, 1440) ?? 0,
         escalateToTeam: optStr(b, 'escalateToTeam', 'Escalate to', 120) ?? '',
         escalationChannels,
+        ...(steps ? { steps } : {}),
+        ...(quietHours ? { quietHours } : {}),
       };
     });
     if (new Set(policies.map(p => p.severity)).size !== policies.length) return fail(res, 400, 'Only one policy per severity is allowed');
@@ -1670,6 +1844,7 @@ export function buildRouter(): Router {
   r.use((_req, res) => { fail(res, 404, 'API endpoint not found'); });
   r.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof ValidationError) return fail(res, 400, err.message);
+    if (err instanceof SecretsKeyMissingError) return fail(res, 503, err.message);
     if ((err as { type?: string }).type === 'entity.parse.failed') return fail(res, 400, 'Request body is not valid JSON');
     log.error('api', 'unhandled error', { error: err as Error });
     fail(res, 500, 'Internal server error');

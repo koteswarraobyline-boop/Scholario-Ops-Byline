@@ -226,24 +226,27 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [selectedRunbookId, setSelectedRunbookId] = useState<string | null>(null);
   // The open incident is part of the address (/incidents?id=INC-1042): links in Teams / email /
   // PagerDuty notifications open it directly, and the URL can be shared
-  useEffect(() => {
-    if (location.pathname !== '/incidents') return;
-    const fromUrl = new URLSearchParams(location.search).get('id');
-    if (fromUrl) setSelectedIncidentId(prev => (prev === fromUrl ? prev : fromUrl));
-  }, [location.pathname, location.search]);
-  const syncedIncidentId = useRef<string | null>(null);
-  useEffect(() => {
-    if (location.pathname !== '/incidents') return;
+  const withIncidentId = (id: string | null) => {
     const params = new URLSearchParams(location.search);
-    const urlId = params.get('id');
-    if (urlId === selectedIncidentId) { syncedIncidentId.current = urlId; return; }
-    // A link just opened: the effect above applies it, do not strip it before that happened
-    if (!selectedIncidentId && urlId && syncedIncidentId.current !== urlId) return;
-    syncedIncidentId.current = selectedIncidentId;
-    if (selectedIncidentId) params.set('id', selectedIncidentId); else params.delete('id');
+    if (id) params.set('id', id); else params.delete('id');
     const qs = params.toString();
     navigate({ pathname: '/incidents', search: qs ? `?${qs}` : '' }, { replace: true });
-  }, [selectedIncidentId, location.pathname]);
+  };
+  // Address changed (a link was opened, back/forward, navigation): the address wins
+  useEffect(() => {
+    if (location.pathname !== '/incidents') return;
+    const urlId = new URLSearchParams(location.search).get('id');
+    if (urlId) { if (urlId !== selectedIncidentId) setSelectedIncidentId(urlId); }
+    else if (selectedIncidentId) withIncidentId(selectedIncidentId); // e.g. banner: select, then navigate to /incidents
+  }, [location.pathname, location.search]);
+  // Selection changed on the page (opened / closed an incident): write it to the address.
+  // Not on the first render: then the address is applied above and must not be stripped first.
+  const selectionMounted = useRef(false);
+  useEffect(() => {
+    if (!selectionMounted.current) { selectionMounted.current = true; return; }
+    if (location.pathname !== '/incidents') return;
+    if (new URLSearchParams(location.search).get('id') !== selectedIncidentId) withIncidentId(selectedIncidentId);
+  }, [selectedIncidentId]);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isAddMonitorModalOpen, setIsAddMonitorModalOpen] = useState(false);
   const [addMonitorInitialContext, setAddMonitorInitialContext] = useState<{ applicationId?: string; serverId?: string; defaultType?: MonitorType } | null>(null);
@@ -275,7 +278,8 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const dismissToast = useCallback((id: number) => setToasts(prev => prev.filter(t => t.id !== id)), []);
   const notify = useCallback((type: Toast['type'], message: string) => {
     const id = ++toastSeq.current;
-    setToasts(prev => [...prev.slice(-4), { id, type, message }]);
+    // The same message again (e.g. a test sent repeatedly) replaces the earlier toast instead of stacking
+    setToasts(prev => [...prev.filter(t => !(t.type === type && t.message === message)).slice(-4), { id, type, message }]);
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), type === 'error' ? 8000 : 4000);
   }, []);
 

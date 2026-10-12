@@ -38,6 +38,7 @@ import {
 } from 'lucide-react';
 import { CommandPalette } from './CommandPalette';
 import { CriticalAlerts } from './CriticalAlerts';
+import { useUnreadNotifications } from '../communications/notificationHooks';
 import { CreateMonitorModal } from '../monitors/CreateMonitorModal';
 
 interface ShellProps {
@@ -80,7 +81,9 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  const { user, logout } = useAuth();
+  const { user, logout, hasRole } = useAuth();
+  // Unread notification deliveries (operators+, same permission as the delivery log)
+  const unreadNotifications = useUnreadNotifications(hasRole('operator'));
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -161,7 +164,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     {
       title: 'Communications',
       items: [
-        { id: 'communications', label: 'Notifications', icon: Bell }
+        { id: 'communications', label: 'Notifications', icon: Bell, badge: unreadNotifications?.unread ? `${unreadNotifications.unread > 99 ? '99+' : unreadNotifications.unread}` : undefined, badgeColor: unreadNotifications?.unreadFailed ? 'text-rose-400 font-semibold' : 'text-blue-400 font-semibold' }
       ]
     },
     {

@@ -20,5 +20,11 @@ export default defineConfig(() => {
     server: {
       hmr: process.env.DISABLE_HMR === 'true' ? false : undefined,
     },
+    // Pages load on demand (React.lazy): scan every source file at startup so all their
+    // dependencies are pre-bundled once. Otherwise Vite discovers them when a page is first
+    // opened, re-optimizes, and the open tab gets "504 Outdated Optimize Dep" (blank page).
+    optimizeDeps: {
+      entries: ['index.html', 'src/**/*.tsx'],
+    },
   };
 });

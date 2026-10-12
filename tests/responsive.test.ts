@@ -10,7 +10,7 @@
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, ChildProcess } from 'node:child_process';
+import { spawn, execSync, ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -47,9 +47,12 @@ let login: { tokens: { accessToken: string; refreshToken: string }; user: unknow
 class Cdp {
   private id = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+  private handlers = new Map<string, Array<(p: any) => void>>();
+  on(method: string, h: (p: any) => void) { this.handlers.set(method, [...(this.handlers.get(method) ?? []), h]); }
   private constructor(private ws: WebSocket) {
     ws.addEventListener('message', ev => {
       const msg = JSON.parse(String(ev.data));
+      if (msg.method) { for (const h of this.handlers.get(msg.method) ?? []) h(msg.params); return; }
       const p = msg.id ? this.pending.get(msg.id) : undefined;
       if (!p) return;
       this.pending.delete(msg.id);
@@ -82,10 +85,61 @@ async function api(method: string, p: string, body?: unknown) {
   return JSON.parse(raw);
 }
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+const evidence = {
+  console: [] as string[], failed: [] as string[], currentDoc: '',
+  inflight: new Map<string, { url: string; method: string; t: number; doc: string }>(),
+};
+/** Pending API requests of the CURRENT page, open live streams per page (document), failures and console errors */
+const evidenceReport = () => {
+  const now = Date.now();
+  const list = (items: string[]) => (items.length ? items.map(x => `\n  ${x}`).join('') : ' none');
+  const all = [...evidence.inflight.values()];
+  const pending = all.filter(r => r.doc === evidence.currentDoc && !r.url.includes('/realtime/stream'))
+    .map(r => `${r.method} ${r.url} pending ${Math.round((now - r.t) / 1000)}s`);
+  const streams = all.filter(r => r.url.includes('/realtime/stream'));
+  const byDoc = new Map<string, number>();
+  for (const r of streams) byDoc.set(r.doc, (byDoc.get(r.doc) ?? 0) + 1);
+  const streamLines = [...byDoc.entries()].map(([doc, n]) => `${doc === evidence.currentDoc ? 'current page' : `earlier page ${doc.slice(0, 8)}`}: ${n} open`);
+  return `\n--- evidence ---\npending API requests on the current page:${list(pending)}\nlive streams the browser still considers open (${streams.length}):${list(streamLines)}\nfailed API requests (last 10):${list(evidence.failed.slice(-10))}\nconsole errors (last 10):${list(evidence.console.slice(-10))}`;
+};
+/** Is the server itself answering (outside the browser)? How many TCP connections are open to it? */
+const serverEvidence = async () => {
+  const t0 = Date.now();
+  let direct: string;
+  try {
+    const r = await fetch(`${BASE}/api/health/live`, { signal: AbortSignal.timeout(5000) });
+    direct = `HTTP ${r.status} in ${Date.now() - t0} ms`;
+    const h = await fetch(`${BASE}/api/health`, { signal: AbortSignal.timeout(5000) }).then(x => x.json()).catch(() => null) as { realtimeClients?: number } | null;
+    direct += `; live-stream clients connected on the server: ${h?.realtimeClients ?? 'unknown'}`;
+  }
+  catch (e) { direct = `no answer after ${Date.now() - t0} ms (${(e as Error).message})`; }
+  let conns = 'unknown';
+  try {
+    const out = execSync(process.platform === 'win32' ? 'netstat -ano -p tcp' : 'netstat -tn', { encoding: 'utf8', timeout: 5000 });
+    const port = new URL(BASE).port;
+    const lines = out.split(/\r?\n/).filter(l => l.includes('ESTABLISHED'));
+    const toServer = lines.filter(l => { const cols = l.trim().split(" ").filter(Boolean); return (cols[2] ?? '').endsWith(`:${port}`); }).length;
+    conns = `${toServer} established client connections to port ${port}`;
+  } catch (e) { conns = `netstat failed: ${(e as Error).message}`; }
+  return `
+server direct check (outside the browser): ${direct}
+${conns}`;
+};
+/** Database sessions of the test database at the moment of a failure (query text only, never parameter values) */
+const dbEvidence = async () => {
+  const c = new pg.Client({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 3000 });
+  try {
+    await c.connect();
+    const rows = (await c.query(`select state, coalesce(wait_event_type || '/' || wait_event, '-') wait, round(extract(epoch from now() - coalesce(xact_start, query_start)))::int age_s,
+        left(regexp_replace(query, '[[:space:]]+', ' ', 'g'), 100) q
+      from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and state is not null order by age_s desc nulls last limit 15`)).rows;
+    return `\ndatabase sessions (${rows.length}):` + rows.map(r => `\n  ${r.state} wait=${r.wait} age=${r.age_s}s  ${r.q}`).join('');
+  } catch (e) { return `\ndatabase snapshot unavailable: ${(e as Error).message}`; } finally { await c.end().catch(() => {}); }
+};
 const waitFor = async (pred: () => Promise<boolean>, what = 'condition', timeoutMs = 15_000) => {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) { if (await pred().catch(() => false)) return; await sleep(200); }
-  throw new Error(`${what}: not met in time`);
+  throw new Error(`${what}: not met in time${evidenceReport()}${await serverEvidence()}${await dbEvidence()}`);
 };
 
 before(async () => {
@@ -96,8 +150,10 @@ before(async () => {
   server = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
     env: { ...process.env, NODE_ENV: 'production', PORT: String(PORT), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR, ADMIN_EMAIL: ADMIN.email, ADMIN_PASSWORD: ADMIN.password,
       JWT_SECRET: 'r'.repeat(40), PUBLIC_URL: 'https://ops.test.invalid', CLOUDFLARE_API_TOKEN: '', HOSTINGER_API_TOKEN: '', LOG_FORMAT: 'json',
-      DEADMAN_HEARTBEAT_URL: `http://127.0.0.1:${(watchdog.address() as { port: number }).port}/ping/secret-uuid`, DEADMAN_INTERVAL_SEC: '10' },
-    stdio: ['ignore', 'ignore', 'ignore'],
+      DEADMAN_HEARTBEAT_URL: `http://127.0.0.1:${(watchdog.address() as { port: number }).port}/ping/secret-uuid`, DEADMAN_INTERVAL_SEC: '10',
+      NOTIFY_ALLOWED_PRIVATE_TARGETS: '127.0.0.1' },
+    // SERVER_LOG=<file> keeps the test server's log for debugging
+    stdio: process.env.SERVER_LOG ? (fd => ['ignore', fd, fd])(fs.openSync(process.env.SERVER_LOG, 'a')) : ['ignore', 'ignore', 'ignore'],
   });
   for (let i = 0; i < 150; i++) { try { if ((await fetch(`${BASE}/api/health/ready`)).status === 200) break; } catch { /* starting */ } await sleep(200); }
 
@@ -146,6 +202,17 @@ before(async () => {
   page = await Cdp.connect(`ws://127.0.0.1:${port}/devtools/page/${targetId}`);
   await page.send('Page.enable');
   await page.send('Runtime.enable');
+  // Evidence for failures: browser console errors, exceptions, pending and failed network requests
+  await page.send('Network.enable');
+  page.on('Runtime.consoleAPICalled', p => { if (p.type === 'error' || p.type === 'warning') evidence.console.push(`${new Date().toISOString().slice(11, 23)} console.${p.type}: ${(p.args ?? []).map((a: any) => a.value ?? a.description ?? '').join(' ').slice(0, 300)}`); });
+  page.on('Runtime.exceptionThrown', p => evidence.console.push(`${new Date().toISOString().slice(11, 23)} exception: ${(p.exceptionDetails?.exception?.description ?? p.exceptionDetails?.text ?? '').slice(0, 300)}`));
+  page.on('Network.requestWillBeSent', p => {
+    if (p.type === 'Document') evidence.currentDoc = p.loaderId; // a new page (document) starts
+    if (String(p.request.url).includes('/api/')) evidence.inflight.set(p.requestId, { url: p.request.url.replace(BASE, ''), method: p.request.method, t: Date.now(), doc: p.loaderId });
+  });
+  page.on('Network.responseReceived', p => { const r = evidence.inflight.get(p.requestId); if (r && p.response.status >= 400) evidence.failed.push(`${r.method} ${r.url} → HTTP ${p.response.status}`); });
+  page.on('Network.loadingFinished', p => evidence.inflight.delete(p.requestId));
+  page.on('Network.loadingFailed', p => { const r = evidence.inflight.get(p.requestId); if (r) { evidence.failed.push(`${r.method} ${r.url} → ${p.errorText}${p.canceled ? ' (canceled)' : ''}`); evidence.inflight.delete(p.requestId); } });
   // Log in the way the app does (tokens in localStorage), then load pages
   await page.send('Page.navigate', { url: `${BASE}/login` });
   await sleep(1500);
@@ -294,7 +361,8 @@ const setSelect = (label: string, value: string) => page!.eval(`(() => {
 const bodyText = () => page!.eval<string>('document.body.innerText');
 const waitText = async (pred: (t: string) => boolean, what: string) => {
   for (let i = 0; i < 60; i++) { if (pred(await bodyText())) return; await sleep(250); }
-  assert.fail(`timed out waiting for: ${what}
+  assert.fail(`timed out waiting for: ${what}${evidenceReport()}${await serverEvidence()}${await dbEvidence()}
+--- page text ---
 ${(await bodyText()).slice(0, 3000)}`);
 };
 
@@ -369,6 +437,211 @@ test('heartbeat stream in the browser: ICT stopped on PRD → server stays CONNE
 });
 
 
+test('live stream: after many page changes the server holds one live-stream connection for the tab (no leaked streams)', { skip: SKIP }, async () => {
+  for (const route of ['/overview', '/monitors', '/incidents', '/communications', '/reliability', '/backups', '/audit', '/overview', '/applications', '/communications']) {
+    await visit(route, 1366, '');
+  }
+  const clients = async () => ((await fetch(`${BASE}/api/health`).then(r => r.json())) as { realtimeClients: number }).realtimeClients;
+  await waitFor(async () => (await clients()) <= 1, `at most one live stream on the server (got ${await clients()})`, 10_000);
+  // …and the page is fully usable: a normal request completes quickly
+  const t0 = Date.now();
+  const status = await page!.eval<number>(`fetch('/api/health', { cache: 'no-store' }).then(r => r.status)`);
+  assert.equal(status, 200);
+  assert.ok(Date.now() - t0 < 3000, `request from the page took ${Date.now() - t0} ms`);
+});
+
+test('notifications page end to end: create a channel in the form, test send fails → delivery log (live), filters, resend, 24 h stats, delete', { skip: SKIP }, async () => {
+  const setInput = (selector: string, value: string) => page!.eval(`(() => {
+    const el = document.querySelector(${JSON.stringify(selector)});
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, ${JSON.stringify(value)});
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+  const click = (text: string, within = 'document') => page!.eval(`(() => {
+    const b = [...${within}.querySelectorAll('button')].find(x => x.textContent.trim() === ${JSON.stringify(text)});
+    if (!b) throw new Error('no button ' + ${JSON.stringify(text)});
+    b.click(); return true;
+  })()`);
+  const card = `[...document.querySelectorAll('div')].reverse().find(d => d.textContent.includes('UI test webhook') && d.querySelector('button') && [...d.querySelectorAll('button')].some(b => b.textContent.includes('SEND TEST')))`;
+
+  await visit('/communications', 1366, 'NOTIFICATION CHANNELS');
+  // 1. Create through the form (an https target nobody listens on: every delivery fails, quickly)
+  await click('Add channel');
+  await waitText(t => t.includes('New channel'), 'channel form');
+  await setInput('input[placeholder="e.g. Ops on-call Teams"]', 'UI test webhook');
+  await page!.eval(`(() => {
+    const s = [...document.querySelectorAll('select')].find(x => [...x.options].some(o => o.value === 'WEBHOOK'));
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, 'WEBHOOK');
+    s.dispatchEvent(new Event('change', { bubbles: true })); return true;
+  })()`);
+  const fillUrl = `(() => {
+    const el = [...document.querySelectorAll('input')].find(i => (i.placeholder || '').startsWith('https://'));
+    if (!el) return false;
+    if (el.value !== 'https://127.0.0.1:1/scholario-hook') {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, 'https://127.0.0.1:1/scholario-hook');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    const name = document.querySelector('input[placeholder="e.g. Ops on-call Teams"]');
+    return el.value === 'https://127.0.0.1:1/scholario-hook' && name && name.value === 'UI test webhook';
+  })()`;
+  await waitFor(async () => page!.eval<boolean>(fillUrl), 'channel form filled');
+  await sleep(300);
+  assert.equal(await page!.eval<boolean>(fillUrl), true, 'form values kept after re-render');
+  await click('Create channel');
+  await waitText(t => t.includes('UI test webhook'), 'channel card');
+  await waitText(t => t.includes('NOTIFICATIONS: 1 channel enabled'), 'header badge follows the live channel list');
+  await waitText(t => t.toUpperCase().includes('DELIVERY HEALTH') && t.includes('Success rate'.toUpperCase()) || t.toUpperCase().includes('SUCCESS RATE'), 'delivery health card');
+  await waitText(t => t.includes('Nothing sent yet') || t.includes('DELIVERY LOG') || t.includes('Delivery log'), 'delivery log section');
+
+  // 2. Test send: fails after retries; the log updates live (no reload)
+  await page!.eval(`${card}.querySelector('button[title="Send a test notification"]').click(), true`);
+  await waitFor(async () => /FAILED[\s\S]{0,40}3 attempts/.test(await bodyText()), 'failed test delivery in the log', 40_000);
+  let t = await bodyText();
+  assert.ok(t.includes('TEST'), 'type column');
+  assert.ok(t.includes('Scholario Ops test notification'), 'what was sent');
+
+  // 3. Filters
+  await setSelect('Filter by result', 'DELIVERED');
+  await waitText(x => x.includes('No deliveries match these filters'), 'no delivered rows');
+  await setSelect('Filter by result', 'FAILED');
+  await waitText(x => /FAILED[\s\S]{0,40}3 attempts/.test(x), 'failed rows back');
+
+  // 4. Resend → a second (failed) row marked as resend; 24 h stats on the card
+  await page!.eval(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Resend').click(), true`);
+  await waitFor(async () => (await bodyText()).includes('resend'), 'resend row', 40_000);
+  // At least these two failures (background alerts to this channel can add more)
+  await waitFor(async () => /0 delivered\s*·\s*([2-9]|\d{2,}) failed/.test(await bodyText()), '24 h stats on the card', 15_000);
+  // 4b. Read state. Other alerts can arrive meanwhile (the agents seeded for this file go stale), so the
+  // log is filtered to this test's TEST messages and the sidebar badge is checked relative to its value.
+  const LOG_ROWS = `table[aria-label="Notification delivery log"] tbody tr`;
+  const navBadge = `(() => { const a = [...document.querySelectorAll('aside button, aside a')].find(x => x.textContent.includes('Notifications')); const m = a && a.textContent.match(/Notifications\\s*(\\d+)/); return m ? Number(m[1]) : 0; })()`;
+  await setSelect('Filter by notification type', 'TEST');
+  await waitFor(async () => (await page!.eval<number>(`document.querySelectorAll('${LOG_ROWS}').length`)) === 2, 'two TEST deliveries');
+  assert.equal(await page!.eval<number>(`document.querySelectorAll('${LOG_ROWS}[data-unread="true"]').length`), 2, 'both start unread');
+  try {
+    await waitFor(async () => (await page!.eval<number>(navBadge)) >= 2, 'sidebar badge counts them');
+  } catch (e) {
+    const api = await page!.eval<string>(`fetch('/api/v1/notifications/unread-count', { headers: { Authorization: 'Bearer ' + localStorage.getItem('scholario_access_token') } }).then(r => r.status + ' ' + r.text())`);
+    const nav = await page!.eval<string>(`[...document.querySelectorAll('aside button, aside a')].find(x => x.textContent.includes('Notifications'))?.textContent ?? '(no nav item)'`);
+    throw new Error(`${(e as Error).message}
+unread-count API: ${api}
+sidebar item text: ${JSON.stringify(nav)}`);
+  }
+  const badgeBefore = await page!.eval<number>(navBadge);
+  await page!.eval(`document.querySelector('input[aria-label="Select all on this page"]').click(), true`);
+  await waitText(x => x.includes('2 selected'), 'bulk bar');
+  await page!.eval(`[...document.querySelectorAll('[role=toolbar] button')].find(b => b.textContent.includes('Mark read')).click(), true`);
+  await waitFor(async () => (await page!.eval<number>(`document.querySelectorAll('${LOG_ROWS}[data-unread="true"]').length`)) === 0, 'rows marked read');
+  await waitFor(async () => (await page!.eval<number>(navBadge)) < badgeBefore, 'badge went down');
+  await page!.eval(`document.querySelector('input[aria-label="Select all on this page"]').click(), true`);
+  await page!.eval(`[...document.querySelectorAll('[role=toolbar] button')].find(b => b.textContent.includes('Mark unread')).click(), true`);
+  await waitFor(async () => (await page!.eval<number>(`document.querySelectorAll('${LOG_ROWS}[data-unread="true"]').length`)) === 2, 'rows unread again');
+  await page!.eval(`document.querySelector('input[aria-label="Show unread only"]').click(), true`);
+  await waitFor(async () => (await page!.eval<number>(`document.querySelectorAll('${LOG_ROWS}').length`)) === 2, 'unread-only filter');
+  await click('Mark all read');
+  await waitText(x => x.includes('No deliveries match these filters'), 'nothing unread after mark all read');
+  await page!.eval(`document.querySelector('input[aria-label="Show unread only"]').click(), true`);
+  await waitFor(async () => (await page!.eval<number>(`document.querySelectorAll('${LOG_ROWS}').length`)) === 2, 'all rows back');
+  assert.equal(await page!.eval<number>(`document.querySelectorAll('${LOG_ROWS}[data-unread="true"]').length`), 0, 'read after mark all read');
+  await setSelect('Filter by notification type', '');
+
+  // 4c. Detail panel: open from the log, attempt history, Esc closes and focus returns to the row
+  await page!.eval(`[...document.querySelectorAll('table[aria-label="Notification delivery log"] tbody tr')].find(tr => tr.textContent.includes('Scholario Ops test notification')).querySelector('button[title^="Details:"]').click(), true`);
+  await waitFor(async () => page!.eval<boolean>(`!!document.querySelector('[role=dialog][aria-modal=true]')`), 'detail panel opened');
+  await waitText(x => x.toUpperCase().includes('ATTEMPTS ON THIS CHANNEL (') && x.includes('Not linked to an incident'), 'detail content');
+  t = await bodyText();
+  assert.ok(t.includes('Scholario Ops test notification'), 'message title in the panel');
+  assert.ok(/Failed · 3 attempts/.test(t), 'result with attempts');
+  assert.ok(t.includes('Test message sent by'), 'the message text that was sent');
+  assert.equal(await page!.eval<boolean>(`document.querySelector('[role=dialog]').contains(document.activeElement)`), true, 'focus moved into the panel');
+  await page!.eval(`document.querySelector('[role=dialog]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })), true`);
+  await waitFor(async () => page!.eval<boolean>(`!document.querySelector('[role=dialog][aria-modal=true]')`), 'Esc closes the panel');
+  await waitFor(async () => (await page!.eval<string>(`document.activeElement?.getAttribute('title') ?? ''`)).startsWith('Details:'), 'focus returned to the row that opened the panel');
+
+  // An incident-driven notification shows its incident and links to it
+  const inc = (await api('POST', '/api/v1/incidents', { title: 'Detail panel incident', severity: 'HIGH', environment: 'PRD' })).data as { id: string };
+  await waitFor(async () => (await bodyText()).includes(inc.id), 'incident notification in the log', 30_000);
+  await page!.eval(`[...document.querySelectorAll('tbody tr')].find(tr => tr.textContent.includes(${JSON.stringify(inc.id)})).querySelector('button[title^="Details:"]').click(), true`);
+  await waitText(x => x.includes(`${inc.id} · Detail panel incident`) && x.includes('Open incident'), 'incident context in the panel');
+  await page!.eval(`[...document.querySelectorAll('[role=dialog] button')].find(b => b.textContent.includes('Open incident')).click(), true`);
+  await waitFor(async () => (await page!.eval<string>('location.pathname + location.search')) === `/incidents?id=${inc.id}`, 'Open incident navigates to it');
+  await visit('/communications', 1366, 'NOTIFICATION CHANNELS');
+
+  await shot('notifications-delivery-log-1366');
+  const r = await page!.eval<{ problems: string[]; error?: string }>(CHECK('main'));
+  assert.deepEqual(r.problems, [], r.problems.join('\n'));
+  const html = await page!.eval<string>('document.documentElement.outerHTML');
+  assert.equal((html.match(/127\.0\.0\.1:1\/scholario-hook/g) ?? []).length <= 1, true, 'the target appears only on the admin channel card, never in the log');
+
+  // 5. Delete through the UI
+  await page!.eval(`[...${card}.querySelectorAll('button')].find(b => b.textContent.trim() === 'Delete').click(), true`);
+  await waitText(x => x.includes('Delete this channel?'), 'confirm delete');
+  await click('Delete');
+  await waitFor(async () => !(await bodyText()).includes('Delete this channel?') && (await page!.eval<boolean>(`!${card}`)), 'channel card removed');
+  t = await bodyText();
+  assert.ok(t.includes('UI test webhook'), 'the log keeps the history of a deleted channel');
+});
+
+test('escalation steps editor: add ordered steps, out-of-order is flagged, save persists them, remove clears', { skip: SKIP }, async () => {
+  const setValue = (selector: string, value: string) => page!.eval(`(() => {
+    const el = document.querySelector(${JSON.stringify(selector)});
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, ${JSON.stringify(value)});
+    el.dispatchEvent(new Event('input', { bubbles: true })); return true;
+  })()`);
+  const click = (text: string) => page!.eval(`(() => { const b = [...document.querySelectorAll('button')].find(x => x.textContent.trim() === ${JSON.stringify(text)}); if (!b) throw new Error('no button ' + ${JSON.stringify(text)} + ' — buttons on the page: ' + [...document.querySelectorAll('button')].map(x => x.textContent.trim()).filter(Boolean).slice(0, 40).join(' | ')); b.click(); return true; })()`);
+  const addStepOnHigh = `[...document.querySelectorAll('tr')].find(tr => tr.querySelector('td')?.textContent.trim() === 'HIGH').querySelector('button:not([aria-label])')`;
+  await visit('/communications', 1366, 'ESCALATION POLICIES');
+  await page!.eval(`[...[...document.querySelectorAll('tr')].find(tr => tr.querySelector('td')?.textContent.trim() === 'HIGH').querySelectorAll('button')].find(b => b.textContent.includes('Add step')).click(), true`);
+  await waitFor(async () => page!.eval<boolean>(`!!document.querySelector('input[aria-label="HIGH step 1 minutes"]')`), 'step 1 added');
+  await page!.eval(`[...[...document.querySelectorAll('tr')].find(tr => tr.querySelector('td')?.textContent.trim() === 'HIGH').querySelectorAll('button')].find(b => b.textContent.includes('Add step')).click(), true`);
+  await waitFor(async () => page!.eval<boolean>(`!!document.querySelector('input[aria-label="HIGH step 2 minutes"]')`), 'step 2 added');
+  await setValue('input[aria-label="HIGH step 2 minutes"]', '10');   // earlier than step 1 (15)
+  await waitText(x => x.includes('Must come later than step 1 (15 min)'), 'out-of-order step flagged');
+  await setValue('input[aria-label="HIGH step 2 minutes"]', '40');
+  await setValue('input[aria-label="HIGH step 2 team"]', 'Head of IT');
+  await waitText(x => !x.includes('Must come later than step 1'), 'warning cleared');
+  const saveIdle = `(() => { const b = [...document.querySelectorAll('button')].find(x => x.textContent.trim() === 'Save policies'); return !!b && b.disabled; })()`;
+  await click('Save policies');
+  await waitFor(async () => page!.eval<boolean>(saveIdle), 'first save finished (button back to idle)');
+  await waitFor(async () => {
+    const p = ((await api('GET', '/api/v1/escalation-policies')).data as Array<{ severity: string; steps?: Array<{ afterMin: number; label: string }> }>).find(x => x.severity === 'HIGH');
+    return JSON.stringify(p?.steps?.map(s => [s.afterMin, s.label])) === JSON.stringify([[15, ''], [40, 'Head of IT']]);
+  }, 'steps saved on the server');
+  // Remove both steps and save: back to no escalation
+  for (const n of [2, 1]) await page!.eval(`document.querySelector('button[aria-label="Remove HIGH step ${n}"]').click(), true`);
+  await waitFor(async () => page!.eval<boolean>(`!document.querySelector('input[aria-label="HIGH step 1 minutes"]') && [...document.querySelectorAll('button')].some(x => x.textContent.trim() === 'Save policies' && !x.disabled)`), 'steps removed in the editor, save enabled');
+  await click('Save policies');
+  await waitFor(async () => {
+    const p = ((await api('GET', '/api/v1/escalation-policies')).data as Array<{ severity: string; steps?: unknown[] }>).find(x => x.severity === 'HIGH');
+    return !p || !p.steps || p.steps.length === 0;
+  }, 'steps removed on the server');
+  void addStepOnHigh;
+
+  // Quiet hours: CRITICAL can never be held; WARNING gets a window in an explicit time zone
+  await waitFor(async () => page!.eval<boolean>(saveIdle), 'previous save finished (controls enabled again)');
+  const critCell = await page!.eval<string>(`[...document.querySelectorAll('tr')].find(tr => tr.querySelector('td')?.textContent.trim() === 'CRITICAL').textContent`);
+  assert.ok(critCell.includes('Never held'), 'CRITICAL shows "Never held"');
+  await page!.eval(`document.querySelector('input[aria-label="WARNING quiet hours"]').click(), true`);
+  await waitFor(async () => page!.eval<boolean>(`!!document.querySelector('input[aria-label="WARNING quiet hours start"]')`), 'quiet-hours fields shown');
+  await setValue('input[aria-label="WARNING quiet hours start"]', '21:30');
+  await setValue('input[aria-label="WARNING quiet hours end"]', '06:45');
+  await setValue('input[aria-label="WARNING quiet hours time zone"]', 'Asia/Kolkata');
+  await waitFor(async () => page!.eval<boolean>(`[...document.querySelectorAll('button')].some(x => x.textContent.trim() === 'Save policies' && !x.disabled)`), 'save enabled');
+  await click('Save policies');
+  await waitFor(async () => {
+    const p = ((await api('GET', '/api/v1/escalation-policies')).data as Array<{ severity: string; quietHours?: { enabled: boolean; start: string; end: string; timezone: string } }>).find(x => x.severity === 'WARNING');
+    return p?.quietHours?.enabled === true && p.quietHours.start === '21:30' && p.quietHours.end === '06:45' && p.quietHours.timezone === 'Asia/Kolkata';
+  }, 'quiet hours saved on the server');
+  await waitFor(async () => page!.eval<boolean>(saveIdle), 'save finished');
+  await page!.eval(`document.querySelector('input[aria-label="WARNING quiet hours"]').click(), true`);
+  await waitFor(async () => page!.eval<boolean>(`[...document.querySelectorAll('button')].some(x => x.textContent.trim() === 'Save policies' && !x.disabled)`), 'save enabled again');
+  await click('Save policies');
+  await waitFor(async () => {
+    const p = ((await api('GET', '/api/v1/escalation-policies')).data as Array<{ severity: string; quietHours?: { enabled: boolean } }>).find(x => x.severity === 'WARNING');
+    return !p || p.quietHours?.enabled === false;
+  }, 'quiet hours switched off on the server');
+});
+
 test('incident links: /incidents?id=… (the link in every notification) opens that incident, and the address keeps the id', { skip: SKIP }, async () => {
   const target = (await api('POST', '/api/v1/incidents', { title: 'Deep link test', severity: 'WARNING', environment: 'PRD' })).data as { id: string };
   await page!.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 1000, deviceScaleFactor: 1, mobile: false });
@@ -378,6 +651,13 @@ test('incident links: /incidents?id=… (the link in every notification) opens t
   assert.ok((await bodyText()).includes(target.id), 'the linked incident is the one shown');
   await sleep(1000);
   assert.equal(await page!.eval<string>('new URLSearchParams(location.search).get("id")'), target.id, 'the id stays in the address');
+
+  // In-app navigation to another incident while one is selected: the address wins (regression)
+  const other = (await api('POST', '/api/v1/incidents', { title: 'Deep link test 2', severity: 'WARNING', environment: 'PRD' })).data as { id: string };
+  await page!.eval(`history.pushState({}, '', ${JSON.stringify(`/incidents?id=${other.id}`)}); dispatchEvent(new PopStateEvent('popstate')); true`);
+  await waitFor(async () => (await page!.eval<string>('new URLSearchParams(location.search).get("id")')) === other.id && (await bodyText()).includes(other.id), 'second incident opened');
+  await sleep(800);
+  assert.equal(await page!.eval<string>('new URLSearchParams(location.search).get("id")'), other.id, 'not overwritten by the previous selection');
 });
 
 test('critical alerts in the browser: opt-in toggle, a new CRITICAL incident notifies once (not old ones), tab title count, click opens Incidents', { skip: SKIP }, async () => {

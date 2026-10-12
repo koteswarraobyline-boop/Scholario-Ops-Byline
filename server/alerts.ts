@@ -18,7 +18,7 @@ import crypto from 'crypto';
 import { Incident, IncidentSeverity } from '../src/types/index.ts';
 import { db, persist } from './store.ts';
 import { broadcast, audit } from './events.ts';
-import { notifyIncident } from './notify.ts';
+import { notifyIncident, CHANNEL_FAILING_AFTER } from './notify.ts';
 import { nextIncidentId } from './engine.ts';
 import { agentState, backupStatus, databaseHealth } from './health.ts';
 import { readiness } from './readiness.ts';
@@ -243,6 +243,16 @@ export function evaluateAlerts() {
     }
 
     evaluateInsightAlerts();
+
+    // Notification channels that keep failing: WARNING, so the other channels carry it (the failing one
+    // simply fails again). No error text in the incident: it could name the destination.
+    for (const ch of db.channels) {
+      const fp = `channel-failing:${ch.id}`;
+      if (ch.enabled && ch.failureCount >= CHANNEL_FAILING_AFTER) {
+        openAlert({ fingerprint: fp, title: `Notification channel "${ch.name}" is failing`, severity: 'WARNING', source: 'Notification Health',
+          detail: `${ch.failureCount} deliveries in a row failed (${ch.type}). Open Notifications → delivery log for the reason, fix the channel, then Send test.` });
+      } else if (ch.failureCount === 0 || !ch.enabled) resolveAlert(fp, 'Notification Health', `Channel "${ch.name}" ${ch.enabled ? 'is delivering again' : 'was disabled'}`);
+    }
 
     // Scholario Ops' own database backup (NOT_CONFIGURED never alerts)
     const ob = opsBackupHealth();

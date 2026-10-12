@@ -3,7 +3,7 @@ import {
   CommunicationChannel, EscalationPolicy, MaintenanceWindow, Runbook, Deployment, BackupRecord,
   IntegrationStatus, HttpProbeResult, TcpProbeResult, ServerMetricPoint, DrReadinessItem, OpsUser,
   LoadBalancerState, FailoverPreflight, DrOverall, CheckRecord, BackupStatus, DatabaseHealth, DatabaseReport, HostingerInfo,
-  ReliabilityInsights, OpsBackupHealth,
+  ReliabilityInsights, OpsBackupHealth, NotificationDelivery, NotificationDeliveryStats, NotificationDeliveryDetail, NotificationHealth,
 } from '../types';
 
 export interface HealthCheckResponse {
@@ -390,6 +390,22 @@ export const api = {
   getInsights: () => unwrap(api.get<ApiResponse<ReliabilityInsights>>('/api/v1/insights')),
   getOpsBackup: () => unwrap(api.get<ApiResponse<OpsBackupHealth>>('/api/v1/ops-backup')),
 
+  // ── Notification delivery log ───────────────────────────────────────────────
+  getNotificationDeliveries: (params: { page?: number; pageSize?: number; channelId?: string; result?: string; kind?: string; incidentId?: string; q?: string; unread?: boolean; sort?: 'newest' | 'oldest' } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') qs.set(k, String(v));
+    return api.get<PaginatedApiResponse<NotificationDelivery>>(`/api/v1/notifications/deliveries?${qs}`);
+  },
+  getNotificationHealth: () => unwrap(api.get<ApiResponse<NotificationHealth>>('/api/v1/notifications/health')),
+  getNotificationStats: () => unwrap(api.get<ApiResponse<NotificationDeliveryStats>>('/api/v1/notifications/stats')),
+  getNotificationDetail: (id: string) => unwrap(api.get<ApiResponse<NotificationDeliveryDetail>>(`/api/v1/notifications/deliveries/${encodeURIComponent(id)}`)),
+  getUnreadNotifications: () => unwrap(api.get<ApiResponse<{ unread: number; unreadFailed: number }>>('/api/v1/notifications/unread-count')),
+  markNotificationsRead: (ids: string[], read = true) => unwrap(api.post<ApiResponse<{ marked: number; read: boolean }>>('/api/v1/notifications/read', { ids, read })),
+  markAllNotificationsRead: () => unwrap(api.post<ApiResponse<{ unread: number; unreadFailed: number }>>('/api/v1/notifications/read-all')),
+  resendNotifications: (ids: string[]) => unwrap(api.post<ApiResponse<{ results: Array<{ id: string; ok: boolean; message: string }>; delivered: number; failed: number }>>('/api/v1/notifications/resend', { ids })),
+  resendNotification: (deliveryId: string) =>
+    unwrap(api.post<ApiResponse<{ delivered: boolean; deliveryId: string }>>(`/api/v1/notifications/deliveries/${encodeURIComponent(deliveryId)}/resend`)),
+
   // ── Realtime (Server-Sent Events) ───────────────────────────────────────────
   connectRealtimeStream(onEvent: (event: string, data: unknown) => void, onStatus?: (connected: boolean) => void): () => void {
     if (typeof window === 'undefined' || !window.EventSource) return () => {};
@@ -436,10 +452,27 @@ export const api = {
     };
     void connect();
 
+    // Leaving the page (navigation, tab discarded, back/forward cache) must close the stream.
+    // Otherwise the connection can stay open after the page is gone; browsers allow only 6
+    // connections per server over HTTP/1.1, so a few lingering streams queue every other request
+    // ("Saving…" / "Loading…" forever). A page restored from the back/forward cache reconnects.
+    const onPageHide = () => {
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      source?.close();
+      source = null;
+    };
+    const onPageShow = (e: PageTransitionEvent) => {
+      if (e.persisted && !closed && !source) { attempt = 0; void connect(); }
+    };
+    window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('pageshow', onPageShow);
+
     return () => {
       closed = true;
       if (retryTimer) clearTimeout(retryTimer);
       source?.close();
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('pageshow', onPageShow);
     };
   },
 };

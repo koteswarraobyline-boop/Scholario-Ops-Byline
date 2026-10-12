@@ -9,7 +9,9 @@ import { config, isCloudflareConfigured } from './config.ts';
 import { db, persist, liveMetrics, minuteMetrics, queueMetric, ServerRecord, MonitorBucket } from './store.ts';
 import { broadcast, audit } from './events.ts';
 import { httpProbe, tcpProbe, dnsProbe, sslProbe, parseHostPort } from './probes.ts';
-import { notifyIncident, notifyAll, escalateIncident } from './notify.ts';
+import { notifyIncident, notifyAll, escalateStep, policySteps, stopEscalation, NEVER_QUIET } from './notify.ts';
+import { isQuietTime } from '../src/lib/quietHours.ts';
+import { isNotificationWorker } from './leader.ts';
 import { switchDnsRecord } from './cloudflare.ts';
 import { log } from './logger.ts';
 import { applyExtendedReport, ExtendedAgentReport } from './telemetry.ts';
@@ -955,8 +957,24 @@ const engineProcessStart = Date.now();
 export function updateIncidentDurations() {
   const now = Date.now();
   const open = new Set<string>();
+  // Sending (delayed first pages, escalation steps, reminders) only on the process holding the lock
+  const worker = isNotificationWorker();
   for (const inc of db.incidents) {
-    if (inc.status === 'RESOLVED' || inc.status === 'CLOSED') continue;
+    // A notification held by quiet hours goes out once they are over (also for incidents resolved meanwhile)
+    if (inc.quietHeld && worker) {
+      const qp = db.escalationPolicies.find(p => p.severity === inc.severity)?.quietHours;
+      if (!isQuietTime(new Date(now), qp)) {
+        const held = inc.quietHeld;
+        inc.quietHeld = undefined;
+        persist();
+        const since = new Date(held.since).toISOString().slice(11, 16);
+        notifyIncident(inc, held.status, [held.extra, `Held during quiet hours (since ${since} UTC)`].filter(Boolean).join('\n'), { quietRelease: true });
+      }
+    }
+    if (inc.status === 'RESOLVED' || inc.status === 'CLOSED') {
+      if (inc.escalation?.nextAt) stopEscalation(inc, 'resolved');
+      continue;
+    }
     open.add(inc.id);
     inc.durationMinutes = Math.max(0, Math.round((now - Date.parse(inc.startedAt)) / 60000));
     // No reminders while the affected monitor is in a maintenance window
@@ -971,18 +989,24 @@ export function updateIncidentDurations() {
         inc.notificationDeferred = false;
         inc.timeline.push(timelineEvent('Escalation Policy', 'INFO', 'Acknowledged within the notification delay — nobody was paged'));
         persist();
-      } else if (!policy || ageMs >= policy.initialDelayMin * 60000) {
+      } else if (worker && (!policy || ageMs >= policy.initialDelayMin * 60000)) {
         lastNotifiedAt.set(inc.id, now);
         notifyIncident(inc, 'FIRING', undefined, { afterDelay: true });
       }
       continue;
     }
-    // Escalation: still unacknowledged after autoEscalateAfterMin (once per incident)
-    if (policy && policy.autoEscalateAfterMin > 0 && !inc.acknowledged && !inc.escalatedAt && ageMs >= policy.autoEscalateAfterMin * 60000) {
-      escalateIncident(inc, policy);
-    }
+    if (inc.acknowledged) { if (inc.escalation?.nextAt) stopEscalation(inc, 'acknowledged'); continue; }
+    if (!policy || !worker) continue;
+    // Quiet hours (non-critical): escalation steps and reminders wait until they are over
+    if (policy.quietHours && !NEVER_QUIET.includes(inc.severity) && isQuietTime(new Date(now), policy.quietHours)) continue;
+    // Multi-step escalation: the next step runs once its time has come (the counter is durable, so a
+    // restart never repeats a step). Incidents escalated before steps existed count as one step done.
+    const steps = policySteps(policy);
+    const done = inc.escalation?.stepsDone ?? (inc.escalatedAt ? 1 : 0);
+    const next = steps[done];
+    if (next && ageMs >= next.afterMin * 60000) escalateStep(inc, steps, done);
     // Repeat notification for unacknowledged incidents according to the escalation policy
-    if (policy && !inc.acknowledged && policy.repeatIntervalMin > 0) {
+    if (policy.repeatIntervalMin > 0) {
       // After a restart the first reminder waits a full interval (no re-page of every open incident on deploy)
       const last = lastNotifiedAt.get(inc.id) ?? Math.max(Date.parse(inc.startedAt), engineProcessStart);
       if (now - last >= policy.repeatIntervalMin * 60000) {

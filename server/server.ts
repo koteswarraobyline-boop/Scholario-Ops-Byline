@@ -20,6 +20,9 @@ import { config, isCloudflareConfigured, isHostingerConfigured, DATA_DIR } from 
 import { initStore, flush, flushMetrics } from './store.ts';
 import { closePool, query, SCHEMA } from './db.ts';
 import { startHistory, flushChecks } from './history.ts';
+import { startDeliveryLog, flushDeliveries } from './deliveries.ts';
+import { startLeaderElection, releaseLeadership } from './leader.ts';
+import { restoreNotificationMemory, flushNotificationGroups } from './notify.ts';
 import { bootstrapAdmin } from './auth.ts';
 import { buildRouter } from './routes.ts';
 import { startEngine, stopEngine, engineLiveness } from './engine.ts';
@@ -112,6 +115,11 @@ const localUiSafeMode = process.env.LOCAL_UI_SAFE_MODE === 'true';
 
 function startBackgroundWork() {
   startHistory();
+  startDeliveryLog();
+  // One process sends escalations / reminders (advisory lock); duplicate protection survives restarts
+  startLeaderElection();
+  void restoreNotificationMemory().then(n => { if (n) log.info('notify', `restored duplicate protection for ${n} recent alert(s) from the delivery log`); })
+    .catch(err => log.error('notify', 'could not restore duplicate protection', { error: err as Error }));
   bootstrapAdmin();
   startEngine();
   // Cloudflare Load Balancer pools + pool health (read-only). Runs even without a token so the
@@ -293,11 +301,12 @@ async function main() {
     log.info('server', `${signal} received — finishing requests, saving data, closing connections`);
     closeAllSseClients();
     stopEngine();
+    flushNotificationGroups(); // grouped alerts waiting for their summary go out now
     server.close();
     server.closeIdleConnections?.();
     const shutdownWork = localUiSafeMode
       ? closePool()
-      : Promise.allSettled([flush(), flushMetrics(), flushChecks()]).then(() => closePool());
+      : Promise.allSettled([flush(), flushMetrics(), flushChecks(), flushDeliveries(), releaseLeadership()]).then(() => closePool());
     void shutdownWork
       .then(() => log.info('server', 'shutdown complete'))
       .finally(() => process.exit(0));

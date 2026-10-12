@@ -15,7 +15,10 @@ const require = createRequire(import.meta.url);
 const env = require('dotenv').config({ quiet: true }).parsed ?? {};
 
 const target = process.argv[2] ?? 'scholario_ops_ui_test';
-const base = new URL(process.env.DATABASE_URL ?? env.DATABASE_URL ?? '');
+// An empty DATABASE_URL in the environment counts as unset (falls back to .env)
+const rawUrl = process.env.DATABASE_URL || env.DATABASE_URL || '';
+let base;
+try { base = new URL(rawUrl); } catch { console.error('STOP: DATABASE_URL is missing or not a valid URL (set it in .env).'); process.exit(2); }
 if (!['localhost', '127.0.0.1', '::1', '[::1]'].includes(base.hostname)) {
   console.error(`STOP: DATABASE_URL points at ${base.hostname}; the copy must be on this machine.`);
   process.exit(2);
@@ -23,7 +26,7 @@ if (!['localhost', '127.0.0.1', '::1', '[::1]'].includes(base.hostname)) {
 const url = new URL(base);
 url.pathname = `/${target}`;
 
-console.log(`Local app on copy "${target}" — Cloudflare, Hostinger, SMTP and public URL disabled for this run.`);
+console.log(`Local app on copy "${target}" (127.0.0.1 only) — Cloudflare, Hostinger, SMTP and public URL disabled for this run.`);
 const child = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts', '--dev'], {
   stdio: 'inherit',
   env: {
@@ -36,6 +39,7 @@ const child = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts', '-
     PUBLIC_URL: '',
     DEPLOY_REPORT_TOKEN: '',
     LOCAL_UI_SAFE_MODE: 'true',
+    HOST: '127.0.0.1', // this machine only, whatever .env says
   },
 });
 child.on('exit', code => process.exit(code ?? 0));

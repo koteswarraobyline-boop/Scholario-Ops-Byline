@@ -17,6 +17,20 @@ import {
 import { DATA_DIR, config } from './config.ts';
 import { query, withTransaction, migrate, T } from './db.ts';
 import { log } from './logger.ts';
+import { sealSecret, openSecret, isSealed, noteEncryptedData } from './secrets.ts';
+
+/**
+ * Encrypts for storage. Without a usable key (lost key file) the value is written exactly as it is
+ * in memory: stored ciphertext stays ciphertext, and nothing new can arrive in plaintext because
+ * channel saves are refused while the key is missing (routes).
+ */
+let sealWarned = false;
+function sealOrKeep(v: string): string {
+  try { return sealSecret(v); } catch (err) {
+    if (!sealWarned) { sealWarned = true; log.error('secrets', `channel secrets cannot be encrypted: ${(err as Error).message}`); }
+    return v;
+  }
+}
 
 export interface ServerRecord extends VpsServer {
   /** Secret the telemetry agent uses to authenticate. Never sent to the browser. */
@@ -263,7 +277,16 @@ const TABLES: TableDef<unknown>[] = [
         .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
     },
   },
-  docTable('channels', 'channels'),
+  // Channel targets (webhook URLs, PagerDuty keys, recipients) are encrypted at rest (server/secrets.ts)
+  {
+    table: 'channels', key: ['id'], columns: ['id', 'data'],
+    rows: d => d.channels.map(c => ({ k: c.id, values: [c.id, JSON.stringify({ ...c, targetEndpoint: sealOrKeep(c.targetEndpoint) })] })),
+    load: (rows, d) => {
+      const list = rows.map(r => r.data as CommunicationChannel);
+      if (list.some(c => isSealed(c.targetEndpoint))) noteEncryptedData(); // a missing key is then a lost key
+      d.channels = list.map(c => ({ ...c, targetEndpoint: openSecret(c.targetEndpoint) }));
+    },
+  },
   docTable('escalation_policies', 'escalationPolicies'),
   docTable('maintenance_windows', 'maintenanceWindows'),
   docTable('runbooks', 'runbooks'),

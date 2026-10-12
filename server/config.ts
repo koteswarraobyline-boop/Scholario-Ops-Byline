@@ -69,6 +69,8 @@ export const config = {
   /** Agent reports whose timestamp differs from server time by more than this are rejected */
   agentMaxClockSkewSec: int('AGENT_MAX_CLOCK_SKEW_SEC', 300, 30),
   checkHistoryRetentionDays: int('CHECK_HISTORY_RETENTION_DAYS', 90, 1),
+  /** Notification delivery log (Notifications page) */
+  notificationLogRetentionDays: int('NOTIFICATION_LOG_RETENTION_DAYS', 90, 1),
 
   /** Default thresholds (applications can override per environment in Setup) */
   backupMaxAgeHours: int('BACKUP_MAX_AGE_HOURS', 26, 1),
@@ -81,6 +83,10 @@ export const config = {
   alertCooldownMin: int('ALERT_COOLDOWN_MIN', 15, 0),
   /** Optional: signs outgoing WEBHOOK notifications (X-Scholario-Signature, HMAC-SHA256) so receivers can verify them */
   notifyWebhookSecret: str('NOTIFY_WEBHOOK_SECRET'),
+  /** Hostnames / IPs / CIDRs that notification webhooks may reach although they are private or loopback (never link-local) */
+  notifyAllowedPrivateTargets: str('NOTIFY_ALLOWED_PRIVATE_TARGETS'),
+  /** Non-critical alerts for one application within this many seconds of the first are sent as one summary (0 = off) */
+  notifyGroupWindowSec: int('NOTIFY_GROUP_WINDOW_SEC', 60, 0),
   /** API requests per IP per minute (agents and heartbeats are exempt — they use their own tokens) */
   apiRateLimitPerMin: int('API_RATE_LIMIT_PER_MIN', 600, 10),
 
