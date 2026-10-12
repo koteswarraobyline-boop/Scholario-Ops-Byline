@@ -108,6 +108,8 @@ async function waitForStore() {
   }
 }
 
+const localUiSafeMode = process.env.LOCAL_UI_SAFE_MODE === 'true';
+
 function startBackgroundWork() {
   startHistory();
   bootstrapAdmin();
@@ -293,8 +295,10 @@ async function main() {
     stopEngine();
     server.close();
     server.closeIdleConnections?.();
-    void Promise.allSettled([flush(), flushMetrics(), flushChecks()])
-      .then(() => closePool())
+    const shutdownWork = localUiSafeMode
+      ? closePool()
+      : Promise.allSettled([flush(), flushMetrics(), flushChecks()]).then(() => closePool());
+    void shutdownWork
       .then(() => log.info('server', 'shutdown complete'))
       .finally(() => process.exit(0));
     setTimeout(() => { log.warn('server', 'shutdown timed out — exiting'); process.exit(0); }, 8000).unref();
@@ -307,8 +311,12 @@ async function main() {
   await waitForStore();
   if (shuttingDown) return;
   storeReady = true;
-  startBackgroundWork();
-  log.info('server', 'ready — database loaded, monitoring started');
+  if (localUiSafeMode) {
+    log.info('server', 'ready — UI-safe mode; background monitoring disabled');
+  } else {
+    startBackgroundWork();
+    log.info('server', 'ready — database loaded, monitoring started');
+  }
 }
 
 // A bug in one async path must not take monitoring down silently
