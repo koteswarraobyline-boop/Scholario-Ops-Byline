@@ -49,14 +49,16 @@ export const ReliabilityView: React.FC = () => {
   const label = `text-[10px] uppercase font-mono ${muted}`;
   const sectionTitle = `text-xs font-bold font-mono tracking-wider uppercase ${isDark ? 'text-slate-300' : 'text-slate-700'}`;
 
-  const ForecastRow: React.FC<{ icon: React.ElementType; name: string; f: InsightForecast | null }> = ({ icon: Icon, name, f }) => {
+  const ForecastRow: React.FC<{ icon: React.ElementType; name: string; f: InsightForecast | null; online: boolean }> = ({ icon: Icon, name, f, online }) => {
     const Trend = !f ? Minus : f.slopePerDay > 0.05 ? TrendingUp : f.slopePerDay < -0.05 ? TrendingDown : Minus;
     const soon = f?.etaHours !== null && f?.etaHours !== undefined && f.etaHours <= 72;
     return (
       <div className="flex items-center justify-between gap-2 text-xs font-mono py-1.5">
         <span className={`flex items-center gap-1.5 min-w-0 ${muted}`}><Icon className="w-3.5 h-3.5 shrink-0" />{name}</span>
         {!f ? (
-          <span className={`text-[11px] ${muted}`} title="Needs at least 6 hours of per-minute metrics from the agent">collecting data…</span>
+          online
+            ? <span className={`text-[11px] ${muted}`} title="Needs at least 6 hours of per-minute metrics from the agent">collecting data…</span>
+            : <span className="text-[11px] text-amber-500" title="No forecast without live agent metrics">agent not reporting</span>
         ) : (
           <span className="flex items-center gap-2 shrink-0 tabular-nums">
             <span className={isDark ? 'text-slate-200' : 'text-slate-800'}>{f.current}%</span>
@@ -175,8 +177,8 @@ export const ReliabilityView: React.FC = () => {
                       </span>
                     </div>
                     <div className={`divide-y ${isDark ? 'divide-[#1A2332]' : 'divide-slate-100'}`}>
-                      <ForecastRow icon={HardDrive} name="Disk" f={s.disk} />
-                      <ForecastRow icon={MemoryStick} name="Memory" f={s.memory} />
+                      <ForecastRow icon={HardDrive} name="Disk" f={s.disk} online={s.agentState === 'ONLINE'} />
+                      <ForecastRow icon={MemoryStick} name="Memory" f={s.memory} online={s.agentState === 'ONLINE'} />
                     </div>
                   </div>
                 ))}

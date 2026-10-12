@@ -1,29 +1,36 @@
-import React from 'react';
+import React, { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { OpsProvider, useOps } from './context/OpsContext';
+
 import { Shell } from './components/layout/Shell';
 import { LoginPage } from './components/auth/LoginPage';
+import { ViewErrorBoundary } from './components/ui/ViewErrorBoundary';
+import { OverviewView } from './components/overview/OverviewView';
 
-import { OverviewView }      from './components/overview/OverviewView';
-import { ApplicationsView }  from './components/applications/ApplicationsView';
-import { InfrastructureView} from './components/infrastructure/InfrastructureView';
-import { MonitorsView }      from './components/monitors/MonitorsView';
-import { IncidentsView }     from './components/incidents/IncidentsView';
-import { DrDashboardView }   from './components/resilience/DrDashboardView';
-import { BackupsView }       from './components/resilience/BackupsView';
-import { DependencyMapView } from './components/resilience/DependencyMapView';
-import { HostingerView }     from './components/providers/HostingerView';
-import { CloudflareView }    from './components/providers/CloudflareView';
-import { DeploymentsView }   from './components/operations/DeploymentsView';
-import { RunbooksView }      from './components/operations/RunbooksView';
-import { MaintenanceView }   from './components/operations/MaintenanceView';
-import { CommunicationsView} from './components/communications/CommunicationsView';
-import { ReportsView }       from './components/analytics/ReportsView';
-import { ReliabilityView }   from './components/analytics/ReliabilityView';
-import { AuditLogsView }     from './components/admin/AuditLogsView';
-import { UsersView }         from './components/admin/UsersView';
-import { SetupView }         from './components/setup/SetupView';
+// Pages load on demand (Overview, the landing page, ships in the main bundle)
+const ApplicationsView = lazy(() => import('./components/applications/ApplicationsView').then(m => ({ default: m.ApplicationsView })));
+const InfrastructureView = lazy(() => import('./components/infrastructure/InfrastructureView').then(m => ({ default: m.InfrastructureView })));
+const MonitorsView = lazy(() => import('./components/monitors/MonitorsView').then(m => ({ default: m.MonitorsView })));
+const IncidentsView = lazy(() => import('./components/incidents/IncidentsView').then(m => ({ default: m.IncidentsView })));
+const DrDashboardView = lazy(() => import('./components/resilience/DrDashboardView').then(m => ({ default: m.DrDashboardView })));
+const BackupsView = lazy(() => import('./components/resilience/BackupsView').then(m => ({ default: m.BackupsView })));
+const DependencyMapView = lazy(() => import('./components/resilience/DependencyMapView').then(m => ({ default: m.DependencyMapView })));
+const HostingerView = lazy(() => import('./components/providers/HostingerView').then(m => ({ default: m.HostingerView })));
+const CloudflareView = lazy(() => import('./components/providers/CloudflareView').then(m => ({ default: m.CloudflareView })));
+const DeploymentsView = lazy(() => import('./components/operations/DeploymentsView').then(m => ({ default: m.DeploymentsView })));
+const RunbooksView = lazy(() => import('./components/operations/RunbooksView').then(m => ({ default: m.RunbooksView })));
+const MaintenanceView = lazy(() => import('./components/operations/MaintenanceView').then(m => ({ default: m.MaintenanceView })));
+const CommunicationsView = lazy(() => import('./components/communications/CommunicationsView').then(m => ({ default: m.CommunicationsView })));
+const ReportsView = lazy(() => import('./components/analytics/ReportsView').then(m => ({ default: m.ReportsView })));
+const ReliabilityView = lazy(() => import('./components/analytics/ReliabilityView').then(m => ({ default: m.ReliabilityView })));
+const AuditLogsView = lazy(() => import('./components/admin/AuditLogsView').then(m => ({ default: m.AuditLogsView })));
+const UsersView = lazy(() => import('./components/admin/UsersView').then(m => ({ default: m.UsersView })));
+const SetupView = lazy(() => import('./components/setup/SetupView').then(m => ({ default: m.SetupView })));
+
+const ViewLoading: React.FC = () => (
+  <div className="text-xs font-mono text-slate-500 animate-pulse p-2">Loading…</div>
+);
 
 // ── Protected Route ──────────────────────────────────────────────────────────
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -75,7 +82,13 @@ const DashboardView: React.FC<{ tab: string }> = ({ tab }) => {
     users:          <UsersView />,
   };
 
-  return <Shell>{viewMap[tab] ?? <OverviewView />}</Shell>;
+  return (
+    <Shell>
+      <ViewErrorBoundary resetKey={tab}>
+        <Suspense fallback={<ViewLoading />}>{viewMap[tab] ?? <OverviewView />}</Suspense>
+      </ViewErrorBoundary>
+    </Shell>
+  );
 };
 
 // ── App root ─────────────────────────────────────────────────────────────────

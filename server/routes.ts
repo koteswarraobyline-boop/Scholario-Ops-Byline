@@ -10,7 +10,7 @@ import { config, isCloudflareConfigured, isHostingerConfigured, isSmtpConfigured
 import { db, persist, flush, liveMetrics, minuteMetrics, deleteServerMetrics, ServerRecord, UserRecord } from './store.ts';
 import { broadcast, audit, addSseClient } from './events.ts';
 import {
-  requireAuth, requireRole, operatorName, hashPassword, verifyPassword, validatePasswordStrength, issueTokens,
+  requireAuth, requireRole, operatorName, hashPasswordAsync, verifyPassword, validatePasswordStrength, issueTokens,
   consumeRefreshToken, revokeRefreshToken, safeUser, loginRateLimited, recordLoginFailure, clearLoginFailures, dummyPasswordHash, ROLES, Role, issueStreamTicket,
 } from './auth.ts';
 import {
@@ -34,6 +34,7 @@ import { readiness, failoverPreflight, applicationAvailability } from './readine
 import { readChecks } from './history.ts';
 import { backupStatus, databaseHealth, agentState } from './health.ts';
 import { reliabilityInsights } from './insights.ts';
+import { opsBackupHealth } from './opsBackup.ts';
 import { notificationStatus } from './alerts.ts';
 import { log } from './logger.ts';
 
@@ -495,7 +496,7 @@ export function buildRouter(): Router {
   r.get('/health', health);
 
   // ── Public: auth ───────────────────────────────────────────────────────────
-  r.post('/auth/login', h((req, res) => {
+  r.post('/auth/login', h(async (req, res) => {
     const b = body(req);
     const email = String(b.email ?? '').trim().toLowerCase();
     const password = String(b.password ?? '');
@@ -508,7 +509,7 @@ export function buildRouter(): Router {
     if (!email || !password) return fail(res, 400, 'Email and password are required');
     const user = db.users.find(u => u.email === email);
     // Unknown accounts take as long as known ones (no account enumeration by timing)
-    const passwordOk = user ? verifyPassword(password, user.passwordHash) : (verifyPassword(password, dummyPasswordHash()), false);
+    const passwordOk = user ? await verifyPassword(password, user.passwordHash) : (await verifyPassword(password, dummyPasswordHash()), false);
     if (!user || !user.isActive || !passwordOk) {
       recordLoginFailure(ipKey);
       recordLoginFailure(acctKey);
@@ -696,17 +697,17 @@ export function buildRouter(): Router {
 
   r.get('/auth/me', (req, res) => { ok(res, safeUser(req.user!)); });
 
-  r.post('/auth/change-password', h((req, res) => {
+  r.post('/auth/change-password', h(async (req, res) => {
     const b = body(req);
     const user = req.user!;
     // A stolen access token must not allow guessing the current password without limit
     const pwKey = `pwchange:${user.id}`;
     if (loginRateLimited(pwKey)) return fail(res, 429, 'Too many attempts. Try again in 15 minutes.');
-    if (!verifyPassword(String(b.currentPassword ?? ''), user.passwordHash)) { recordLoginFailure(pwKey); return fail(res, 400, 'Current password is incorrect'); }
+    if (!(await verifyPassword(String(b.currentPassword ?? ''), user.passwordHash))) { recordLoginFailure(pwKey); return fail(res, 400, 'Current password is incorrect'); }
     clearLoginFailures(pwKey);
     const err = validatePasswordStrength(String(b.newPassword ?? ''));
     if (err) return fail(res, 400, err);
-    user.passwordHash = hashPassword(String(b.newPassword));
+    user.passwordHash = await hashPasswordAsync(String(b.newPassword));
     user.tokenVersion += 1;
     db.refreshTokens = db.refreshTokens.filter(t => t.userId !== user.id);
     persist();
@@ -1252,7 +1253,10 @@ export function buildRouter(): Router {
     const ch = db.channels.find(c => c.id === req.params.id);
     if (!ch) return fail(res, 404, 'Channel not found');
     db.channels = db.channels.filter(c => c.id !== ch.id);
-    for (const p of db.escalationPolicies) p.channels = p.channels.filter(id => id !== ch.id);
+    for (const p of db.escalationPolicies) {
+      p.channels = p.channels.filter(id => id !== ch.id);
+      if (p.escalationChannels) p.escalationChannels = p.escalationChannels.filter(id => id !== ch.id);
+    }
     persist();
     audit(operatorName(req), 'CHANNEL_DELETED', 'NOTIFICATION', ch.id, ch.name);
     broadcast('channels_changed', null);
@@ -1282,6 +1286,8 @@ export function buildRouter(): Router {
       const severity = oneOf(b, 'severity', 'Severity', SEVERITIES);
       const channels = strArray(b, 'channels', 'Channels') ?? [];
       if (channels.some(id => !db.channels.some(c => c.id === id))) throw new ValidationError('Policy references an unknown channel');
+      const escalationChannels = strArray(b, 'escalationChannels', 'Escalation channels') ?? [];
+      if (escalationChannels.some(id => !db.channels.some(c => c.id === id))) throw new ValidationError('Policy references an unknown escalation channel');
       return {
         id: optStr(b, 'id', 'id', 64) || crypto.randomUUID(),
         severity,
@@ -1290,6 +1296,7 @@ export function buildRouter(): Router {
         repeatIntervalMin: optInt(b, 'repeatIntervalMin', 'Repeat interval', 0, 1440) ?? 0,
         autoEscalateAfterMin: optInt(b, 'autoEscalateAfterMin', 'Auto-escalate', 0, 1440) ?? 0,
         escalateToTeam: optStr(b, 'escalateToTeam', 'Escalate to', 120) ?? '',
+        escalationChannels,
       };
     });
     if (new Set(policies.map(p => p.severity)).size !== policies.length) return fail(res, 400, 'Only one policy per severity is allowed');
@@ -1426,6 +1433,8 @@ export function buildRouter(): Router {
   // ── Deployments & backups (read; written by CI / agents above) ─────────────
   r.get('/v1/deployments', (req, res) => { res.json(paginate(req, db.deployments, 200)); });
   r.get('/v1/backups/status', (_req, res) => { ok(res, db.applications.map(a => backupStatus(a))); });
+  // Scholario Ops' own database backup + restore test (status files written by deploy/backup-db.sh / verify-backup.sh)
+  r.get('/v1/ops-backup', (_req, res) => { ok(res, opsBackupHealth()); });
   // `data` keeps its original shape (a list); `summary` is an additive sibling
   r.get('/v1/health/databases', (_req, res) => {
     const rows = db.applications.flatMap(a => (['PRD', 'DR'] as const).map(env => {
@@ -1537,7 +1546,7 @@ export function buildRouter(): Router {
 
   // ── Users ──────────────────────────────────────────────────────────────────
   r.get('/v1/users', requireRole('it_administrator'), (req, res) => { res.json(paginate(req, db.users.map(safeUser), 100)); });
-  r.post('/v1/users', requireRole('it_administrator'), h((req, res) => {
+  r.post('/v1/users', requireRole('it_administrator'), h(async (req, res) => {
     const b = body(req);
     const email = reqStr(b, 'email', 'Email', 254).toLowerCase();
     if (!isEmail(email)) return fail(res, 400, 'Email is not valid');
@@ -1558,7 +1567,7 @@ export function buildRouter(): Router {
       isOnCall: optBool(b, 'isOnCall') ?? false,
       createdAt: nowIso(),
       lastLoginAt: null,
-      passwordHash: hashPassword(password),
+      passwordHash: await hashPasswordAsync(password),
       tokenVersion: 0,
     };
     db.users.push(user);
@@ -1566,7 +1575,7 @@ export function buildRouter(): Router {
     audit(operatorName(req), 'USER_CREATED', 'USER', user.id, `${email} as ${roleName}`);
     ok(res, safeUser(user), 201);
   }));
-  r.patch('/v1/users/:id', requireRole('it_administrator'), h((req, res) => {
+  r.patch('/v1/users/:id', requireRole('it_administrator'), h(async (req, res) => {
     const user = db.users.find(u => u.id === req.params.id);
     if (!user) return fail(res, 404, 'User not found');
     const b = body(req);
@@ -1590,7 +1599,7 @@ export function buildRouter(): Router {
     if (b.password !== undefined) {
       const pwErr = validatePasswordStrength(String(b.password));
       if (pwErr) return fail(res, 400, pwErr);
-      user.passwordHash = hashPassword(String(b.password));
+      user.passwordHash = await hashPasswordAsync(String(b.password));
       user.tokenVersion += 1;
     }
     persist();

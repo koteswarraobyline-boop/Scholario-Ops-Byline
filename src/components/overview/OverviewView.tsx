@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { THRESHOLDS } from '../../lib/thresholds';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
+import { SinceLastUpdate } from '../ui/SinceLastUpdate';
 import { useAuth } from '../../context/AuthContext';
 import { api } from '../../services/api';
 import { OperationalStatus, ServerMetricPoint } from '../../types';
@@ -117,7 +118,7 @@ const MetricCard: React.FC<MetricCardProps> = ({
 export const OverviewView: React.FC = () => {
   const {
     applications, servers, monitors, runbooks, cloudflareZones, deadMan, integrations, systemSummary,
-    lastUpdatedSecondsAgo, setSelectedAppId, setSelectedIncidentId, incidents, runAllProbes, theme,
+    setSelectedAppId, setSelectedIncidentId, incidents, runAllProbes, theme,
     apiHealth, isLoading, loadError, refreshAll, realtimeStatus, loadBalancer,
   } = useOps();
   const { canDo } = useAuth();
@@ -303,7 +304,7 @@ export const OverviewView: React.FC = () => {
         </div>
         <p className={`text-[11px] mt-1 flex items-center gap-2 font-mono flex-wrap ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
           <Clock className="w-3 h-3" />
-          <span>Last update {lastUpdatedSecondsAgo}s ago</span>
+          <span>Last update <SinceLastUpdate /></span>
           {systemSummary.visibilityGaps.length > 0 && (
             <>
               <span className={isDark ? 'text-slate-700' : 'text-slate-300'}>·</span>

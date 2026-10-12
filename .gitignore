@@ -11,3 +11,7 @@ data/
 backups/
 logs/
 .last-good-commit
+
+# Database dumps and file backups may contain production data (users, tokens): never commit them
+*.dump
+*.bak

@@ -53,7 +53,8 @@ interface OpsContextType {
   setSelectedRunbookId: (id: string | null) => void;
   isCommandPaletteOpen: boolean;
   setIsCommandPaletteOpen: (open: boolean) => void;
-  lastUpdatedSecondsAgo: number;
+  /** Time of the last realtime event or refresh. A ref: reading it never re-renders the app (see ui/SinceLastUpdate) */
+  lastEventAtRef: React.RefObject<number>;
 
   // Incidents
   acknowledgeIncident: (incidentId: string) => Promise<boolean>;
@@ -223,10 +224,29 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [selectedServerId, setSelectedServerId] = useState<string | null>(null);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [selectedRunbookId, setSelectedRunbookId] = useState<string | null>(null);
+  // The open incident is part of the address (/incidents?id=INC-1042): links in Teams / email /
+  // PagerDuty notifications open it directly, and the URL can be shared
+  useEffect(() => {
+    if (location.pathname !== '/incidents') return;
+    const fromUrl = new URLSearchParams(location.search).get('id');
+    if (fromUrl) setSelectedIncidentId(prev => (prev === fromUrl ? prev : fromUrl));
+  }, [location.pathname, location.search]);
+  const syncedIncidentId = useRef<string | null>(null);
+  useEffect(() => {
+    if (location.pathname !== '/incidents') return;
+    const params = new URLSearchParams(location.search);
+    const urlId = params.get('id');
+    if (urlId === selectedIncidentId) { syncedIncidentId.current = urlId; return; }
+    // A link just opened: the effect above applies it, do not strip it before that happened
+    if (!selectedIncidentId && urlId && syncedIncidentId.current !== urlId) return;
+    syncedIncidentId.current = selectedIncidentId;
+    if (selectedIncidentId) params.set('id', selectedIncidentId); else params.delete('id');
+    const qs = params.toString();
+    navigate({ pathname: '/incidents', search: qs ? `?${qs}` : '' }, { replace: true });
+  }, [selectedIncidentId, location.pathname]);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isAddMonitorModalOpen, setIsAddMonitorModalOpen] = useState(false);
   const [addMonitorInitialContext, setAddMonitorInitialContext] = useState<{ applicationId?: string; serverId?: string; defaultType?: MonitorType } | null>(null);
-  const [lastUpdatedSecondsAgo, setLastUpdatedSecondsAgo] = useState(0);
   const lastEventAt = useRef(Date.now());
 
   const [apiHealth, setApiHealth] = useState<OpsContextType['apiHealth']>({
@@ -341,8 +361,13 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   useEffect(() => {
     void refreshAll();
     void triggerHealthCheck();
-    const healthTimer = setInterval(triggerHealthCheck, 15_000);
-    const summaryTimer = setInterval(refreshSummary, 15_000);
+    // Polling pauses while the tab is hidden (the realtime stream keeps the data current) and
+    // catches up as soon as the tab is visible again
+    const visible = () => typeof document === 'undefined' || !document.hidden;
+    const healthTimer = setInterval(() => { if (visible()) void triggerHealthCheck(); }, 15_000);
+    const summaryTimer = setInterval(() => { if (visible()) void refreshSummary(); }, 15_000);
+    const onVisible = () => { if (visible()) { void triggerHealthCheck(); void refreshSummary(); } };
+    document.addEventListener('visibilitychange', onVisible);
     let firstConnect = true;
 
     const unsubscribe = api.connectRealtimeStream((event, raw) => {
@@ -398,6 +423,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return () => {
       clearInterval(healthTimer);
       clearInterval(summaryTimer);
+      document.removeEventListener('visibilitychange', onVisible);
       unsubscribe();
       Object.values(pending.current).forEach(clearTimeout);
     };
@@ -415,10 +441,6 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (!apiHealth.reachable) setRealtimeStatus('OFFLINE');
   }, [apiHealth.reachable]);
 
-  useEffect(() => {
-    const timer = setInterval(() => setLastUpdatedSecondsAgo(Math.floor((Date.now() - lastEventAt.current) / 1000)), 1000);
-    return () => clearInterval(timer);
-  }, []);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -656,7 +678,7 @@ Fail over anyway? The override is recorded in the audit log.`)) {
         isLoading, loadError, realtimeStatus, refreshAll,
         activeTab, setActiveTab, selectedAppId, setSelectedAppId, selectedServerId, setSelectedServerId,
         selectedIncidentId, setSelectedIncidentId, selectedRunbookId, setSelectedRunbookId,
-        isCommandPaletteOpen, setIsCommandPaletteOpen, lastUpdatedSecondsAgo,
+        isCommandPaletteOpen, setIsCommandPaletteOpen, lastEventAtRef: lastEventAt,
         acknowledgeIncident, changeIncidentStatus, changeIncidentSeverity, assignIncidentOwner, addIncidentNote, resolveIncident, createIncident,
         triggerFailover,
         runProbeCheck, runAllProbes, addMonitor, updateMonitor, deleteMonitor, toggleMonitorStatus,

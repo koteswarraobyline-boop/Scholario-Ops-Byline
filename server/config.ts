@@ -72,11 +72,15 @@ export const config = {
 
   /** Default thresholds (applications can override per environment in Setup) */
   backupMaxAgeHours: int('BACKUP_MAX_AGE_HOURS', 26, 1),
+  /** Where deploy/backup-db.sh writes the Ops database backups and last-backup.json */
+  opsBackupDir: path.resolve(str('OPS_BACKUP_DIR', './backups')),
   replicationMaxLagSec: int('REPLICATION_MAX_LAG_SEC', 300, 0),
   /** SSL certificates expiring within this many days are DEGRADED (and alert); within 7 days they fail */
   sslExpiryWarnDays: int('SSL_EXPIRY_WARN_DAYS', 21, 1),
   /** Minimum minutes between notifications for the same alert (prevents notification storms) */
   alertCooldownMin: int('ALERT_COOLDOWN_MIN', 15, 0),
+  /** Optional: signs outgoing WEBHOOK notifications (X-Scholario-Signature, HMAC-SHA256) so receivers can verify them */
+  notifyWebhookSecret: str('NOTIFY_WEBHOOK_SECRET'),
   /** API requests per IP per minute (agents and heartbeats are exempt — they use their own tokens) */
   apiRateLimitPerMin: int('API_RATE_LIMIT_PER_MIN', 600, 10),
 

@@ -9,7 +9,7 @@ import { config, isCloudflareConfigured } from './config.ts';
 import { db, persist, liveMetrics, minuteMetrics, queueMetric, ServerRecord, MonitorBucket } from './store.ts';
 import { broadcast, audit } from './events.ts';
 import { httpProbe, tcpProbe, dnsProbe, sslProbe, parseHostPort } from './probes.ts';
-import { notifyIncident, notifyAll } from './notify.ts';
+import { notifyIncident, notifyAll, escalateIncident } from './notify.ts';
 import { switchDnsRecord } from './cloudflare.ts';
 import { log } from './logger.ts';
 import { applyExtendedReport, ExtendedAgentReport } from './telemetry.ts';
@@ -569,7 +569,19 @@ async function runMonitorOnce(m: Monitor): Promise<Monitor> {
   }
 }
 
+/** Liveness of the engine loops, reported by /api/health/ready (a stalled scheduler means monitoring stopped) */
+let lastSchedulerTickAt = 0;
+let lastRecomputeAt = 0;
+export function engineLiveness(now = Date.now()) {
+  return {
+    started: engineStarted,
+    schedulerAgeMs: lastSchedulerTickAt ? now - lastSchedulerTickAt : null,
+    recomputeAgeMs: lastRecomputeAt ? now - lastRecomputeAt : null,
+  };
+}
+
 function schedulerTick() {
+  lastSchedulerTickAt = Date.now();
   const now = Date.now();
   for (const m of db.monitors) {
     if (inFlight.size >= config.monitorConcurrency) break;
@@ -939,7 +951,8 @@ export function recomputeDerived() {
 }
 
 const engineProcessStart = Date.now();
-function updateIncidentDurations() {
+/** Runs every 5 s: live durations, deferred first notifications, escalation, reminders (exported for tests) */
+export function updateIncidentDurations() {
   const now = Date.now();
   const open = new Set<string>();
   for (const inc of db.incidents) {
@@ -949,8 +962,26 @@ function updateIncidentDurations() {
     // No reminders while the affected monitor is in a maintenance window
     const monId = inc.fingerprint?.startsWith('monitor:') ? inc.fingerprint.split(':')[1] : null;
     if (monId && db.monitors.find(x => x.id === monId)?.activeMaintenance) continue;
-    // Repeat notification for unacknowledged incidents according to the escalation policy
     const policy = db.escalationPolicies.find(p => p.severity === inc.severity);
+    const ageMs = now - Date.parse(inc.startedAt);
+    // First notification held back by the policy's initial delay: send it once the delay is over.
+    // Acknowledged meanwhile → somebody is on it, nobody is paged. No reminders / escalation before it.
+    if (inc.notificationDeferred) {
+      if (inc.acknowledged) {
+        inc.notificationDeferred = false;
+        inc.timeline.push(timelineEvent('Escalation Policy', 'INFO', 'Acknowledged within the notification delay — nobody was paged'));
+        persist();
+      } else if (!policy || ageMs >= policy.initialDelayMin * 60000) {
+        lastNotifiedAt.set(inc.id, now);
+        notifyIncident(inc, 'FIRING', undefined, { afterDelay: true });
+      }
+      continue;
+    }
+    // Escalation: still unacknowledged after autoEscalateAfterMin (once per incident)
+    if (policy && policy.autoEscalateAfterMin > 0 && !inc.acknowledged && !inc.escalatedAt && ageMs >= policy.autoEscalateAfterMin * 60000) {
+      escalateIncident(inc, policy);
+    }
+    // Repeat notification for unacknowledged incidents according to the escalation policy
     if (policy && !inc.acknowledged && policy.repeatIntervalMin > 0) {
       // After a restart the first reminder waits a full interval (no re-page of every open incident on deploy)
       const last = lastNotifiedAt.get(inc.id) ?? Math.max(Date.parse(inc.startedAt), engineProcessStart);
@@ -1097,6 +1128,7 @@ export function startEngine(): boolean {
   };
   engineTimers.push(setInterval(guarded('scheduler', schedulerTick), 1000));
   engineTimers.push(setInterval(guarded('recompute', () => {
+    lastRecomputeAt = Date.now();
     recomputeDerived();
     // Heartbeats age without new reports (stale / disconnected): re-derive on every tick
     const hb = publishHeartbeat();

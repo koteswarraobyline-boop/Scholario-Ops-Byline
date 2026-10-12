@@ -604,6 +604,10 @@ export interface Incident {
   acknowledged: boolean;
   acknowledgedAt?: string;
   acknowledgedBy?: string;
+  /** The first notification is held back by the escalation policy's initial delay (not sent yet) */
+  notificationDeferred?: boolean;
+  /** When the incident was escalated for staying unacknowledged (escalation happens once) */
+  escalatedAt?: string;
   affectedServices: string[];
   affectedMonitors: string[];
   dependentFailures: string[];
@@ -762,10 +766,15 @@ export interface EscalationPolicy {
   id: string;
   severity: IncidentSeverity;
   channels: string[];
+  /** Hold the first notification this long; an incident resolved (or acknowledged) within it pages nobody. 0 = immediately */
   initialDelayMin: number;
   repeatIntervalMin: number;
+  /** Still unacknowledged after this long → one [ESCALATED] message to escalationChannels + email to on-call users. 0 = never */
   autoEscalateAfterMin: number;
+  /** Label shown in the escalation message (e.g. "DBA team") */
   escalateToTeam: string;
+  /** Channels for the escalation message; empty = all enabled channels */
+  escalationChannels?: string[];
 }
 
 export interface AuditLog {
@@ -978,6 +987,45 @@ export interface IntegrationStatus {
   loadBalancing: { configured: boolean; status: LbSyncStatus; lastSyncAt: string | null; lastError: string | null; poolCount: number };
   smtp: { configured: boolean };
   publicUrl: string;
+}
+
+// ── Scholario Ops' own database backup (GET /api/v1/ops-backup) ─────────────
+/** backups/last-backup.json written by deploy/backup-db.sh */
+export interface OpsBackupRun {
+  status: 'SUCCESS' | 'FAILED';
+  error: string | null;
+  startedAt: string;
+  completedAt: string;
+  file: string | null;
+  sizeBytes: number | null;
+  sha256: string | null;
+  encryption: 'none' | 'age' | 'gpg';
+  retentionDays: number;
+  /** Rows per table in the dump */
+  tables: Record<string, number>;
+  /** null when BACKUP_REMOTE is not set */
+  offsite: { target: string; ok: boolean; error: string | null } | null;
+}
+
+/** backups/last-restore-test.json written by deploy/verify-backup.sh */
+export interface OpsRestoreTest {
+  status: 'VERIFIED' | 'FAILED';
+  error: string | null;
+  testedAt: string;
+  durationSec: number;
+  file: string | null;
+  tables: Record<string, { expected: number; restored: number }>;
+}
+
+export interface OpsBackupHealth {
+  status: 'NOT_CONFIGURED' | 'HEALTHY' | 'DEGRADED' | 'STALE' | 'FAILED';
+  backup: OpsBackupRun | null;
+  restoreTest: OpsRestoreTest | null;
+  ageHours: number | null;
+  /** Reasons for a non-HEALTHY status (alerted) */
+  problems: string[];
+  /** Recommendations (shown, never alerted) */
+  advisories: string[];
 }
 
 // ── Reliability insights (GET /api/v1/insights) ─────────────────────────────

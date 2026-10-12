@@ -3,7 +3,7 @@ import {
   CommunicationChannel, EscalationPolicy, MaintenanceWindow, Runbook, Deployment, BackupRecord,
   IntegrationStatus, HttpProbeResult, TcpProbeResult, ServerMetricPoint, DrReadinessItem, OpsUser,
   LoadBalancerState, FailoverPreflight, DrOverall, CheckRecord, BackupStatus, DatabaseHealth, DatabaseReport, HostingerInfo,
-  ReliabilityInsights,
+  ReliabilityInsights, OpsBackupHealth,
 } from '../types';
 
 export interface HealthCheckResponse {
@@ -388,6 +388,7 @@ export const api = {
   getSummary: () => unwrap(api.get<ApiResponse<SystemSummary>>('/api/v1/reports/summary')),
   getDailyReport: () => unwrap(api.get<ApiResponse<{ report: string; generatedAt: string }>>('/api/v1/reports/daily')),
   getInsights: () => unwrap(api.get<ApiResponse<ReliabilityInsights>>('/api/v1/insights')),
+  getOpsBackup: () => unwrap(api.get<ApiResponse<OpsBackupHealth>>('/api/v1/ops-backup')),
 
   // ── Realtime (Server-Sent Events) ───────────────────────────────────────────
   connectRealtimeStream(onEvent: (event: string, data: unknown) => void, onStatus?: (connected: boolean) => void): () => void {

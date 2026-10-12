@@ -82,6 +82,11 @@ async function api(method: string, p: string, body?: unknown) {
   return JSON.parse(raw);
 }
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+const waitFor = async (pred: () => Promise<boolean>, what = 'condition', timeoutMs = 15_000) => {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) { if (await pred().catch(() => false)) return; await sleep(200); }
+  throw new Error(`${what}: not met in time`);
+};
 
 before(async () => {
   if (SKIP) return;
@@ -363,5 +368,73 @@ test('heartbeat stream in the browser: ICT stopped on PRD → server stays CONNE
   assert.equal(watchdogHits, 0, 'no request to the deprecated external watchdog');
 });
 
+
+test('incident links: /incidents?id=… (the link in every notification) opens that incident, and the address keeps the id', { skip: SKIP }, async () => {
+  const target = (await api('POST', '/api/v1/incidents', { title: 'Deep link test', severity: 'WARNING', environment: 'PRD' })).data as { id: string };
+  await page!.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 1000, deviceScaleFactor: 1, mobile: false });
+  await page!.eval(`setTimeout(() => location.assign(${JSON.stringify(`${BASE}/incidents?id=${encodeURIComponent(target.id)}`)}), 0); true`);
+  await sleep(400);
+  await waitFor(async () => (await bodyText()).includes('Timeline ('), 'incident detail opened');
+  assert.ok((await bodyText()).includes(target.id), 'the linked incident is the one shown');
+  await sleep(1000);
+  assert.equal(await page!.eval<string>('new URLSearchParams(location.search).get("id")'), target.id, 'the id stays in the address');
+});
+
+test('critical alerts in the browser: opt-in toggle, a new CRITICAL incident notifies once (not old ones), tab title count, click opens Incidents', { skip: SKIP }, async () => {
+  // Headless Chrome has no notification UI: a recording stand-in for window.Notification, installed before the app loads
+  const { identifier } = await page!.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+    window.__notes = [];
+    window.Notification = class {
+      constructor(title, opts) { window.__notes.push({ title, body: opts && opts.body, tag: opts && opts.tag }); window.__lastNote = this; this.onclick = null; }
+      close() {}
+      static get permission() { return sessionStorage.getItem('perm') || 'default'; }
+      static requestPermission() { sessionStorage.setItem('perm', 'granted'); return Promise.resolve('granted'); }
+    };` });
+  try {
+    await visit('/overview', 1366, 'Dead-Man');
+    const toggle = `[...document.querySelectorAll('button[aria-pressed]')].find(b => /ALERTS (ON|OFF)/.test(b.textContent))`;
+    assert.equal(await page!.eval<string>(`${toggle}?.getAttribute('aria-pressed')`), 'false', 'off by default');
+    await page!.eval(`${toggle}.click(), true`);
+    await waitFor(async () => (await page!.eval<string>(`${toggle}.getAttribute('aria-pressed')`)) === 'true', 'toggle on');
+    assert.equal(await page!.eval<string>(`localStorage.getItem('scholario.criticalAlerts')`), 'on', 'remembered per browser');
+
+    // A real outage: a PRD monitor whose endpoint answers 503 → the engine opens a CRITICAL incident
+    const down = http.createServer((_q, res) => { res.writeHead(503); res.end('down'); });
+    await new Promise<void>(r => down.listen(0, '127.0.0.1', () => r()));
+    const mon = (await api('POST', '/api/v1/monitors', {
+      name: 'Browser alert test', type: 'HTTP', target: `http://127.0.0.1:${(down.address() as { port: number }).port}/health`,
+      environment: 'PRD', intervalSec: 3600, failureConfirmationThreshold: 1, retries: 1,
+    })).data;
+    try {
+      await api('POST', `/api/v1/monitors/${mon.id}/probe`, {});
+      await waitFor(async () => (await page!.eval<number>('window.__notes.length')) >= 1, 'notification recorded');
+    } finally { down.close(); }
+    const incId = (await page!.eval<{ tag: string }[]>('window.__notes'))[0].tag;
+    const notes = await page!.eval<Array<{ title: string; tag: string }>>('window.__notes');
+    assert.equal(notes.length, 1);
+    assert.match(notes[0].title, /^CRITICAL: .*Browser alert test/);
+    assert.match(incId, /^INC-/);
+    assert.match(await page!.eval<string>('document.title'), /^\(\d+\) CRITICAL · /);
+
+    // Acknowledging updates the incident (no second notification) and lowers the title count
+    const before = Number(/^\((\d+)\)/.exec(await page!.eval<string>('document.title'))![1]);
+    await api('POST', `/api/v1/incidents/${incId}/acknowledge`, {});
+    await waitFor(async () => !(await page!.eval<string>('document.title')).startsWith(`(${before})`), 'title count lowered');
+    assert.equal(await page!.eval<number>('window.__notes.length'), 1, 'one notification per incident');
+
+    // Clicking the notification opens the Incidents page
+    await page!.eval('window.__lastNote.onclick(), true');
+    await waitFor(async () => (await page!.eval<string>('location.pathname')) === '/incidents', 'navigated to incidents');
+
+    // After a reload, incidents that are already open are the baseline, not news
+    await visit('/overview', 1366, 'Dead-Man');
+    await sleep(2000);
+    assert.equal(await page!.eval<number>('window.__notes.length'), 0, 'no notification for incidents open before the page loaded');
+    await api('DELETE', `/api/v1/monitors/${mon.id}`);
+  } finally {
+    await page!.send('Page.removeScriptToEvaluateOnNewDocument', { identifier });
+    await page!.eval(`localStorage.removeItem('scholario.criticalAlerts'), true`);
+  }
+});
 
 if (SKIP) test(`responsive browser checks skipped: ${SKIP}`, { skip: SKIP }, () => {});

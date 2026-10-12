@@ -162,6 +162,10 @@ test('SLO error budget: no data → NO_DATA; heavy current failures → FAST_BUR
   const healthy = Array.from({ length: 24 * 30 }, (_, i) => ({ h: nowH - i, total: 120, ok: 120 }));
   const b0 = errorBudget(healthy, SLO_TARGETS.TIER_1, nowH);
   assert.equal(b0.status, 'HEALTHY'); assert.equal(b0.remainingPercent, 100); assert.equal(b0.alert, 'NONE');
+  // Too few checks in the current hour for a 1 h rate: a 6 h outage is still a FAST burn, not a slow one
+  const quietHour = healthy.map(b => (b.h === nowH ? { ...b, total: 2, ok: 0 } : b.h > nowH - 6 ? { ...b, ok: 0 } : b));
+  const bq = errorBudget(quietHour, SLO_TARGETS.TIER_1, nowH);
+  assert.equal(bq.burnRate1h, null); assert.equal(bq.alert, 'FAST_BURN');
 
   const app = mkApp('TIER_1'); db.applications.push(app);
   const m = mkMonitor(app.id, 'PRD'); m.status = 'HEALTHY'; db.monitors.push(m);

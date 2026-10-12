@@ -26,6 +26,7 @@ import { serverHealth } from './telemetryHealth.ts';
 import { config } from './config.ts';
 import { log } from './logger.ts';
 import { serverInsight, applicationSlo } from './insights.ts';
+import { opsBackupHealth } from './opsBackup.ts';
 import { formatEta } from '../src/lib/insights.ts';
 
 export interface AlertInput {
@@ -242,6 +243,15 @@ export function evaluateAlerts() {
     }
 
     evaluateInsightAlerts();
+
+    // Scholario Ops' own database backup (NOT_CONFIGURED never alerts)
+    const ob = opsBackupHealth();
+    if (ob.status === 'FAILED' || ob.status === 'STALE' || ob.status === 'DEGRADED') {
+      openOrEscalate({
+        fingerprint: 'ops-backup', title: `Scholario Ops database backup ${ob.status === 'FAILED' ? 'failed' : ob.status === 'STALE' ? 'is stale' : 'needs attention'}`,
+        severity: ob.status === 'DEGRADED' ? 'WARNING' : 'HIGH', detail: ob.problems.join(' · '), source: 'Ops Backup',
+      });
+    } else if (ob.status === 'HEALTHY') resolveAlert('ops-backup', 'Ops Backup', `Backup ${ob.backup?.file ?? ''} OK`);
 
     // SSL certificates expiring soon (expired / invalid certificates are monitor incidents already)
     for (const m of db.monitors.filter(x => x.type === 'SSL' && x.enabled)) {
