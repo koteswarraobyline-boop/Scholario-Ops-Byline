@@ -71,17 +71,29 @@ interface ChannelDraft {
 interface PolicyDraft {
   id?: string;
   channels: string[];
+  initialDelayMin: number;
   repeatIntervalMin: number;
+  autoEscalateAfterMin: number;
+  escalateToTeam: string;
+  escalationChannels: string[];
   base?: EscalationPolicy;
 }
+
+type PolicyNumber = 'initialDelayMin' | 'repeatIntervalMin' | 'autoEscalateAfterMin';
+const EMPTY_POLICY: Omit<PolicyDraft, 'id' | 'base'> = { channels: [], initialDelayMin: 0, repeatIntervalMin: 0, autoEscalateAfterMin: 0, escalateToTeam: '', escalationChannels: [] };
+const policyHasSettings = (d: PolicyDraft) =>
+  d.channels.length > 0 || d.initialDelayMin > 0 || d.repeatIntervalMin > 0 || d.autoEscalateAfterMin > 0;
 
 const policiesToDraft = (policies: EscalationPolicy[]): Record<IncidentSeverity, PolicyDraft> => {
   const out = {} as Record<IncidentSeverity, PolicyDraft>;
   for (const sev of SEVERITIES) {
     const p = policies.find(x => x.severity === sev);
     out[sev] = p
-      ? { id: p.id, channels: [...p.channels], repeatIntervalMin: p.repeatIntervalMin ?? 0, base: p }
-      : { channels: [], repeatIntervalMin: 0 };
+      ? {
+          id: p.id, channels: [...p.channels], initialDelayMin: p.initialDelayMin ?? 0, repeatIntervalMin: p.repeatIntervalMin ?? 0,
+          autoEscalateAfterMin: p.autoEscalateAfterMin ?? 0, escalateToTeam: p.escalateToTeam ?? '', escalationChannels: [...(p.escalationChannels ?? [])], base: p,
+        }
+      : { ...EMPTY_POLICY, channels: [], escalationChannels: [] };
   }
   return out;
 };
@@ -149,24 +161,45 @@ export const CommunicationsView: React.FC = () => {
     });
   };
 
-  const togglePolicyChannel = (sev: IncidentSeverity, channelId: string) => {
+  const togglePolicyChannel = (sev: IncidentSeverity, channelId: string, list: 'channels' | 'escalationChannels' = 'channels') => {
     setPolicyDirty(true);
     setPolicyDraft(prev => {
       const cur = prev[sev];
-      const channels = cur.channels.includes(channelId) ? cur.channels.filter(c => c !== channelId) : [...cur.channels, channelId];
-      return { ...prev, [sev]: { ...cur, channels } };
+      const ids = cur[list].includes(channelId) ? cur[list].filter(c => c !== channelId) : [...cur[list], channelId];
+      return { ...prev, [sev]: { ...cur, [list]: ids } };
     });
   };
 
-  const setPolicyRepeat = (sev: IncidentSeverity, value: string) => {
+  const minutesInput = (sev: IncidentSeverity, field: PolicyNumber, label: string) => (
+    <div className="flex items-center gap-1.5">
+      <input
+        type="number"
+        min={0}
+        max={1440}
+        value={policyDraft[sev][field]}
+        onChange={e => setPolicyMinutes(sev, field, e.target.value)}
+        disabled={savingPolicies}
+        aria-label={label}
+        className={`${inputCls} w-20 py-1`}
+      />
+      <span>min</span>
+    </div>
+  );
+
+  const setPolicyTeam = (sev: IncidentSeverity, value: string) => {
+    setPolicyDirty(true);
+    setPolicyDraft(prev => ({ ...prev, [sev]: { ...prev[sev], escalateToTeam: value.slice(0, 120) } }));
+  };
+
+  const setPolicyMinutes = (sev: IncidentSeverity, field: PolicyNumber, value: string) => {
     setPolicyDirty(true);
     const n = Math.max(0, Math.min(1440, Math.floor(Number(value) || 0)));
-    setPolicyDraft(prev => ({ ...prev, [sev]: { ...prev[sev], repeatIntervalMin: n } }));
+    setPolicyDraft(prev => ({ ...prev, [sev]: { ...prev[sev], [field]: n } }));
   };
 
   const savePolicies = async () => {
     const list: Partial<EscalationPolicy>[] = SEVERITIES
-      .filter(sev => policyDraft[sev].channels.length > 0 || policyDraft[sev].repeatIntervalMin > 0)
+      .filter(sev => policyHasSettings(policyDraft[sev]))
       .map(sev => {
         const d = policyDraft[sev];
         return {
@@ -174,7 +207,11 @@ export const CommunicationsView: React.FC = () => {
           ...(d.id ? { id: d.id } : {}),
           severity: sev,
           channels: d.channels.filter(id => communicationChannels.some(c => c.id === id)),
+          initialDelayMin: d.initialDelayMin,
           repeatIntervalMin: d.repeatIntervalMin,
+          autoEscalateAfterMin: d.autoEscalateAfterMin,
+          escalateToTeam: d.escalateToTeam.trim(),
+          escalationChannels: d.autoEscalateAfterMin > 0 ? d.escalationChannels.filter(id => communicationChannels.some(c => c.id === id)) : [],
         };
       });
     setSavingPolicies(true);
@@ -554,20 +591,25 @@ export const CommunicationsView: React.FC = () => {
           <Bell className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
           <div className="leading-relaxed font-sans">
             When an incident opens or resolves, the channels selected for its severity are notified. <strong>If no channels are selected for a severity, ALL enabled channels are notified.</strong>{' '}
-            The repeat interval re-sends the alert every N minutes while the incident stays unacknowledged (0 = no repeats).
+            <strong>First page after</strong> holds the first notification for N minutes: an incident that recovers or is acknowledged within it pages nobody.{' '}
+            <strong>Repeat</strong> re-sends the alert every N minutes while it stays unacknowledged.{' '}
+            <strong>Escalate</strong> sends one ESCALATED message after N unacknowledged minutes to the chosen channels (all enabled channels if none) and emails every user marked On-Call in Users.
+            0 turns a setting off.
           </div>
         </div>
 
         <div className={`overflow-hidden ${cardCls}`}>
           <div className="w-full min-w-0 overflow-x-auto">
-            <table className="w-full text-left text-xs font-mono min-w-[600px]">
+            <table className="w-full text-left text-xs font-mono min-w-[860px]">
               <thead className={`font-medium border-b ${
                 isDark ? 'bg-[#0B0F17] text-slate-400 border-[#1A2332]' : 'bg-slate-50 text-slate-600 border-slate-200'
               }`}>
                 <tr>
                   <th className="py-2.5 px-3.5">Severity</th>
                   <th className="py-2.5 px-3.5">Channels notified</th>
-                  <th className="py-2.5 px-3.5 w-48">Repeat while unacknowledged</th>
+                  <th className="py-2.5 px-3.5 w-32">First page after</th>
+                  <th className="py-2.5 px-3.5 w-32">Repeat every</th>
+                  <th className="py-2.5 px-3.5 w-72">Escalate if unacknowledged</th>
                 </tr>
               </thead>
               <tbody className={`divide-y ${isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
@@ -610,20 +652,52 @@ export const CommunicationsView: React.FC = () => {
                         )}
                       </td>
                       <td className={`py-2.5 px-3.5 align-top ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                        {isAdmin ? minutesInput(sev, 'initialDelayMin', `${sev} first notification delay in minutes`)
+                          : d.initialDelayMin > 0 ? `${d.initialDelayMin} min` : 'Immediately'}
+                      </td>
+                      <td className={`py-2.5 px-3.5 align-top ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                        {isAdmin ? minutesInput(sev, 'repeatIntervalMin', `${sev} repeat interval in minutes`)
+                          : d.repeatIntervalMin > 0 ? `Every ${d.repeatIntervalMin} min` : 'No repeats'}
+                      </td>
+                      <td className={`py-2.5 px-3.5 align-top ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                         {isAdmin ? (
-                          <div className="flex items-center gap-1.5">
-                            <input
-                              type="number"
-                              min={0}
-                              max={1440}
-                              value={d.repeatIntervalMin}
-                              onChange={e => setPolicyRepeat(sev, e.target.value)}
-                              disabled={savingPolicies}
-                              className={`${inputCls} w-20 py-1`}
-                            />
-                            <span>min</span>
+                          <div className="space-y-1.5">
+                            {minutesInput(sev, 'autoEscalateAfterMin', `${sev} escalate after minutes`)}
+                            {d.autoEscalateAfterMin > 0 && (
+                              <>
+                                <input
+                                  type="text"
+                                  value={d.escalateToTeam}
+                                  onChange={e => setPolicyTeam(sev, e.target.value)}
+                                  disabled={savingPolicies}
+                                  placeholder="Escalate to (team name, optional)"
+                                  aria-label={`${sev} escalation team`}
+                                  className={`${inputCls} py-1`}
+                                />
+                                {communicationChannels.length > 0 && (
+                                  <div className="flex flex-wrap gap-x-3 gap-y-1">
+                                    {communicationChannels.map(ch => (
+                                      <label key={ch.id} className={`flex items-center gap-1.5 cursor-pointer ${ch.enabled ? '' : 'opacity-60'}`}>
+                                        <input
+                                          type="checkbox"
+                                          checked={d.escalationChannels.includes(ch.id)}
+                                          onChange={() => togglePolicyChannel(sev, ch.id, 'escalationChannels')}
+                                          disabled={savingPolicies}
+                                        />
+                                        <span>{ch.name}</span>
+                                      </label>
+                                    ))}
+                                  </div>
+                                )}
+                                <div className="text-[10px] text-slate-500">
+                                  {d.escalationChannels.length === 0 ? 'All enabled channels' : `${d.escalationChannels.length} channel(s)`} + on-call users by email
+                                </div>
+                              </>
+                            )}
                           </div>
-                        ) : d.repeatIntervalMin > 0 ? `Every ${d.repeatIntervalMin} min` : 'No repeats'}
+                        ) : d.autoEscalateAfterMin > 0
+                          ? `After ${d.autoEscalateAfterMin} min${d.escalateToTeam ? ` → ${d.escalateToTeam}` : ''}`
+                          : 'Never'}
                       </td>
                     </tr>
                   );

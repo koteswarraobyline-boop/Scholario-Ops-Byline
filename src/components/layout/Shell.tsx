@@ -37,6 +37,7 @@ import {
   Gauge
 } from 'lucide-react';
 import { CommandPalette } from './CommandPalette';
+import { CriticalAlerts } from './CriticalAlerts';
 import { CreateMonitorModal } from '../monitors/CreateMonitorModal';
 
 interface ShellProps {
@@ -62,7 +63,6 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     activeTab, 
     setActiveTab, 
     systemSummary, 
-    lastUpdatedSecondsAgo, 
     setIsCommandPaletteOpen,
     incidents,
     setSelectedIncidentId,
@@ -361,6 +361,9 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
               <Zap className="w-3.5 h-3.5 text-emerald-400" />
               <span className="hidden md:inline">SETUP</span>
             </button>
+
+            {/* Sound + browser notification for new critical incidents (per browser) */}
+            <CriticalAlerts isDark={isDark} />
 
             {/* Theme Toggle Button (Light / Dark) */}
             <button

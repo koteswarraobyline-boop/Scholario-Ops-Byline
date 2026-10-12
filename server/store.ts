@@ -508,10 +508,14 @@ export async function initStore(): Promise<{ migrations: string[]; imported: str
   const imported = await importLegacyJson();
   await loadAll();
   ready = true;
-  setInterval(() => { void flushMetrics(); }, 10_000).unref();
-  setInterval(() => {
-    const cutoff = new Date(Date.now() - config.metricsRetentionHours * 3600 * 1000).toISOString();
-    void query(`DELETE FROM ${T('server_metrics')} WHERE t < $1`, [cutoff]).catch(() => {});
-  }, 3600_000).unref();
+  // LOCAL_UI_SAFE_MODE=true (set by `npm run dev:prodcopy`, never in production): no metric rollup
+  // writes or pruning on a local copy of production data, so its history stays as it was copied
+  if (process.env.LOCAL_UI_SAFE_MODE !== 'true') {
+    setInterval(() => { void flushMetrics(); }, 10_000).unref();
+    setInterval(() => {
+      const cutoff = new Date(Date.now() - config.metricsRetentionHours * 3600 * 1000).toISOString();
+      void query(`DELETE FROM ${T('server_metrics')} WHERE t < $1`, [cutoff]).catch(() => {});
+    }, 3600_000).unref();
+  }
   return { migrations, imported };
 }

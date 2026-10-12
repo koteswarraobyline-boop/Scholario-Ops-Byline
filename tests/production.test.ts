@@ -87,6 +87,7 @@ test('health: liveness and readiness', async () => {
   const ready = await (await fetch(`${BASE}/api/health/ready`)).json();
   assert.equal(ready.status, 'ready');
   assert.match(ready.checks.database, /^ok/);
+  assert.equal(ready.checks.scheduler, 'ok', 'the monitor scheduler is reported as running');
 });
 
 test('startup with the database unavailable: process stays up, readiness 503, API 503 (no crash loop)', async () => {

@@ -138,7 +138,8 @@ export function errorBudget(buckets: HourBucket[], targetPercent: number, nowH: 
   const consumed = w.total === 0 ? null : allowedFailures === 0 ? (w.failed > 0 ? 100 : 0) : round2((w.failed / (w.total * allowedRatio)) * 100);
   const b1 = burn(1), b6 = burn(6), b24 = burn(24);
   const alert: ErrorBudget['alert'] =
-    b1 !== null && b6 !== null && b1 >= BURN.fast.short && b6 >= BURN.fast.long ? 'FAST_BURN'
+    // The current hour may hold too few checks for a 1 h rate: the 6 h rate then stands in for it
+    b6 !== null && (b1 ?? b6) >= BURN.fast.short && b6 >= BURN.fast.long ? 'FAST_BURN'
       : b24 !== null && b24 >= BURN.slow.long ? 'SLOW_BURN' : 'NONE';
   const status: ErrorBudget['status'] = consumed === null ? 'NO_DATA' : consumed >= 100 ? 'EXHAUSTED' : consumed >= 75 || alert !== 'NONE' ? 'AT_RISK' : 'HEALTHY';
   return {

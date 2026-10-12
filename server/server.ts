@@ -22,7 +22,7 @@ import { closePool, query, SCHEMA } from './db.ts';
 import { startHistory, flushChecks } from './history.ts';
 import { bootstrapAdmin } from './auth.ts';
 import { buildRouter } from './routes.ts';
-import { startEngine, stopEngine } from './engine.ts';
+import { startEngine, stopEngine, engineLiveness } from './engine.ts';
 import { syncCloudflare } from './cloudflare.ts';
 import { syncHostinger } from './hostinger.ts';
 import { syncLoadBalancers } from './loadbalancer.ts';
@@ -202,6 +202,15 @@ async function main() {
     } catch (err) {
       ok = false;
       checks.database = `unavailable: ${(err as Error).message}`;
+    }
+    // Process and database up is not enough: the monitor scheduler (1 s) and recompute loop (5 s) must be ticking
+    const eng = engineLiveness();
+    if (storeReady && eng.started) {
+      const stalled = (age: number | null, limitMs: number) => age !== null && age > limitMs;
+      if (stalled(eng.schedulerAgeMs, 30_000) || stalled(eng.recomputeAgeMs, 60_000)) {
+        ok = false;
+        checks.scheduler = `stalled: scheduler ${Math.round((eng.schedulerAgeMs ?? 0) / 1000)}s, recompute ${Math.round((eng.recomputeAgeMs ?? 0) / 1000)}s since last run`;
+      } else checks.scheduler = 'ok';
     }
     if (shuttingDown) checks.process = 'shutting down';
     res.status(ok ? 200 : 503).json({ status: ok ? 'ready' : 'not_ready', checks, ...(lastStartupError && !storeReady ? { startupError: lastStartupError } : {}), timestamp: new Date().toISOString() });
