@@ -6,12 +6,12 @@ import {
   Application, Monitor, Incident, CommunicationChannel, EscalationPolicy, EscalationStep, MaintenanceWindow, Runbook,
   Deployment, BackupRecord, IncidentStatus, IncidentSeverity, MonitorType, IntegrationStatus, CheckRecord,
 } from '../src/types/index.ts';
-import { config, isCloudflareConfigured, isHostingerConfigured, isSmtpConfigured } from './config.ts';
+import { config, isCloudflareConfigured, isHostingerConfigured, smtpSettingsReport } from './config.ts';
 import { db, persist, flush, liveMetrics, minuteMetrics, deleteServerMetrics, ServerRecord, UserRecord } from './store.ts';
 import { broadcast, audit, addSseClient, sseClientCount } from './events.ts';
 import {
   requireAuth, requireRole, operatorName, hashPasswordAsync, verifyPassword, validatePasswordStrength, issueTokens,
-  consumeRefreshToken, revokeRefreshToken, safeUser, loginRateLimited, recordLoginFailure, clearLoginFailures, dummyPasswordHash, ROLES, Role, issueStreamTicket,
+  consumeRefreshToken, revokeRefreshToken, safeUser, loginRateLimited, recordLoginFailure, clearLoginFailures, dummyPasswordHash, ROLES, ROLE_LEVEL, Role, issueStreamTicket,
 } from './auth.ts';
 import {
   ValidationError, body, reqStr, optStr, optInt, optBool, oneOf, optOneOf, optDate, strArray, isHostname, isDomain, isEmail,
@@ -21,7 +21,7 @@ import {
   ingestAgentReport, publicServer, performFailover, FailoverError, nextIncidentId, isFailoverInProgress, closeIncidentsReferencing, forgetMonitor, forgetServer, AgentReport, closeMonitorIncident,
 } from './engine.ts';
 import { httpProbe, tcpProbe, dnsProbe, sslProbe, parseHostPort, normalizeUrl } from './probes.ts';
-import { sendToChannel, notifyIncident, notifyTargetPolicy, deliveryRuntime, pendingGroupedAlerts, CHANNEL_FAILING_AFTER } from './notify.ts';
+import { sendToChannel, notifyIncident, notifyTargetPolicy, deliveryRuntime, pendingGroupedAlerts, CHANNEL_FAILING_AFTER, verifySmtp, smtpConfigProblem, smtpEndpoint, smtpServerLabel, teamsTargetProblem } from './notify.ts';
 import { cfState, syncCloudflare, CloudflareError, listCloudflareAccounts, listLoadBalancerPools } from './cloudflare.ts';
 import { hostingerState, syncHostinger } from './hostinger.ts';
 import { buildInstaller, buildUninstaller, AGENT_VERSION } from './agent.ts';
@@ -36,7 +36,7 @@ import { backupStatus, databaseHealth, agentState } from './health.ts';
 import { reliabilityInsights } from './insights.ts';
 import { opsBackupHealth } from './opsBackup.ts';
 import { assertSafeTarget, UnsafeTargetError } from './netguard.ts';
-import { secretsKeyStatus, SecretsKeyMissingError, isSealed } from './secrets.ts';
+import { secretsKeyStatus, SecretsKeyMissingError, isSealed, keyFingerprintMismatch } from './secrets.ts';
 import { quietHoursProblem, type QuietHours } from '../src/lib/quietHours.ts';
 import { listDeliveries, getDelivery, getDeliveryForUser, deliveryChain, deliveryStats, unreadCounts, setRead, markAllRead, deliveryHealth, pendingLogWrites } from './deliveries.ts';
 import { workerState } from './leader.ts';
@@ -95,7 +95,6 @@ function publicBaseUrl(req: Request) {
   return `${req.protocol}://${req.get('host')}`;
 }
 
-const ROLE_LEVEL: Record<Role, number> = { viewer: 1, operator: 2, it_administrator: 3, super_admin: 4 };
 const isAdmin = (req: Request) => (req.user ? ROLE_LEVEL[req.user.roleName] >= 3 : false);
 
 /** Hides push-monitor secrets from users who cannot manage monitors */
@@ -111,7 +110,13 @@ function integrationStatus(req: Request): IntegrationStatus {
     hostinger: { configured: isHostingerConfigured(), lastSyncAt: hostingerState.lastSyncAt, lastError: hostingerState.lastError, vmCount: hostingerState.vms.length, status: hostingerState.status },
     notifications: notificationStatus(),
     loadBalancing: { configured: isCloudflareConfigured(), status: lbState.status, lastSyncAt: lbState.lastSyncAt, lastError: lbState.lastError, poolCount: lbState.pools.filter(p => p.found).length },
-    smtp: { configured: isSmtpConfigured() },
+    smtp: {
+      configured: !smtpConfigProblem(),
+      server: smtpEndpoint() ? smtpServerLabel() : null,
+      from: config.smtp.from || null,
+      /** Which setting is missing or invalid (names only) */
+      problem: smtpConfigProblem(),
+    },
     publicUrl: publicBaseUrl(req),
   };
 }
@@ -1213,9 +1218,6 @@ export function buildRouter(): Router {
   }));
 
   // ── Notification channels & escalation ─────────────────────────────────────
-  // "Get link to channel" opens Teams in a browser; it cannot receive messages (POST → 405)
-  const TEAMS_CHANNEL_LINK = /^https:\/\/teams\.(microsoft\.com|cloud\.microsoft|live\.com)\//i;
-  const TEAMS_CHANNEL_LINK_HELP = 'This is a link to a Teams channel, not a webhook — nothing was sent. In Teams open the channel → ⋯ → Workflows → "Post to a channel when a webhook request is received", then edit this channel and paste the URL it gives you.';
   const buildChannel = async (req: Request, existing?: CommunicationChannel): Promise<CommunicationChannel> => {
     // Channel targets are stored encrypted: no saving while the key is lost (it would not be encrypted)
     const keyStatus = secretsKeyStatus();
@@ -1230,8 +1232,8 @@ export function buildRouter(): Router {
       if (!/^[a-zA-Z0-9]{20,64}$/.test(target)) throw new ValidationError('Enter the PagerDuty Events v2 integration (routing) key');
     } else if (!/^https:\/\/\S+$/.test(target)) {
       throw new ValidationError('Webhook URL must start with https://');
-    } else if (type === 'TEAMS' && TEAMS_CHANNEL_LINK.test(target)) {
-      throw new ValidationError(TEAMS_CHANNEL_LINK_HELP);
+    } else if (type === 'TEAMS' && teamsTargetProblem(target)) {
+      throw new ValidationError(teamsTargetProblem(target)!);
     }
     // Webhook destinations: no loopback / private / link-local / metadata targets (SSRF), checked on every send too
     if (type === 'TEAMS' || type === 'WEBHOOK') {
@@ -1291,7 +1293,7 @@ export function buildRouter(): Router {
   r.post('/v1/channels/:id/test', requireRole('operator'), h(async (req, res) => {
     const ch = db.channels.find(c => c.id === req.params.id);
     if (!ch) return fail(res, 404, 'Channel not found');
-    if (ch.type === 'TEAMS' && TEAMS_CHANNEL_LINK.test(ch.targetEndpoint)) return fail(res, 400, TEAMS_CHANNEL_LINK_HELP);
+    if (ch.type === 'TEAMS' && teamsTargetProblem(ch.targetEndpoint)) return fail(res, 400, teamsTargetProblem(ch.targetEndpoint)!);
     const result = await sendToChannel(ch, {
       title: 'Scholario Ops test notification',
       text: `Test message sent by ${operatorName(req)} at ${new Date().toUTCString()}.`,
@@ -1301,6 +1303,12 @@ export function buildRouter(): Router {
     audit(operatorName(req), result.ok ? 'CHANNEL_TEST_DELIVERED' : 'CHANNEL_TEST_FAILED', 'NOTIFICATION', ch.id, result.ok ? ch.name : `${ch.name}: ${result.error}`);
     if (!result.ok) return fail(res, 502, `Delivery failed: ${result.error}`);
     ok(res, isAdmin(req) ? ch : { ...ch, targetEndpoint: ch.targetEndpoint ? '••••••' : '' });
+  }));
+  /** Connects and logs in to the mail server without sending a message */
+  r.post('/v1/integrations/smtp/verify', requireRole('it_administrator'), h(async (req, res) => {
+    const r2 = await verifySmtp();
+    audit(operatorName(req), r2.ok ? 'SMTP_VERIFIED' : 'SMTP_VERIFY_FAILED', 'NOTIFICATION', 'smtp', r2.ok ? r2.server : `${r2.server}: ${r2.error}`);
+    ok(res, { ...r2, settings: smtpSettingsReport() });
   }));
   // ── Notification delivery log (operators+: error messages can name recipients) ──
   const DELIVERY_KINDS = ['FIRING', 'RESOLVED', 'ESCALATED', 'INFO', 'TEST'] as const;
@@ -1357,8 +1365,9 @@ export function buildRouter(): Router {
     const key = secretsKeyStatus();
     // Targets still in their encrypted form in memory could not be decrypted with the current key
     const unreadable = db.channels.filter(c => isSealed(c.targetEndpoint)).length;
+    const fpMismatch = keyFingerprintMismatch();
     const status = enabled.length === 0 ? 'NOT_CONFIGURED'
-      : !key.ok || unreadable > 0 || failing.length > 0 || (stats.total >= 5 && (stats.successRate ?? 100) < 90) ? 'DEGRADED' : 'HEALTHY';
+      : !key.ok || unreadable > 0 || fpMismatch || failing.length > 0 || (stats.total >= 5 && (stats.successRate ?? 100) < 90) ? 'DEGRADED' : 'HEALTHY';
     ok(res, {
       status,
       worker: workerState(),
@@ -1371,7 +1380,10 @@ export function buildRouter(): Router {
       },
       last24h: stats,
       failingChannels: failing,
-      secretsKey: !key.ok ? key.error : unreadable > 0 ? `${unreadable} channel target(s) cannot be decrypted with the current key — restore the matching key file, or edit those channels and enter the target again` : 'OK',
+      secretsKey: !key.ok ? key.error
+        : unreadable > 0 ? `${unreadable} channel target(s) cannot be decrypted with the current key${fpMismatch ? ` (key fingerprint ${fpMismatch.current}, targets written with ${fpMismatch.stored})` : ''} — restore the matching key file, or edit those channels and enter the target again`
+          : fpMismatch ? `The secrets key changed (fingerprint ${fpMismatch.stored} → ${fpMismatch.current}) — restore the previous key, or re-enter every channel target`
+            : 'OK',
     });
   }));
   r.post('/v1/notifications/read', requireRole('operator'), h(async (req, res) => {

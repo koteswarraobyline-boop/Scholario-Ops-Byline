@@ -18,7 +18,7 @@ process.env.DB_SCHEMA = `ops_escalation_${process.pid}`;
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'scholario-escalation-'));
 process.env.HOSTINGER_API_TOKEN = '';
 process.env.CLOUDFLARE_API_TOKEN = '';
-process.env.SMTP_HOST = '';
+for (const k of ['SMTP_SERVICE', 'SMTP_URL', 'SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM']) process.env[k] = '';
 process.env.ALERT_COOLDOWN_MIN = '15';
 process.env.NOTIFY_WEBHOOK_SECRET = 'test-signing-secret';
 // The local test receivers run on 127.0.0.1: allowed explicitly, like an internal webhook would be
@@ -265,6 +265,56 @@ test('Teams: Workflows webhook URLs get an Adaptive Card, connector URLs a Messa
   assert.equal(r.ok, false);
   assert.match(r.error!, /HTTP 405 — this URL does not accept POST requests/);
   assert.equal(raw.filter(x => x.url === '/page').length, 1, '405 is not retried');
+
+  // A pasted "Get link to channel" URL is refused before any request
+  const before = raw.length;
+  const link = await notify.sendToChannel(
+    { id: 'ch-link', name: 'new', type: 'TEAMS', targetEndpoint: 'https://teams.cloud.microsoft/l/chat/19:abc/conversations', enabled: true, failureCount: 0 } as never,
+    { title: 'T', text: 'x', severity: 'INFO', status: 'TEST' },
+  );
+  assert.equal(link.ok, false);
+  assert.match(link.error!, /link to a Teams channel, not a webhook/);
+  assert.equal(raw.length, before, 'a channel link is not POSTed');
+
+  // Valid targets: Workflows (logic.azure.com / powerplatform.com) with sig=, and legacy connector URLs
+  assert.equal(notify.teamsTargetProblem('https://prod-12.westeurope.logic.azure.com:443/workflows/abc/triggers/manual/paths/invoke?api-version=2016-06-01&sig=x'), null);
+  assert.equal(notify.teamsTargetProblem('https://default1.4e.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/abc/triggers/manual/paths/invoke?api-version=1&sig=x'), null);
+  assert.equal(notify.teamsTargetProblem('https://contoso.webhook.office.com/webhookb2/abc/IncomingWebhook/def/ghi'), null);
+  // Invalid ones, with the fix in the message
+  assert.match(notify.teamsTargetProblem('https://teams.live.com/l/message/x')!, /link to a Teams channel/);
+  assert.match(notify.teamsTargetProblem('https://flow.microsoft.com/manage/flows/x')!, /Power Automate editor page/);
+  assert.match(notify.teamsTargetProblem('https://login.microsoftonline.com/common/oauth2')!, /Microsoft web page/);
+  assert.match(notify.teamsTargetProblem('https://x.environment.api.powerplatform.com/powerautomate/automations/direct/workflows/a/triggers/manual/paths/invoke')!, /"sig=" parameter is missing/);
+  assert.match(notify.teamsTargetProblem('not a url')!, /not a valid URL/);
+  // The Workflows payload is an Adaptive Card inside a "message" (what the Teams workflow trigger expects)
+  const wf2 = notify.teamsPayload('https://prod-1.westeurope.logic.azure.com/workflows/a?sig=x', { title: 'T', text: 'a\nb', severity: 'INFO', status: 'TEST' }) as any;
+  assert.equal(wf2.attachments.length, 1);
+  assert.equal(wf2.attachments[0].content.version, '1.4');
+  assert.deepEqual(wf2.attachments[0].content.actions, [], 'no link → no action');
+});
+
+test('PagerDuty: FIRING triggers and RESOLVED resolves the same incident; severity is mapped', () => {
+  const key = 'R01234567890123456789012345678901';
+  const firing = notify.pagerdutyPayload(key, { title: 'INC-9 API down', text: 'detail', severity: 'CRITICAL', status: 'FIRING', incidentId: 'INC-9', link: 'https://ops.example/incidents?id=INC-9' });
+  assert.equal(firing.routing_key, key);
+  assert.equal(firing.event_action, 'trigger');
+  assert.equal(firing.dedup_key, 'INC-9');
+  assert.equal((firing.payload as { severity: string }).severity, 'critical');
+  assert.deepEqual(firing.links, [{ href: 'https://ops.example/incidents?id=INC-9', text: 'Scholario Ops' }]);
+
+  const resolved = notify.pagerdutyPayload(key, { title: 'INC-9 API down', text: 'ok', severity: 'WARNING', status: 'RESOLVED', incidentId: 'INC-9' });
+  assert.equal(resolved.event_action, 'resolve');
+  assert.equal(resolved.dedup_key, 'INC-9', 'resolve uses the same dedup key as the trigger');
+  assert.equal((resolved.payload as { severity: string }).severity, 'warning');
+  assert.equal(resolved.links, undefined);
+
+  const high = notify.pagerdutyPayload(key, { title: 't', text: 'x', severity: 'HIGH', status: 'ESCALATED', incidentId: 'INC-1' });
+  assert.equal(high.event_action, 'trigger');
+  assert.equal((high.payload as { severity: string }).severity, 'error');
+  const info = notify.pagerdutyPayload(key, { title: 't', text: 'x', severity: 'INFO', status: 'INFO', incidentId: 'INC-2' });
+  assert.equal((info.payload as { severity: string }).severity, 'info');
+  const emergency = notify.pagerdutyPayload(key, { title: 't', text: 'x', severity: 'EMERGENCY', status: 'FIRING', incidentId: 'INC-3' });
+  assert.equal((emergency.payload as { severity: string }).severity, 'critical');
 });
 
 test('read state: per user; unread filter and counts; mark read / unread; mark-all-read then unread again; search + sort; removed with the delivery', async () => {
@@ -541,6 +591,8 @@ test('grouping: a burst of non-critical alerts for one application → first now
     await settle();
     assert.equal(firing().length, 1, 'the others wait for the summary');
     assert.ok(a2.timeline.some(e => /Included in a grouped notification/.test(e.message)));
+    assert.equal(typeof a2.notifyGroupPending, 'string', 'the buffered alert is flagged so a restart can still send it');
+    assert.equal(notify.pendingGroupedAlerts() >= 2, true, 'health counts the alerts waiting for the summary');
     // a3 recovers before the summary: dropped, and no RESOLVED (nobody was paged for it)
     resolveAlert(a3.fingerprint!, 'Test', 'ok');
     await settle();
@@ -560,6 +612,8 @@ test('grouping: a burst of non-critical alerts for one application → first now
     assert.ok(summary[0].text.includes(`${a2.id} [HIGH] Group alert 2`), summary[0].text);
     assert.ok(summary[0].text.includes(`${a4.id} [HIGH] Group alert 4`), summary[0].text);
     assert.equal(summary[0].text.includes(a3.id), false, 'the recovered one is not in it');
+    assert.equal(a2.notifyGroupPending, undefined, 'flag cleared once the summary is sent');
+    assert.equal(a4.notifyGroupPending, undefined);
 
     // Grouped incidents now count as notified: their recovery is sent
     resolveAlert(a2.fingerprint!, 'Test', 'ok');
@@ -567,6 +621,52 @@ test('grouping: a burst of non-critical alerts for one application → first now
     assert.equal(posts('/a').filter(p => p.status === 'RESOLVED' && p.title.includes('Group alert 2')).length, 1);
     void a1; void c1;
   } finally {
+    db.applications = db.applications.filter(a => a.id !== appId);
+  }
+});
+
+test('grouping survives a restart: a summary still pending is sent once, and one already in the log is not repeated', async () => {
+  const appId = crypto.randomUUID();
+  db.applications.push({ id: appId, name: 'Restart Group', codeName: 'rgrp', tier: 'TIER_1' } as never);
+  const mk = (n: number) =>
+    openAlert({ fingerprint: `group-restart:${appId}:${n}:${Date.now()}`, title: `Restart alert ${n}`, severity: 'HIGH', detail: 'x', applicationId: appId, source: 'Test' }).incident;
+  const summaries = () => posts('/a').filter(p => /more alerts for Restart Group/.test(p.title));
+  try {
+    clear();
+    mk(1);
+    await settle();
+    const a2 = mk(2);
+    const a3 = mk(3);
+    const a4 = mk(4);
+    await settle();
+    assert.equal(typeof a2.notifyGroupPending, 'string');
+    assert.equal(summaries().length, 0, 'the window has not closed');
+    // Process died inside the window: the timer is gone, the flags are still stored
+    notify.dropOpenGroupsForTests();
+    assert.equal(notify.pendingGroupedAlerts(), 3, 'the waiting alerts are still visible from the stored flags');
+    a3.status = 'RESOLVED'; // recovered before the replay — dropped, same as a live window
+    const n = await notify.replayPendingGroupSummaries();
+    assert.equal(n, 1);
+    await settle();
+    assert.equal(summaries().length, 1, 'one summary after restart');
+    assert.match(summaries()[0].title, /^2 more alerts for Restart Group$/);
+    assert.ok(summaries()[0].text.includes(a2.id));
+    assert.ok(summaries()[0].text.includes(a4.id));
+    assert.equal(summaries()[0].text.includes(a3.id), false, 'the recovered alert is not in the summary');
+    assert.equal(a2.notifyGroupPending, undefined);
+    assert.equal(a3.notifyGroupPending, undefined);
+    assert.equal(a4.notifyGroupPending, undefined);
+    assert.equal(notify.pendingGroupedAlerts(), 0);
+
+    // Crash after the summary was delivered but before the flag was cleared
+    a2.notifyGroupPending = new Date().toISOString();
+    const n2 = await notify.replayPendingGroupSummaries();
+    assert.equal(n2, 0, 'the delivery log shows this summary already went out');
+    await settle();
+    assert.equal(summaries().length, 1, 'not sent a second time');
+    assert.equal(a2.notifyGroupPending, undefined);
+  } finally {
+    notify.dropOpenGroupsForTests();
     db.applications = db.applications.filter(a => a.id !== appId);
   }
 });

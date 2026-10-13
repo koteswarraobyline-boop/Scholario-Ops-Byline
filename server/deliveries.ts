@@ -200,6 +200,19 @@ export function startDeliveryLog() {
   setInterval(prune, 6 * 3600 * 1000).unref();
 }
 
+/** Delivered FIRING messages in the window: replay uses them so a summary sent just before a crash is not sent twice */
+export async function recentDeliveredFiringMessages(hours = 24): Promise<Array<{ incidentId?: string; text: string }>> {
+  await flushDeliveries();
+  const since = new Date(Date.now() - hours * 3_600_000).toISOString();
+  const rows = (await query(
+    `SELECT incident_id, message FROM ${T('notification_deliveries')}
+      WHERE t >= $1 AND kind = 'FIRING' AND result = 'DELIVERED' AND resend_of IS NULL`, [since])).rows;
+  return rows.map(r => ({
+    incidentId: (r.incident_id as string | null) ?? undefined,
+    text: (r.message as { text?: string } | null)?.text ?? '',
+  }));
+}
+
 /** Last FIRING / RESOLVED send per incident + severity (for duplicate protection after a restart) */
 export async function recentIncidentSends(hours = 24): Promise<Array<{ incidentId: string; kind: 'FIRING' | 'RESOLVED'; severity: string; t: string; delivered: boolean }>> {
   await flushDeliveries();

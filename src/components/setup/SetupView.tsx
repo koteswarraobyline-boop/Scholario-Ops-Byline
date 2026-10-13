@@ -118,7 +118,9 @@ const IntegrationsPanel: React.FC = () => {
     },
     {
       key: 'smtp', icon: Mail, title: 'Email (SMTP)', ok: integrations.smtp.configured, configured: integrations.smtp.configured,
-      detail: integrations.smtp.configured ? <>Email channels can deliver.</> : <>Optional. Set <code className={st.code}>SMTP_HOST</code>, <code className={st.code}>SMTP_FROM</code> (+ user/pass) for email alerts.</>,
+      detail: integrations.smtp.configured
+        ? <>Email channels can deliver via {integrations.smtp.server ?? 'the mail server'}. Use <b>Check SMTP</b> on Notifications to test the login.</>
+        : <>Optional. Set <code className={st.code}>SMTP_FROM</code> and <code className={st.code}>SMTP_SERVICE</code> (Gmail, Outlook365, SendGrid…), <code className={st.code}>SMTP_URL</code> or <code className={st.code}>SMTP_HOST</code>, plus user/pass, for email alerts.</>,
     },
     {
       // Built in: derived from the agents' reports — nothing to configure, no external watchdog

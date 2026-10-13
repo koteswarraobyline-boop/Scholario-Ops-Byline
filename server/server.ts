@@ -22,7 +22,7 @@ import { closePool, query, SCHEMA } from './db.ts';
 import { startHistory, flushChecks } from './history.ts';
 import { startDeliveryLog, flushDeliveries } from './deliveries.ts';
 import { startLeaderElection, releaseLeadership } from './leader.ts';
-import { restoreNotificationMemory, flushNotificationGroups } from './notify.ts';
+import { restoreNotificationMemory, flushNotificationGroups, replayPendingGroupSummaries } from './notify.ts';
 import { bootstrapAdmin } from './auth.ts';
 import { buildRouter } from './routes.ts';
 import { startEngine, stopEngine, engineLiveness } from './engine.ts';
@@ -117,7 +117,13 @@ function startBackgroundWork() {
   startHistory();
   startDeliveryLog();
   // One process sends escalations / reminders (advisory lock); duplicate protection survives restarts
-  startLeaderElection();
+  startLeaderElection(30_000, () => {
+    // Grouped alerts whose summary was still in memory when the process stopped
+    void restoreNotificationMemory()
+      .then(() => replayPendingGroupSummaries())
+      .then(n => { if (n) log.info('notify', `sent ${n} grouped alert summary(ies) still pending after a restart`); })
+      .catch(err => log.error('notify', 'could not send pending grouped alerts', { error: err as Error }));
+  });
   void restoreNotificationMemory().then(n => { if (n) log.info('notify', `restored duplicate protection for ${n} recent alert(s) from the delivery log`); })
     .catch(err => log.error('notify', 'could not restore duplicate protection', { error: err as Error }));
   bootstrapAdmin();
@@ -183,11 +189,13 @@ async function main() {
   // Request log: errors, slow requests and changes (query strings are never logged — they can carry tickets)
   app.use((req, res, next) => {
     const start = Date.now();
+    // Read before routing: the /api router strips its mount path from req.path
+    const reqPath = req.path;
     res.on('finish', () => {
       const ms = Date.now() - start;
-      const isApi = req.path.startsWith('/api/');
-      if (!isApi || req.path === '/api/v1/realtime/stream') return;
-      const fields = { method: req.method, path: req.path, status: res.statusCode, ms, ip: req.ip, user: req.user?.email };
+      const isApi = reqPath.startsWith('/api/');
+      if (!isApi || reqPath === '/api/v1/realtime/stream') return;
+      const fields = { method: req.method, path: reqPath, status: res.statusCode, ms, ip: req.ip, user: req.user?.email };
       if (res.statusCode >= 500) log.error('http', 'request failed', fields);
       else if (res.statusCode >= 400 && res.statusCode !== 401) log.warn('http', 'request rejected', fields);
       else if (ms > 3000) log.warn('http', 'slow request', fields);
@@ -272,7 +280,7 @@ async function main() {
 
   // Last-resort error handler: never leak stack traces
   app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    log.error('http', 'unhandled error', { path: req.path, error: err as Error });
+    log.error('http', 'unhandled error', { path: req.originalUrl.split('?')[0], error: err as Error });
     if (!res.headersSent) res.status(500).json({ success: false, message: 'Internal server error' });
   });
 
@@ -301,12 +309,11 @@ async function main() {
     log.info('server', `${signal} received — finishing requests, saving data, closing connections`);
     closeAllSseClients();
     stopEngine();
-    flushNotificationGroups(); // grouped alerts waiting for their summary go out now
     server.close();
     server.closeIdleConnections?.();
-    const shutdownWork = localUiSafeMode
+    const shutdownWork = flushNotificationGroups().then(() => localUiSafeMode
       ? closePool()
-      : Promise.allSettled([flush(), flushMetrics(), flushChecks(), flushDeliveries(), releaseLeadership()]).then(() => closePool());
+      : Promise.allSettled([flush(), flushMetrics(), flushChecks(), flushDeliveries(), releaseLeadership()]).then(() => closePool()));
     void shutdownWork
       .then(() => log.info('server', 'shutdown complete'))
       .finally(() => process.exit(0));

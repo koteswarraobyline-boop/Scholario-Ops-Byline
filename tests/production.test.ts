@@ -54,7 +54,8 @@ function spawnServer(extraEnv: Record<string, string> = {}, port = PORT) {
     env: {
       ...process.env, NODE_ENV: 'production', PORT: String(port), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR,
       ADMIN_EMAIL: ADMIN.email, ADMIN_PASSWORD: ADMIN.password, CLOUDFLARE_API_TOKEN: SECRETS.cf, JWT_SECRET: SECRETS.jwt,
-      PUBLIC_URL: 'https://ops.test.invalid', HOSTINGER_API_TOKEN: '', DEADMAN_HEARTBEAT_URL: '', LOG_FORMAT: 'json', ...extraEnv,
+      PUBLIC_URL: 'https://ops.test.invalid', HOSTINGER_API_TOKEN: '', DEADMAN_HEARTBEAT_URL: '', LOG_FORMAT: 'json',
+      SMTP_SERVICE: '', SMTP_URL: '', SMTP_HOST: '', SMTP_USER: '', SMTP_PASS: '', SMTP_FROM: '', ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -246,6 +247,31 @@ test('security fixes over HTTP: no super-admin takeover, viewers never get push 
   }
 });
 
+test('Check SMTP over HTTP: admins only; with no mail settings it names the problem and reports which variables are missing, never their values', async () => {
+  const mk = async (email: string, roleName: string) => {
+    const u = await api('POST', '/api/v1/users', { email, password: 'SmtpCheckPassw0rd!', fullName: email, roleName });
+    assert.equal(u.status, 201, u.raw);
+    return (await api('POST', '/api/auth/login', { email, password: 'SmtpCheckPassw0rd!' }, '')).body.data.tokens.accessToken as string;
+  };
+  for (const role of ['viewer', 'operator']) {
+    assert.equal((await api('POST', '/api/v1/integrations/smtp/verify', {}, await mk(`smtp-${role}@example.com`, role))).status, 403, role);
+  }
+  const r = await api('POST', '/api/v1/integrations/smtp/verify', {});
+  assert.equal(r.status, 200, r.raw);
+  assert.equal(r.body.data.ok, false);
+  assert.equal(r.body.data.error, 'SMTP is not configured: set SMTP_HOST (or SMTP_SERVICE / SMTP_URL) and SMTP_FROM in the server .env, then restart');
+  const vars = r.body.data.settings.variables as { name: string; present: boolean; source: string }[];
+  for (const name of ['SMTP_HOST', 'SMTP_FROM', 'SMTP_USER', 'SMTP_PASS']) {
+    assert.deepEqual(vars.find(v => v.name === name), { name, present: false, source: 'environment' }, name);
+  }
+  assert.equal(typeof r.body.data.settings.envFile, 'string');
+  const status = await api('GET', '/api/v1/integrations');
+  assert.equal(status.status, 200, status.raw);
+  assert.equal(status.body.data.smtp.configured, false);
+  assert.match(status.body.data.smtp.problem, /SMTP is not configured/);
+  assert.ok((await api('GET', '/api/v1/audit?q=SMTP_VERIFY_FAILED')).raw.includes('SMTP_VERIFY_FAILED'), 'the check is audited');
+});
+
 test('notification read state over HTTP: viewers are refused, operators keep their own unread count; bulk resend reports per item', async () => {
   const mk = async (email: string, roleName: string) => {
     const u = await api('POST', '/api/v1/users', { email, password: 'NotifyPassw0rd!', fullName: email, roleName });
@@ -299,6 +325,23 @@ test('notification read state over HTTP: viewers are refused, operators keep the
   assert.equal(okCh.status, 201, okCh.raw);
   assert.equal((await api('PATCH', `/api/v1/channels/${okCh.body.data.id}`, { targetEndpoint: 'https://10.1.1.1/x' })).status, 400, 'editing to an internal target is refused too');
   assert.equal((await api('DELETE', `/api/v1/channels/${okCh.body.data.id}`)).status, 200);
+
+  // Teams: browser / chat / editor pages and incomplete Workflows URLs are refused at save time with the fix
+  for (const [url, why] of [
+    ['https://teams.cloud.microsoft/l/chat/19:abc@thread.v2/conversations?context=%7B%7D', /link to a Teams channel, not a webhook/],
+    ['https://teams.microsoft.com/l/channel/19%3Aabc%40thread.tacv2/General?groupId=x', /link to a Teams channel, not a webhook/],
+    ['https://make.powerautomate.com/environments/x/flows/y', /Power Automate editor page/],
+    ['https://contoso.sharepoint.com/sites/ops', /Microsoft web page, not a webhook/],
+    ['https://prod-12.westeurope.logic.azure.com/workflows/abc/triggers/manual/paths/invoke?api-version=2016-06-01', /"sig=" parameter is missing/],
+  ] as const) {
+    const r = await api('POST', '/api/v1/channels', { name: 'teams', type: 'TEAMS', targetEndpoint: url });
+    assert.equal(r.status, 400, `${url}: ${r.raw}`);
+    assert.match(r.body.message, why, url);
+  }
+  const teamsOk = await api('POST', '/api/v1/channels', { name: 'teams relay', type: 'TEAMS', targetEndpoint: 'https://8.8.8.8/teams-relay', enabled: false });
+  assert.equal(teamsOk.status, 201, `other https endpoints stay allowed: ${teamsOk.raw}`);
+  assert.equal((await api('PATCH', `/api/v1/channels/${teamsOk.body.data.id}`, { targetEndpoint: 'https://teams.microsoft.com/l/channel/x' })).status, 400, 'editing to a channel link is refused');
+  assert.equal((await api('DELETE', `/api/v1/channels/${teamsOk.body.data.id}`)).status, 200);
 
   // Escalation steps: ordered, strictly later, at most 5; saved and returned as sent
   const put = (steps: unknown) => api('PUT', '/api/v1/escalation-policies', { policies: [{ severity: 'HIGH', channels: [], steps }] });
@@ -579,7 +622,12 @@ test('dead-man heartbeat end-to-end: built from agent reports, deprecated DEADMA
 });
 
 test('logs are structured JSON and contain no secrets', async () => {
+  // Rejected API requests are logged with their full path (the /api router must not hide them); a push-heartbeat token is masked
+  const hbToken = 'hb-token-in-path-5c1e9a7d';
+  assert.equal((await fetch(`${BASE}/api/v1/heartbeat/${hbToken}?value=x`)).status, 404);
   await new Promise(r => setTimeout(r, 500));
+  assert.ok(logs.includes('"path":"/api/v1/heartbeat/[REDACTED]","status":404'), 'the rejected heartbeat is logged, token masked');
+  assert.equal(logs.includes(hbToken), false, 'a heartbeat token appeared in the logs');
   const lines = logs.split('\n').filter(l => l.startsWith('{'));
   assert.ok(lines.length > 3, 'expected JSON log lines');
   for (const l of lines.slice(0, 50)) { const j = JSON.parse(l); assert.ok(j.ts && j.level && j.service === 'scholario-ops' && j.msg); }
