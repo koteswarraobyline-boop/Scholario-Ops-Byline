@@ -4,6 +4,7 @@ import {
   IntegrationStatus, HttpProbeResult, TcpProbeResult, ServerMetricPoint, DrReadinessItem, OpsUser,
   LoadBalancerState, FailoverPreflight, DrOverall, CheckRecord, BackupStatus, DatabaseHealth, DatabaseReport, HostingerInfo,
   ReliabilityInsights, OpsBackupHealth, NotificationDelivery, NotificationDeliveryStats, NotificationDeliveryDetail, NotificationHealth,
+  SmtpCheckResult,
 } from '../types';
 
 export interface HealthCheckResponse {
@@ -397,6 +398,7 @@ export const api = {
     return api.get<PaginatedApiResponse<NotificationDelivery>>(`/api/v1/notifications/deliveries?${qs}`);
   },
   getNotificationHealth: () => unwrap(api.get<ApiResponse<NotificationHealth>>('/api/v1/notifications/health')),
+  verifySmtp: () => unwrap(api.post<ApiResponse<SmtpCheckResult>>('/api/v1/integrations/smtp/verify')),
   getNotificationStats: () => unwrap(api.get<ApiResponse<NotificationDeliveryStats>>('/api/v1/notifications/stats')),
   getNotificationDetail: (id: string) => unwrap(api.get<ApiResponse<NotificationDeliveryDetail>>(`/api/v1/notifications/deliveries/${encodeURIComponent(id)}`)),
   getUnreadNotifications: () => unwrap(api.get<ApiResponse<{ unread: number; unreadFailed: number }>>('/api/v1/notifications/unread-count')),

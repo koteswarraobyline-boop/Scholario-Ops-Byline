@@ -46,10 +46,20 @@ export async function tryAcquire(): Promise<boolean> {
   }
 }
 
-/** Takes the lock now and retries every intervalMs while another process holds it */
-export function startLeaderElection(intervalMs = 30_000) {
-  void tryAcquire().then(ok => { if (!ok) log.warn('leader', 'another Scholario Ops process holds the escalation lock — this one will not send escalations or reminders'); });
-  timer = setInterval(() => { if (!client) void tryAcquire(); }, intervalMs);
+/**
+ * Takes the lock now and retries every intervalMs while another process holds it.
+ * onLeader runs each time this process newly becomes the sender (startup, or after the previous holder stops).
+ */
+export function startLeaderElection(intervalMs = 30_000, onLeader?: () => void) {
+  const attempt = (announce: boolean) => {
+    if (client) return;
+    void tryAcquire().then(ok => {
+      if (ok) onLeader?.();
+      else if (announce) log.warn('leader', 'another Scholario Ops process holds the escalation lock — this one will not send escalations or reminders');
+    });
+  };
+  attempt(true);
+  timer = setInterval(() => attempt(false), intervalMs);
   timer.unref();
 }
 

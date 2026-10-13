@@ -2,16 +2,19 @@ import crypto from 'crypto';
 import http from 'http';
 import https from 'https';
 import net from 'net';
+import dns from 'dns';
+import { createRequire } from 'module';
 import nodemailer, { type Transporter } from 'nodemailer';
 import { CommunicationChannel, Incident, EscalationPolicy, EscalationStep } from '../src/types/index.ts';
-import { config, isSmtpConfigured } from './config.ts';
+import { config } from './config.ts';
 import { db, persist } from './store.ts';
 import { broadcast, audit } from './events.ts';
 import { log } from './logger.ts';
 import { guardedLookup, addressRefusal, UnsafeTargetError, policyFromEnv, type TargetPolicy } from './netguard.ts';
-import { recordDelivery, recentIncidentSends } from './deliveries.ts';
+import { recordDelivery, recentIncidentSends, recentDeliveredFiringMessages } from './deliveries.ts';
 import { isSealed } from './secrets.ts';
 import { isQuietTime, quietUntil } from '../src/lib/quietHours.ts';
+import { isNotificationWorker } from './leader.ts';
 
 export interface NotificationMessage {
   title: string;
@@ -22,18 +25,156 @@ export interface NotificationMessage {
   link?: string;
 }
 
-let transporter: Transporter | null = null;
-function mailer() {
-  if (!isSmtpConfigured()) return null;
-  if (!transporter) {
-    transporter = nodemailer.createTransport({
-      host: config.smtp.host,
-      port: config.smtp.port,
-      secure: config.smtp.secure,
-      auth: config.smtp.user ? { user: config.smtp.user, pass: config.smtp.pass } : undefined,
-    });
+const wellKnown = createRequire(import.meta.url)('nodemailer/lib/well-known') as (name: string) => { host?: string; port?: number; secure?: boolean } | false;
+
+/** The mail server to contact: SMTP_HOST, or the host of the SMTP_SERVICE preset. null when neither is usable. */
+export function smtpEndpoint(): { host: string; port: number; secure: boolean } | null {
+  const s = config.smtp;
+  // An explicit host wins over a preset (lets a preset be pointed at a regional endpoint)
+  if (s.host) return { host: s.host, port: s.port, secure: s.secure ?? s.port === 465 };
+  if (!s.service) return null;
+  const p = wellKnown(s.service);
+  if (!p || !p.host) return null;
+  if (s.portSet) return { host: p.host, port: s.port, secure: s.secure ?? s.port === 465 };
+  const port = p.port ?? 587;
+  return { host: p.host, port, secure: s.secure ?? p.secure ?? port === 465 };
+}
+
+/** What is missing or wrong in the SMTP settings (names only — never values), or null when complete */
+export function smtpConfigProblem(): string | null {
+  const s = config.smtp;
+  if (!s.host && !s.service) return 'SMTP is not configured: set SMTP_HOST (or SMTP_SERVICE / SMTP_URL) and SMTP_FROM in the server .env, then restart';
+  if (!s.host && !smtpEndpoint()) return `SMTP_SERVICE "${s.service}" is not a known provider preset — use SMTP_HOST / SMTP_PORT instead`;
+  if (!s.from) return 'SMTP_FROM is not set (and SMTP_USER is not an email address to fall back to)';
+  if (!/^(.*<\s*)?[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+(\s*>)?$/.test(s.from)) return 'SMTP_FROM is not a valid email address (use alerts@example.com or "Ops Alerts <alerts@example.com>")';
+  if (s.user && !s.pass) return 'SMTP_USER is set but SMTP_PASS is empty';
+  if (!s.user && s.pass) return 'SMTP_PASS is set but SMTP_USER is empty';
+  const ep = smtpEndpoint();
+  if (ep?.port === 465 && !ep.secure) return 'Port 465 uses implicit TLS but SMTP_SECURE=false: set SMTP_SECURE=true (or remove it), or use port 587';
+  if (ep?.port === 587 && ep.secure) return 'Port 587 uses STARTTLS but SMTP_SECURE=true: set SMTP_SECURE=false (or remove it), or use port 465';
+  return null;
+}
+
+/** nodemailer options; `address` is the checked IP to connect to (TLS still verifies the host name) */
+export function smtpTransportOptions(address?: string): Record<string, unknown> {
+  const s = config.smtp;
+  const ep = smtpEndpoint();
+  if (!ep) throw new PermanentDeliveryError(smtpConfigProblem() ?? 'SMTP is not configured');
+  return {
+    host: address ?? ep.host,
+    port: ep.port,
+    secure: ep.secure,
+    servername: ep.host,
+    auth: s.user ? { user: s.user, pass: s.pass } : undefined,
+    requireTLS: s.requireTls || undefined,
+    tls: { rejectUnauthorized: s.tlsRejectUnauthorized, servername: ep.host },
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 20_000,
+  };
+}
+
+/**
+ * Resolves the mail server and applies the outbound guard (server/netguard.ts): link-local / cloud
+ * metadata is always refused; loopback / private only when listed in NOTIFY_ALLOWED_PRIVATE_TARGETS.
+ * The returned address is the one connected to (no second resolution, no DNS rebinding).
+ */
+export async function resolveSmtpAddress(host: string): Promise<string> {
+  const policy = notifyTargetPolicy();
+  const allowedName = policy.allowPrivate.some(e => e.trim().toLowerCase() === host.toLowerCase());
+  if (!net.isIP(host) && /^(localhost|.*\.localhost|metadata(\.google\.internal)?|.*\.internal|.*\.local)$/i.test(host) && !allowedName) {
+    throw new PermanentDeliveryError(`Refused: mail server ${host} is an internal host name (allow it explicitly with NOTIFY_ALLOWED_PRIVATE_TARGETS)`);
   }
-  return transporter;
+  let addresses: string[];
+  if (net.isIP(host)) addresses = [host];
+  else {
+    try { addresses = (await dns.promises.lookup(host, { all: true, verbatim: true })).map(a => a.address); }
+    catch { throw new Error(`Cannot reach the mail server: ${host} does not resolve (check SMTP_HOST / DNS)`); }
+  }
+  for (const ip of addresses) {
+    const why = addressRefusal(ip, host, policy);
+    if (why) throw new PermanentDeliveryError(`Refused: mail server ${host} → ${why}`);
+  }
+  return addresses[0];
+}
+
+/** A transport for one send / check, connected to the checked address */
+async function mailer(): Promise<Transporter> {
+  const problem = smtpConfigProblem();
+  if (problem) throw new PermanentDeliveryError(problem);
+  const ep = smtpEndpoint()!;
+  return nodemailer.createTransport(smtpTransportOptions(await resolveSmtpAddress(ep.host)));
+}
+
+/** Server replies can echo what was sent: the password never leaves in an error message */
+const redactSmtp = (s: string) => (config.smtp.pass && config.smtp.pass.length >= 4 ? s.split(config.smtp.pass).join('••••') : s);
+
+/**
+ * SMTP failure → plain-language reason. Authentication, sender / recipient refusals and TLS
+ * mismatches are permanent (retrying sends the same request); network trouble and 4xx are retried.
+ */
+export function describeSmtpError(err: unknown): { message: string; permanent: boolean } {
+  if (err instanceof PermanentDeliveryError) return { permanent: true, message: redactSmtp(err.message) };
+  const e = err as { code?: string; responseCode?: number; response?: string; message?: string };
+  const raw = redactSmtp((e.response || e.message || 'unknown error').trim()).slice(0, 300);
+  const code = e.responseCode;
+  const where = smtpServerLabel();
+  if (/^Cannot reach the mail server/.test(raw)) return { permanent: false, message: raw };
+  if (e.code === 'EAUTH' || code === 535 || code === 534 || code === 530) {
+    return { permanent: true, message: `SMTP login rejected (${raw}). Check SMTP_USER / SMTP_PASS. Gmail and Microsoft 365 need an app password (or SMTP AUTH enabled for the mailbox); SendGrid uses the user "apikey" with the API key as password.` };
+  }
+  if (/wrong version number|ssl3_get_record|unknown protocol|EPROTO/i.test(raw) || e.code === 'ETLS') {
+    return { permanent: true, message: `TLS mismatch with ${where} (${raw}). Use port 465 with SMTP_SECURE=true, or port 587 with SMTP_SECURE=false (STARTTLS).` };
+  }
+  if (/self[- ]signed|unable to verify|certificate/i.test(raw)) {
+    return { permanent: true, message: `The certificate of ${where} is not trusted (${raw}). For an internal relay with its own certificate set SMTP_TLS_REJECT_UNAUTHORIZED=false.` };
+  }
+  if (e.code === 'EENVELOPE' || (code !== undefined && code >= 550 && code <= 554)) {
+    return { permanent: true, message: `The mail server refused the message (${raw}). SMTP_FROM must be an address this account may send as, and the recipients must be valid.` };
+  }
+  if (code !== undefined && code >= 500) return { permanent: true, message: `SMTP error ${code}: ${raw}` };
+  if (e.code === 'ETIMEDOUT' || e.code === 'ECONNECTION' || e.code === 'ESOCKET' || e.code === 'EDNS' || /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|timeout/i.test(raw)) {
+    return { permanent: false, message: `Cannot reach the mail server ${where} (${raw}). Check the host and port, and that outbound SMTP is allowed by the firewall / hosting provider (port 25 is often blocked — use 587 or 465).` };
+  }
+  return { permanent: false, message: `SMTP error${code ? ` ${code}` : ''}: ${raw}` };
+}
+
+/** "smtp.gmail.com:465 (Gmail)" — host and port only, never credentials */
+export function smtpServerLabel(): string {
+  const ep = smtpEndpoint();
+  if (!ep) return config.smtp.service || '(not configured)';
+  return `${ep.host}:${ep.port}${config.smtp.service && !config.smtp.host ? ` (${config.smtp.service})` : ''}`;
+}
+
+/** Connects and logs in without sending anything (Setup / Notifications "Check SMTP") */
+export async function verifySmtp(): Promise<{ ok: boolean; error?: string; server: string }> {
+  const server = smtpServerLabel();
+  let t: Transporter | null = null;
+  try {
+    t = await mailer();
+    await t.verify();
+    return { ok: true, server };
+  } catch (err) {
+    return { ok: false, server, error: describeSmtpError(err).message };
+  } finally {
+    t?.close();
+  }
+}
+
+const htmlEscape = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+
+/** Email body: plain text plus a simple HTML version (most clients show the HTML) */
+export function emailContent(msg: NotificationMessage): { subject: string; text: string; html: string } {
+  const color = `#${COLORS[msg.status]}`;
+  const lines = msg.text.split('\n').filter(Boolean).map(l => `<p style="margin:0 0 6px">${htmlEscape(l)}</p>`).join('');
+  const link = msg.link ? `<p style="margin:14px 0 0"><a href="${htmlEscape(msg.link)}" style="color:#0b5cad">Open in Scholario Ops</a></p>` : '';
+  return {
+    subject: `[${msg.status}] ${msg.title}`,
+    text: `${msg.text}${msg.link ? `\n\n${msg.link}` : ''}`,
+    html: `<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1f2933">`
+      + `<div style="border-left:4px solid ${color};padding:4px 12px;margin-bottom:12px"><strong style="font-size:15px">[${msg.status}] ${htmlEscape(msg.title)}</strong></div>`
+      + `${lines}${link}<p style="margin:16px 0 0;font-size:11px;color:#7b8794">Sent by Scholario Ops</p></div>`,
+  };
 }
 
 /** Destinations allowed to resolve to private / loopback addresses (NOTIFY_ALLOWED_PRIVATE_TARGETS) */
@@ -50,6 +191,10 @@ const HTTP_HINTS: Record<number, string> = {
   413: 'the message is too large for the destination',
   429: 'the destination is rate-limiting — retried later',
 };
+
+/** "Get link to channel" opens Teams in a browser; a POST to it returns 405 and nothing is delivered */
+export const TEAMS_CHANNEL_LINK = /^https:\/\/teams\.(microsoft\.com|cloud\.microsoft|live\.com)\//i;
+export const TEAMS_CHANNEL_LINK_HELP = 'This is a link to a Teams channel, not a webhook — nothing was sent. In Teams open the channel → ⋯ → Workflows → "Post to a channel when a webhook request is received", then edit this channel and paste the URL it gives you.';
 
 /** A failure that retrying cannot fix (bad URL, rejected payload, missing configuration) */
 class PermanentDeliveryError extends Error {}
@@ -175,6 +320,28 @@ export const isTeamsWorkflowUrl = (url: string) => {
   try { return /(^|\.)(logic\.azure\.com|powerplatform\.com|api\.powerplatform\.com)$/i.test(new URL(url).hostname); } catch { return false; }
 };
 
+/**
+ * Why a TEAMS target cannot receive messages, or null. Browser pages (channel / chat links, the
+ * Power Automate editor, SharePoint, sign-in pages) answer a POST with 405 or a login page; a
+ * Workflows URL without its sig= parameter is rejected with 401.
+ */
+export function teamsTargetProblem(url: string): string | null {
+  let u: URL;
+  try { u = new URL(url); } catch { return 'The Teams webhook URL is not a valid URL'; }
+  const host = u.hostname.toLowerCase();
+  if (TEAMS_CHANNEL_LINK.test(url)) return TEAMS_CHANNEL_LINK_HELP;
+  if (/(^|\.)(make\.powerautomate\.com|flow\.microsoft\.com|make\.powerapps\.com)$/.test(host)) {
+    return 'This is the Power Automate editor page, not the webhook — nothing was sent. Open the flow, select the "When a Teams webhook request is received" trigger and copy its HTTP URL.';
+  }
+  if (/(^|\.)(sharepoint\.com|login\.microsoftonline\.com|login\.live\.com)$/.test(host)) {
+    return 'This is a Microsoft web page, not a webhook — nothing was sent. Paste the Workflows webhook URL from the Teams channel (⋯ → Workflows).';
+  }
+  if (isTeamsWorkflowUrl(url) && !u.searchParams.get('sig')) {
+    return 'The Workflows webhook URL is incomplete: the "sig=" parameter is missing (Teams would answer 401). Copy the whole URL from the workflow trigger.';
+  }
+  return null;
+}
+
 export function teamsPayload(url: string, msg: NotificationMessage): Record<string, unknown> {
   if (!isTeamsWorkflowUrl(url)) {
     return {
@@ -210,12 +377,27 @@ export function teamsPayload(url: string, msg: NotificationMessage): Record<stri
 
 const COLORS: Record<NotificationMessage['status'], string> = { FIRING: 'D13438', RESOLVED: '2EB886', ESCALATED: 'FF8C00', INFO: '0078D7', TEST: '0078D7' };
 
+/** PagerDuty Events API v2 body. RESOLVED closes the incident (same dedup_key); everything else triggers. */
+export function pagerdutyPayload(routingKey: string, msg: NotificationMessage): Record<string, unknown> {
+  const severity = ['CRITICAL', 'EMERGENCY'].includes(msg.severity) ? 'critical'
+    : msg.severity === 'HIGH' ? 'error'
+      : msg.severity === 'WARNING' ? 'warning' : 'info';
+  return {
+    routing_key: routingKey,
+    event_action: msg.status === 'RESOLVED' ? 'resolve' : 'trigger',
+    dedup_key: msg.incidentId,
+    payload: { summary: msg.title, source: 'scholario-ops', severity, custom_details: { text: msg.text } },
+    links: msg.link ? [{ href: msg.link, text: 'Scholario Ops' }] : undefined,
+  };
+}
+
 async function deliver(channel: CommunicationChannel, msg: NotificationMessage) {
   const target = channel.targetEndpoint.trim();
   if (!target) throw new PermanentDeliveryError('Channel has no target configured');
   if (isSealed(target)) throw new PermanentDeliveryError('The stored channel target cannot be decrypted (the secrets key changed or was lost) — edit the channel and enter it again');
   switch (channel.type) {
     case 'TEAMS':
+      { const problem = teamsTargetProblem(target); if (problem) throw new PermanentDeliveryError(problem); }
       await postJson(target, teamsPayload(target, msg));
       return;
     case 'WEBHOOK':
@@ -223,28 +405,20 @@ async function deliver(channel: CommunicationChannel, msg: NotificationMessage) 
       await postJson(target, { ...msg, details: msg.text, text: `*[${msg.status}] ${msg.title}*\n${msg.text}${msg.link ? `\n${msg.link}` : ''}` }, true);
       return;
     case 'PAGERDUTY':
-      await postJson('https://events.pagerduty.com/v2/enqueue', {
-        routing_key: target,
-        event_action: msg.status === 'RESOLVED' ? 'resolve' : 'trigger',
-        dedup_key: msg.incidentId,
-        payload: {
-          summary: msg.title,
-          source: 'scholario-ops',
-          severity: ['CRITICAL', 'EMERGENCY'].includes(msg.severity) ? 'critical' : msg.severity === 'HIGH' ? 'error' : msg.severity === 'WARNING' ? 'warning' : 'info',
-          custom_details: { text: msg.text },
-        },
-        links: msg.link ? [{ href: msg.link, text: 'Scholario Ops' }] : undefined,
-      });
+      await postJson('https://events.pagerduty.com/v2/enqueue', pagerdutyPayload(target, msg));
       return;
     case 'EMAIL': {
-      const t = mailer();
-      if (!t) throw new PermanentDeliveryError('SMTP is not configured (SMTP_HOST / SMTP_FROM)');
-      await t.sendMail({
-        from: config.smtp.from,
-        to: target,
-        subject: `[${msg.status}] ${msg.title}`,
-        text: `${msg.text}${msg.link ? `\n\n${msg.link}` : ''}`,
-      });
+      const to = target.split(/[,;\s]+/).filter(Boolean);
+      let t: Transporter | null = null;
+      try {
+        t = await mailer();
+        await t.sendMail({ from: config.smtp.from, to, ...emailContent(msg) });
+      } catch (err) {
+        const d = describeSmtpError(err);
+        throw d.permanent ? new PermanentDeliveryError(d.message) : new Error(d.message);
+      } finally {
+        t?.close();
+      }
       return;
     }
     default:
@@ -312,42 +486,111 @@ function dropFromGroup(incident: Incident): boolean {
   const i = g ? g.items.findIndex(x => x.id === incident.id) : -1;
   if (!g || i < 0) return false;
   g.items.splice(i, 1);
+  incident.notifyGroupPending = undefined;
   timelineNote(incident, 'INFO', 'Recovered before the grouped notification was sent — nobody was paged for it');
   persist();
   return true;
 }
 
-/** Sends the summary of one application's group (one message, all its alerts) */
-function flushGroup(applicationId: string) {
-  const g = groups.get(applicationId);
-  if (!g) return;
-  clearTimeout(g.timer);
-  groups.delete(applicationId);
-  const items = g.items.filter(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED');
-  if (items.length === 0) return;
-  for (const i of items) firingSent.add(i.id);
-  const top = items.reduce((a, b) => ((SEV_RANK[b.severity] ?? 0) > (SEV_RANK[a.severity] ?? 0) ? b : a));
+const inOpenGroup = (incident: Incident) => {
+  const g = incident.applicationId ? groups.get(incident.applicationId) : undefined;
+  return Boolean(g && g.items.some(i => i.id === incident.id));
+};
+
+/**
+ * One summary for the follow-up alerts of an application. Flags are cleared after the send is
+ * recorded, so a crash in between is replayed from the flags and skipped when the log already
+ * shows the summary was delivered.
+ */
+async function dispatchGroupSummary(applicationId: string, items: Incident[]): Promise<boolean> {
+  const live = items.filter(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED' && !NEVER_QUIET.includes(i.severity));
+  let dirty = false;
+  for (const i of items) {
+    if (!live.includes(i) && i.notifyGroupPending) { i.notifyGroupPending = undefined; dirty = true; }
+  }
+  if (live.length === 0) { if (dirty) persist(); return false; }
+  for (const i of live) firingSent.add(i.id);
+  const top = live.reduce((a, b) => ((SEV_RANK[b.severity] ?? 0) > (SEV_RANK[a.severity] ?? 0) ? b : a));
   const appName = db.applications.find(a => a.id === applicationId)?.name ?? 'the same application';
-  const msg: NotificationMessage = items.length === 1
+  const msg: NotificationMessage = live.length === 1
     ? {
-      title: `${items[0].id} ${items[0].title}`,
-      text: [`Severity: ${items[0].severity} | Environment: ${items[0].environment} | Status: ${items[0].status}`, items[0].rootCause ? `Detail: ${items[0].rootCause}` : ''].filter(Boolean).join('\n'),
-      severity: items[0].severity, status: 'FIRING', incidentId: items[0].id, link: incidentLink(items[0].id),
+      title: `${live[0].id} ${live[0].title}`,
+      text: [`Severity: ${live[0].severity} | Environment: ${live[0].environment} | Status: ${live[0].status}`, live[0].rootCause ? `Detail: ${live[0].rootCause}` : ''].filter(Boolean).join('\n'),
+      severity: live[0].severity, status: 'FIRING', incidentId: live[0].id, link: incidentLink(live[0].id),
     }
     : {
-      title: `${items.length} more alerts for ${appName}`,
-      text: [`Grouped: ${items.length} further alerts for ${appName} within ${config.notifyGroupWindowSec} s of the first one.`, ...items.map(i => `• ${i.id} [${i.severity}] ${i.title}`)].join('\n'),
+      title: `${live.length} more alerts for ${appName}`,
+      text: [`Grouped: ${live.length} further alerts for ${appName} within ${config.notifyGroupWindowSec} s of the first one.`, ...live.map(i => `• ${i.id} [${i.severity}] ${i.title}`)].join('\n'),
       severity: top.severity, status: 'FIRING', incidentId: top.id, link: incidentLink(top.id),
     };
-  for (const ch of channelsForSeverity(top.severity)) void sendToChannel(ch, msg);
-  log.info('notify', `grouped notification for ${appName}: ${items.length} alert(s)`);
+  await Promise.all(channelsForSeverity(top.severity).map(ch => sendToChannel(ch, msg)));
+  for (const i of live) i.notifyGroupPending = undefined;
+  persist();
+  log.info('notify', `grouped notification for ${appName}: ${live.length} alert(s)`);
+  return true;
 }
 
-/** Alerts waiting in an open group for their summary */
-export const pendingGroupedAlerts = () => [...groups.values()].reduce((n, g) => n + g.items.length, 0);
+/** Sends the summary of one application's group (one message, all its alerts) */
+function flushGroup(applicationId: string): Promise<boolean> {
+  const g = groups.get(applicationId);
+  if (!g) return Promise.resolve(false);
+  clearTimeout(g.timer);
+  groups.delete(applicationId);
+  return dispatchGroupSummary(applicationId, g.items);
+}
 
-/** Sends every pending group now (graceful shutdown, tests) */
-export function flushNotificationGroups() { for (const id of [...groups.keys()]) flushGroup(id); }
+/**
+ * After a restart (leader only): open incidents still flagged from a group that never flushed.
+ * Recovered and critical alerts are not grouped. A summary already in the delivery log is not sent again.
+ */
+export async function replayPendingGroupSummaries(): Promise<number> {
+  if (!isNotificationWorker()) return 0;
+  const sent = await recentDeliveredFiringMessages(24);
+  const already = (id: string) => firingSent.has(id) || sent.some(s => s.incidentId === id || s.text.includes(`• ${id} [`));
+  const byApp = new Map<string, Incident[]>();
+  let dirty = false;
+  const clear = (inc: Incident) => { if (inc.notifyGroupPending) { inc.notifyGroupPending = undefined; dirty = true; } };
+  for (const inc of db.incidents) {
+    if (!inc.notifyGroupPending || inOpenGroup(inc)) continue;
+    if (inc.status === 'RESOLVED' || inc.status === 'CLOSED' || !inc.applicationId) { clear(inc); continue; }
+    if (already(inc.id)) { firingSent.add(inc.id); clear(inc); continue; }
+    if (NEVER_QUIET.includes(inc.severity)) {
+      clear(inc);
+      if (dirty) { persist(); dirty = false; }
+      notifyIncident(inc, 'FIRING');
+      continue;
+    }
+    const list = byApp.get(inc.applicationId) ?? [];
+    list.push(inc);
+    byApp.set(inc.applicationId, list);
+  }
+  if (dirty) persist();
+  let n = 0;
+  for (const [appId, items] of byApp) if (await dispatchGroupSummary(appId, items)) n++;
+  return n;
+}
+
+/** Alerts waiting for a grouped summary: the live window, plus flags a restart has not replayed yet */
+export const pendingGroupedAlerts = () => {
+  const inMemory = new Set<string>();
+  let n = 0;
+  for (const g of groups.values()) for (const i of g.items) { inMemory.add(i.id); n++; }
+  for (const i of db.incidents) {
+    if (i.notifyGroupPending && !inMemory.has(i.id) && i.status !== 'RESOLVED' && i.status !== 'CLOSED') n++;
+  }
+  return n;
+};
+
+/** Sends every pending group now (graceful shutdown, tests) and resolves when those sends are recorded */
+export function flushNotificationGroups(): Promise<void> {
+  return Promise.all([...groups.keys()].map(id => flushGroup(id))).then(() => undefined);
+}
+
+/** For tests: drop the in-memory group window without sending, leaving the durable flags behind */
+export function dropOpenGroupsForTests() {
+  for (const g of groups.values()) clearTimeout(g.timer);
+  groups.clear();
+}
 
 /** Severities whose notifications are never held by quiet hours */
 export const NEVER_QUIET: ReadonlyArray<Incident['severity']> = ['CRITICAL', 'EMERGENCY'];
@@ -424,12 +667,14 @@ export function notifyIncident(incident: Incident, status: 'FIRING' | 'RESOLVED'
     if (g) {
       if (!g.items.some(i => i.id === incident.id)) {
         g.items.push(incident);
+        // Durable: a crash inside the window still sends this summary on the next start
+        incident.notifyGroupPending = new Date().toISOString();
         timelineNote(incident, 'INFO', `Included in a grouped notification for this application (sent within ${config.notifyGroupWindowSec} s)`);
         persist();
       }
       return true;
     }
-    const timer = setTimeout(() => flushGroup(incident.applicationId), config.notifyGroupWindowSec * 1000);
+    const timer = setTimeout(() => { void flushGroup(incident.applicationId).catch(err => log.error('notify', `grouped summary failed: ${(err as Error).message}`)); }, config.notifyGroupWindowSec * 1000);
     timer.unref?.();
     groups.set(incident.applicationId, { items: [], timer, openedAt: now });
   }
@@ -502,7 +747,7 @@ export function escalateStep(incident: Incident, steps: EscalationStep[], index:
     link: incidentLink(incident.id),
   };
   for (const ch of chosen) void sendToChannel(ch, msg);
-  const emailOnCall = onCall.length > 0 && isSmtpConfigured();
+  const emailOnCall = onCall.length > 0 && !smtpConfigProblem();
   if (emailOnCall) {
     const direct = { id: 'on-call', name: 'On-call users', type: 'EMAIL', targetEndpoint: onCall.map(u => u.email).join(', '), enabled: true } as CommunicationChannel;
     void deliverAndRecord(direct, msg).then(r => { if (!r.ok) log.error('notify', `escalation email to on-call users failed: ${r.error}`); });

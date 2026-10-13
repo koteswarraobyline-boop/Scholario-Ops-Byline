@@ -94,8 +94,21 @@ export function secretsKeyStatus(): { ok: true } | { ok: false; error: string } 
   try { loadKey(); return { ok: true }; } catch (err) { return { ok: false, error: (err as Error).message }; }
 }
 
+/**
+ * Non-secret identifier of the key (HMAC of a constant, 16 hex): stored next to the data so a key
+ * that was swapped or regenerated is detected at startup, not only when a decrypt fails.
+ */
+export function keyFingerprint(): string | null {
+  try { return crypto.createHmac('sha256', loadKey()).update('scholario-ops:notify-secrets:fingerprint:v1').digest('hex').slice(0, 16); }
+  catch { return null; }
+}
+
+let fingerprintMismatch: { stored: string; current: string } | null = null;
+export const keyFingerprintMismatch = () => fingerprintMismatch;
+export const setKeyFingerprintMismatch = (m: { stored: string; current: string } | null) => { fingerprintMismatch = m; };
+
 /** For tests: forget the in-memory cache and key (simulates a new process) */
 export function resetSecretsForTests(newKey?: string) {
-  sealed.clear(); undecryptable.clear(); key = null; encryptedDataSeen = false;
+  sealed.clear(); undecryptable.clear(); key = null; encryptedDataSeen = false; fingerprintMismatch = null;
   if (newKey !== undefined) process.env.NOTIFY_SECRETS_KEY = newKey;
 }

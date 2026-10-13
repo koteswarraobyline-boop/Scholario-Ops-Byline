@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
-import { CommunicationChannel, EscalationPolicy, EscalationStep, IncidentSeverity } from '../../types';
+import { CommunicationChannel, EscalationPolicy, EscalationStep, IncidentSeverity, SmtpCheckResult } from '../../types';
 import type { QuietHours } from '../../lib/quietHours';
 import {
   Send,
@@ -20,6 +20,7 @@ import {
 import { EmptyState } from '../ui/EmptyState';
 import { DeliveryLog, useDeliveryStats } from './DeliveryLog';
 import { NotificationHealthCard } from './NotificationHealthCard';
+import { api } from '../../services/api';
 
 type ChannelType = CommunicationChannel['type'];
 
@@ -39,7 +40,7 @@ const CHANNEL_TYPES: { value: ChannelType; label: string; targetLabel: string; p
   {
     value: 'EMAIL', label: 'Email', targetLabel: 'Recipient addresses',
     placeholder: 'oncall@yourdomain.com, admin@yourdomain.com',
-    help: 'Comma separated addresses. Requires SMTP settings in the Ops server environment.',
+    help: 'Comma separated addresses. Works with any mail provider (Gmail, Microsoft 365, SendGrid, Mailgun, Amazon SES, Zoho, Brevo, your own relay) through the SMTP settings in the Ops server .env.',
   },
   {
     value: 'PAGERDUTY', label: 'PagerDuty', targetLabel: 'Events v2 routing key',
@@ -150,6 +151,11 @@ export const CommunicationsView: React.FC = () => {
     setBusy(key);
     try { await fn(); } finally { setBusy(null); }
   };
+
+  const [smtpCheck, setSmtpCheck] = useState<SmtpCheckResult | null>(null);
+  const checkSmtp = () => withBusy('smtp', async () => {
+    try { setSmtpCheck(await api.verifySmtp()); } catch (e) { setSmtpCheck({ ok: false, server: '', error: (e as Error).message }); }
+  });
 
   const handleManualHealthProbe = async () => {
     setIsProbingHealth(true);
@@ -412,8 +418,37 @@ export const CommunicationsView: React.FC = () => {
         }`}>
           <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
           <span>
-            SMTP is not configured on the Ops server, so EMAIL channels cannot deliver. Set the SMTP environment variables on the server and restart it.
+            {integrations?.smtp.problem ? <><strong>{integrations.smtp.problem}.</strong>{' '}</> : null}
+            EMAIL channels cannot deliver until this is fixed. In the server <code>.env</code> set <code>SMTP_FROM</code> plus either <code>SMTP_SERVICE</code> (e.g. Gmail, Outlook365, SendGrid), <code>SMTP_URL</code>, or <code>SMTP_HOST</code>/<code>SMTP_PORT</code>, with <code>SMTP_USER</code>/<code>SMTP_PASS</code>, then restart it.
           </span>
+        </div>
+      )}
+
+      {/* SMTP connection check (admins): logs in to the mail server without sending */}
+      {isAdmin && integrations && (integrations.smtp.configured || hasEmailChannel) && (
+        <div className={`p-3 rounded border text-xs font-mono flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${cardCls}`}>
+          <div className="min-w-0 break-words">
+            <span className="font-bold">Email (SMTP):</span> {integrations.smtp.server ?? '—'} · from {integrations.smtp.from ?? '—'}
+            {smtpCheck && (
+              <div role="status" className={`mt-1 font-sans ${smtpCheck.ok ? 'text-emerald-500' : 'text-rose-500'}`}>
+                {smtpCheck.ok ? 'Connected and logged in — email channels can deliver.' : smtpCheck.error}
+              </div>
+            )}
+            {smtpCheck && !smtpCheck.ok && smtpCheck.settings && (
+              <div className="mt-1 font-sans opacity-80">
+                Read at startup from <code>{smtpCheck.settings.envFile}</code>{smtpCheck.settings.envFileFound ? '' : ' (file not found)'}.{' '}
+                Empty or missing: {smtpCheck.settings.variables.filter(v => !v.present).map(v => v.name).join(', ') || 'none'}.
+                {smtpCheck.settings.variables.some(v => v.source === 'environment') && (
+                  <> Set in the environment before <code>.env</code> was read, so they win over it: {smtpCheck.settings.variables.filter(v => v.source === 'environment').map(v => v.name).join(', ')}.</>
+                )}
+                {smtpCheck.settings.envFileChangedSinceStart && <> <strong>.env was saved after the server started — restart it.</strong></>}
+              </div>
+            )}
+          </div>
+          <button onClick={checkSmtp} disabled={busy !== null} className={`${secondaryBtn} shrink-0`}>
+            <RefreshCw className={`w-3 h-3 ${busy === 'smtp' ? 'animate-spin' : ''}`} />
+            <span>{busy === 'smtp' ? 'Checking…' : 'Check SMTP'}</span>
+          </button>
         </div>
       )}
 

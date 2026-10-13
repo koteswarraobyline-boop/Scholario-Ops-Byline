@@ -15,7 +15,7 @@ npm install
 npm run dev               # http://localhost:3000
 ```
 
-If `ADMIN_PASSWORD` is empty, the first start prints a generated password in the console.
+If `ADMIN_PASSWORD` is empty (or too weak), the first start generates a password and saves it to `DATA_DIR/initial-admin-password.txt` (the console only shows the file path). Sign in, change it, then delete that file.
 
 ## Configuration: entered in the dashboard, stored in PostgreSQL
 
@@ -46,7 +46,7 @@ On first start against an empty database, an existing `data/ops-store.json` (the
 To change any of these, edit the server or the ICT application in Setup. These values exist only in the database; to set up a new, empty database, enter them in Setup or restore a database backup (`pg_dump --schema=ops`).
 
 All status values come from live sources:
-- **HTTPS monitors** check both URLs every 30 s. Results are classified as UP, DEGRADED, DOWN, TIMEOUT, DNS_ERROR, TLS_ERROR or CONNECTION_ERROR and stored in `DATA_DIR/checks/`.
+- **HTTPS monitors** check both URLs every 30 s. Results are classified as UP, DEGRADED, DOWN, TIMEOUT, DNS_ERROR, TLS_ERROR or CONNECTION_ERROR and stored in the PostgreSQL table `check_results` (kept `CHECK_HISTORY_RETENTION_DAYS`).
 - **Cloudflare Load Balancing** reads pools, pool health, origin RTT and response codes every 60 s, read-only (account `3d3255caf03b25ccf9e2d7abd0d26d15`). If the token or a permission is missing, the dashboard says "Not configured" or "Cloudflare permission required".
 - **Agent** sends CPU, memory, disk, load, network, services and processes. Install it on each ICT VPS from Infrastructure/Setup. It only makes outbound HTTPS calls to `PUBLIC_URL`, so no ports are opened on the VPS.
 - **Incidents** are raised when a monitor is confirmed DOWN (with Cloudflare origin correlation) or when Cloudflare marks an origin unhealthy. Recovery is recorded automatically.

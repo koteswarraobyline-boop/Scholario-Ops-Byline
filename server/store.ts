@@ -17,7 +17,7 @@ import {
 import { DATA_DIR, config } from './config.ts';
 import { query, withTransaction, migrate, T } from './db.ts';
 import { log } from './logger.ts';
-import { sealSecret, openSecret, isSealed, noteEncryptedData } from './secrets.ts';
+import { sealSecret, openSecret, isSealed, noteEncryptedData, keyFingerprint, setKeyFingerprintMismatch } from './secrets.ts';
 
 /**
  * Encrypts for storage. Without a usable key (lost key file) the value is written exactly as it is
@@ -307,6 +307,38 @@ const TABLES: TableDef<unknown>[] = [
 /** Other key/value metadata (e.g. migration markers) */
 const metaExtra = new Map<string, string>();
 
+const KEY_FP = 'notify_secrets_key_fp';
+/**
+ * Stores the secrets-key fingerprint once every channel target is readable with the current key.
+ * While targets from another key remain, the old fingerprint is kept and the mismatch is reported.
+ * Must not run inside a table's rows(): the startup baseline snapshot would then count a new
+ * fingerprint as already stored, and it would never be written. Returns true when meta changed.
+ */
+function recordKeyFingerprint(channels: CommunicationChannel[]): boolean {
+  const current = keyFingerprint();
+  if (!current || !channels.some(c => c.targetEndpoint)) return false;
+  const stored = metaExtra.get(KEY_FP);
+  if (stored === current) { setKeyFingerprintMismatch(null); return false; }
+  if (channels.some(c => isSealed(c.targetEndpoint))) {
+    if (stored) setKeyFingerprintMismatch({ stored, current });
+    return false;
+  }
+  metaExtra.set(KEY_FP, current);
+  setKeyFingerprintMismatch(null);
+  return true;
+}
+
+/** Startup check: a different key than the one the stored targets were written with. Returns true when meta changed. */
+function checkKeyFingerprint(channels: CommunicationChannel[]): boolean {
+  const stored = metaExtra.get(KEY_FP);
+  const current = keyFingerprint();
+  if (stored && current && stored !== current) {
+    setKeyFingerprintMismatch({ stored, current });
+    log.error('secrets', `the notification secrets key changed (fingerprint ${stored} → ${current}); stored channel targets were written with the previous key — restore it, or re-enter every channel target`);
+  }
+  return recordKeyFingerprint(channels);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Diff-based write-back
 // ─────────────────────────────────────────────────────────────────────────────
@@ -361,6 +393,7 @@ export async function flush(): Promise<boolean> {
   while (flushing) await flushing;
   if (!dirty || !ready) return lastFlushOk;
   dirty = false;
+  recordKeyFingerprint(db.channels);
   const snaps = TABLES.map(def => ({ def, snap: snapshot(def) }));
   flushing = (async () => {
     try {
@@ -530,7 +563,11 @@ export async function initStore(): Promise<{ migrations: string[]; imported: str
   for (const r of (await query(`SELECT key, value FROM ${T('meta')}`)).rows) if (r.key !== 'incident_seq') metaExtra.set(r.key, r.value);
   const imported = await importLegacyJson();
   await loadAll();
+  const fingerprintAdded = checkKeyFingerprint(db.channels);
   ready = true;
+  // An install from before fingerprints (encrypted targets, no fingerprint yet): store it now.
+  // Not on a local production copy (LOCAL_UI_SAFE_MODE): no write at startup, it is stored with the next save.
+  if (fingerprintAdded && process.env.LOCAL_UI_SAFE_MODE !== 'true') { dirty = true; await flush(); }
   // LOCAL_UI_SAFE_MODE=true (set by `npm run dev:prodcopy`, never in production): no metric rollup
   // writes or pruning on a local copy of production data, so its history stays as it was copied
   if (process.env.LOCAL_UI_SAFE_MODE !== 'true') {

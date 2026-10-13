@@ -9,7 +9,7 @@ import { log } from './logger.ts';
 
 export type Role = OpsUser['roleName'];
 export const ROLES: Role[] = ['viewer', 'operator', 'it_administrator', 'super_admin'];
-const ROLE_LEVEL: Record<Role, number> = { viewer: 1, operator: 2, it_administrator: 3, super_admin: 4 };
+export const ROLE_LEVEL: Record<Role, number> = { viewer: 1, operator: 2, it_administrator: 3, super_admin: 4 };
 
 // ── Password hashing (scrypt) ────────────────────────────────────────────────
 const SCRYPT = { N: 16384, r: 8, p: 1 } as const;

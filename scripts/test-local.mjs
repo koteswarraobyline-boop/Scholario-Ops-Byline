@@ -34,6 +34,10 @@ const files = given.length ? given : fs.readdirSync('tests').filter(f => f.endsW
 console.log(`Tests on ${url.hostname}/${TEST_DB} (local, disposable): ${files.length} file(s)`);
 const child = spawn(process.execPath, ['--import', 'tsx', '--test', ...flags, ...files], {
   stdio: 'inherit',
-  env: { ...process.env, DATABASE_URL: url.toString(), HOST: '127.0.0.1' },
+  env: {
+    ...process.env, DATABASE_URL: url.toString(), HOST: '127.0.0.1',
+    // Never the real mail server from .env: an empty variable wins over .env (dotenv does not override it)
+    SMTP_SERVICE: '', SMTP_URL: '', SMTP_HOST: '', SMTP_USER: '', SMTP_PASS: '', SMTP_FROM: '',
+  },
 });
 child.on('exit', code => process.exit(code ?? 1));

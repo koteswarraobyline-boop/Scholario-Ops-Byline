@@ -82,12 +82,19 @@ export const NotificationHealthCard: React.FC = () => {
               )}
               {h.failingChannels.length > 0 && (
                 <ul className="space-y-1" aria-label="Failing channels">
-                  {h.failingChannels.map(c => (
-                    <li key={c.channelId} className="flex items-start gap-1.5 text-rose-500 font-sans">
-                      <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" aria-hidden="true" />
-                      <span className="break-words"><strong>{c.name}</strong> ({c.type}) — {c.consecutiveFailures} failures in a row{c.lastError ? `: ${c.lastError}` : ''}</span>
-                    </li>
-                  ))}
+                  {h.failingChannels.map(c => {
+                    const ch = communicationChannels.find(x => x.id === c.channelId);
+                    const teamsLink = ch?.type === 'TEAMS' && /^https:\/\/teams\.(microsoft\.com|cloud\.microsoft|live\.com)\//i.test(ch.targetEndpoint);
+                    const why = teamsLink
+                      ? 'This is a Teams channel link, not a webhook — it cannot receive messages. Edit the channel and paste a Workflows webhook URL.'
+                      : c.lastError;
+                    return (
+                      <li key={c.channelId} className="flex items-start gap-1.5 text-rose-500 font-sans">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" aria-hidden="true" />
+                        <span className="break-words"><strong>{c.name}</strong> ({c.type}) — {c.consecutiveFailures} failures in a row{why ? `: ${why}` : ''}</span>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </>

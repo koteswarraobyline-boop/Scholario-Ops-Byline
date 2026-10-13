@@ -606,6 +606,8 @@ export interface Incident {
   acknowledgedBy?: string;
   /** The first notification is held back by the escalation policy's initial delay (not sent yet) */
   notificationDeferred?: boolean;
+  /** This alert is waiting in a grouped summary (ISO time it was buffered). Survives a restart. */
+  notifyGroupPending?: string;
   /** When the incident was first escalated for staying unacknowledged */
   escalatedAt?: string;
   /** Multi-step escalation progress */
@@ -1078,8 +1080,21 @@ export interface IntegrationStatus {
   hostinger: { configured: boolean; lastSyncAt: string | null; lastError: string | null; vmCount: number; status: 'NOT_CONFIGURED' | 'OK' | 'AUTH_FAILED' | 'RATE_LIMITED' | 'ERROR' | 'PENDING' };
   notifications: { status: 'CONFIGURED' | 'NOT_CONFIGURED'; enabledChannels: number };
   loadBalancing: { configured: boolean; status: LbSyncStatus; lastSyncAt: string | null; lastError: string | null; poolCount: number };
-  smtp: { configured: boolean };
+  smtp: { configured: boolean; server?: string | null; from?: string | null; problem?: string | null };
   publicUrl: string;
+}
+
+/** Result of Check SMTP; settings carry names and presence only, never values */
+export interface SmtpCheckResult {
+  ok: boolean;
+  error?: string;
+  server: string;
+  settings?: {
+    envFile: string;
+    envFileFound: boolean;
+    envFileChangedSinceStart: boolean;
+    variables: { name: string; present: boolean; source: 'environment' | '.env' | 'unset' }[];
+  };
 }
 
 // ── Scholario Ops' own database backup (GET /api/v1/ops-backup) ─────────────

@@ -74,7 +74,7 @@ Create `/var/www/scholario-ops/.env` from `.env.example` and run `chmod 600 .env
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_NAME` | first start | Creates the first super-admin when the database has no users. If `ADMIN_PASSWORD` is empty or weak, a generated password is written to `DATA_DIR/initial-admin-password.txt` (mode 600), never to the log. |
 | `CLOUDFLARE_API_TOKEN` | recommended | Read-only token: Account › Load Balancing: Monitors and Pools › Read, Zone › Load Balancers › Read, Zone › Zone › Read, with the application zone (e.g. `kodeit.digital`) included in **Zone Resources** (without it, routing / pool order shows "not readable"). It stays on the server. **A token that was ever pasted into chat, source code, a ticket or a log must be rolled** in Cloudflare before production. |
 | `HOSTINGER_API_TOKEN` | optional | Hostinger VPS API (plan, CPU, RAM, disk, OS, state, region), read-only. `HOSTINGER_TIMEOUT_MS` (15000). |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | optional | Email notification channels |
+| `SMTP_SERVICE` or `SMTP_URL` or `SMTP_HOST`/`SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_REQUIRE_TLS`, `SMTP_TLS_REJECT_UNAUTHORIZED` | optional | Email notification channels, any SMTP provider (examples in `.env.example`). Test the login with **Check SMTP** on Notifications. |
 | `DEADMAN_HEARTBEAT_URL` | no — deprecated | Ignored (with a warning if set). The dead-man heartbeat is built in and covers the monitored servers / applications / services / databases |
 | `DEPLOY_REPORT_TOKEN` | optional | Lets CI report deployments |
 | `LOG_LEVEL` / `LOG_FORMAT` | no | `info` / JSON in production (`LOG_FORMAT=text` for plain text) |
@@ -87,7 +87,6 @@ With `NODE_ENV=production` the server checks this at startup. A missing `DATABAS
 - no `JWT_SECRET`
 - `HOST=0.0.0.0`
 - no Cloudflare token
-- no dead-man URL
 
 ## 3. Database setup
 
