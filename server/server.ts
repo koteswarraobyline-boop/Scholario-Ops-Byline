@@ -17,8 +17,8 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { config, isCloudflareConfigured, isHostingerConfigured, DATA_DIR } from './config.ts';
-import { initStore, flush, flushMetrics } from './store.ts';
-import { closePool, query, SCHEMA } from './db.ts';
+import { initStore, flush, flushMetrics, StoreDataError } from './store.ts';
+import { closePool, query, SCHEMA, MigrationError } from './db.ts';
 import { startHistory, flushChecks } from './history.ts';
 import { startDeliveryLog, flushDeliveries } from './deliveries.ts';
 import { startLeaderElection, releaseLeadership } from './leader.ts';
@@ -27,7 +27,7 @@ import { bootstrapAdmin } from './auth.ts';
 import { buildRouter } from './routes.ts';
 import { startEngine, stopEngine, engineLiveness } from './engine.ts';
 import { syncCloudflare } from './cloudflare.ts';
-import { syncHostinger } from './hostinger.ts';
+import { syncEnabledConnections } from './providers/sync.ts';
 import { syncLoadBalancers } from './loadbalancer.ts';
 import { closeAllSseClients } from './events.ts';
 import { log } from './logger.ts';
@@ -93,7 +93,7 @@ function rateLimit(req: express.Request, res: express.Response, next: express.Ne
   next();
 }
 
-async function waitForStore() {
+async function waitForStore(): Promise<boolean> {
   let delay = 2000;
   for (let attempt = 1; !shuttingDown; attempt++) {
     try {
@@ -101,14 +101,20 @@ async function waitForStore() {
       if (migrations.length) log.info('db', `applied migrations: ${migrations.join(', ')}`);
       if (imported) log.info('db', `imported previous JSON data into PostgreSQL: ${imported}`);
       lastStartupError = null;
-      return;
+      return true;
     } catch (err) {
       lastStartupError = (err as Error).message;
+      // The database answered and the transaction was rolled back. Retrying would fail the same way.
+      if (err instanceof MigrationError || err instanceof StoreDataError) {
+        log.error('db', lastStartupError);
+        return false;
+      }
       log.error('db', `PostgreSQL not ready (attempt ${attempt}) — retrying in ${Math.round(delay / 1000)}s`, { error: err as Error });
       await new Promise(r => setTimeout(r, delay));
       delay = Math.min(30_000, delay * 2);
     }
   }
+  return false;
 }
 
 const localUiSafeMode = process.env.LOCAL_UI_SAFE_MODE === 'true';
@@ -136,10 +142,8 @@ function startBackgroundWork() {
     void syncCloudflare().catch(() => {});
     every('cloudflare', config.cloudflareSyncIntervalSec * 1000, () => syncCloudflare().catch(() => {}));
   }
-  if (isHostingerConfigured()) {
-    void syncHostinger().catch(() => {});
-    every('hostinger', config.hostingerSyncIntervalSec * 1000, () => syncHostinger().catch(() => {}));
-  }
+  void syncEnabledConnections();
+  every('hostinger', config.hostingerSyncIntervalSec * 1000, () => { void syncEnabledConnections(); });
   // Alerts derived from state (agent offline, DB down, replication, backups, DR readiness, SSL expiry)
   every('alerts', 60_000, evaluateAlerts);
 }
@@ -324,8 +328,8 @@ async function main() {
   // PM2 sends a "shutdown" message instead of a signal when shutdown_with_message is set (needed on Windows)
   process.on('message', msg => { if (msg === 'shutdown') shutdown('PM2 shutdown message'); });
 
-  await waitForStore();
-  if (shuttingDown) return;
+  const started = await waitForStore();
+  if (shuttingDown || !started) return;
   storeReady = true;
   if (localUiSafeMode) {
     log.info('server', 'ready — UI-safe mode; background monitoring disabled');

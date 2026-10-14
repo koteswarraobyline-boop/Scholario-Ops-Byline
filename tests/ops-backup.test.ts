@@ -15,7 +15,9 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import dotenv from 'dotenv';
 import pg from 'pg';
+import { pinTestDatabaseUrl, assertConnectedToTestDatabase, dropVerifiedTestSchema, assertScratchDatabaseName } from './helpers/test-db-guard.ts';
 
+const DATABASE_URL = pinTestDatabaseUrl();
 dotenv.config({ quiet: true });
 const { opsBackupHealth } = await import('../server/opsBackup.ts');
 
@@ -44,7 +46,6 @@ const PG_BIN = process.platform === 'win32'
   ? ['18', '17', '16'].map(v => `C:\\Program Files\\PostgreSQL\\${v}\\bin`).find(p => fs.existsSync(p))
   : undefined;
 const PATH_ENV = PG_BIN ? `${PG_BIN}${path.delimiter}${process.env.PATH}` : process.env.PATH;
-const DATABASE_URL = process.env.DATABASE_URL;
 
 function clientMajor(tool: string): number | null {
   const r = spawnSync(tool, ['--version'], { env: { ...process.env, PATH: PATH_ENV }, encoding: 'utf8', shell: false });
@@ -55,11 +56,13 @@ function clientMajor(tool: string): number | null {
 let skipReason: string | false = false;
 let pool: pg.Pool | null = null;
 let serverMajor = 0;
+let verified = false;
 if (!BASH) skipReason = 'bash not found';
-else if (!DATABASE_URL) skipReason = 'DATABASE_URL not set';
 else {
   pool = new pg.Pool({ connectionString: DATABASE_URL, max: 2 });
   cleanups.push(() => pool!.end());
+  await assertConnectedToTestDatabase({ query: sql => pool!.query(sql) });
+  verified = true;
   try {
     serverMajor = Math.floor(Number((await pool.query('show server_version_num')).rows[0].server_version_num) / 10000);
     const dumpMajor = clientMajor('pg_dump'), psqlMajor = clientMajor('psql');
@@ -83,7 +86,7 @@ test('backup-db.sh + verify-backup.sh end to end (real pg_dump / psql, throw-awa
     CREATE TABLE ${schema}.servers (id text primary key, note text);
     CREATE TABLE ${schema}.empty_table (id int);
     INSERT INTO ${schema}.servers VALUES ('a', 'tab\there'), ('b', E'multi\\nline'), ('c', null);`);
-  cleanups.push(() => pool!.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).then(() => undefined));
+  cleanups.push(() => dropVerifiedTestSchema(verified, () => pool!.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).then(() => undefined)));
 
   const appDir = fs.mkdtempSync(path.join(tmpRoot, 'app-'));
   fs.writeFileSync(path.join(appDir, '.env'), `DATABASE_URL="${DATABASE_URL}"\nDB_SCHEMA=${schema}\n`);
@@ -123,10 +126,11 @@ test('backup-db.sh + verify-backup.sh end to end (real pg_dump / psql, throw-awa
 
   // A scratch database (needs CREATEDB; otherwise the restore part is skipped)
   const scratch = `ops_restore_test_${process.pid}`;
+  assertScratchDatabaseName(scratch);
   // Creating a database is opt-in (only the local disposable test database is used by default)
   if (process.env.ALLOW_TEST_CREATEDB !== '1') { t.diagnostic('restore part skipped: set ALLOW_TEST_CREATEDB=1 to let this test create a scratch database'); return; }
   try { await pool!.query(`CREATE DATABASE ${scratch}`); } catch (e) { t.diagnostic(`restore part skipped: ${(e as Error).message}`); return; }
-  cleanups.push(() => pool!.query(`DROP DATABASE IF EXISTS ${scratch}`).then(() => undefined));
+  cleanups.push(() => dropVerifiedTestSchema(verified, () => pool!.query(`DROP DATABASE IF EXISTS ${scratch}`).then(() => undefined)));
   const scratchUrl = withDb(DATABASE_URL!, scratch);
 
   const r4 = bash('verify-backup.sh', appDir, { BACKUP_VERIFY_DATABASE_URL: scratchUrl });

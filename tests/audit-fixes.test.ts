@@ -12,7 +12,9 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import dotenv from 'dotenv';
+import { pinTestDatabaseUrl, assertConnectedToTestDatabase, dropVerifiedTestSchema } from './helpers/test-db-guard.ts';
 
+pinTestDatabaseUrl();
 dotenv.config({ quiet: true });
 process.env.DB_SCHEMA = `ops_auditfix_${process.pid}`;
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'scholario-auditfix-'));
@@ -88,7 +90,10 @@ const failoverAudits = (appId: string) => db.auditLogs.filter(a => a.targetId ==
 const monitorIncident = (m: Monitor) => db.incidents.find(i => i.fingerprint === `monitor:${m.id}` && i.status !== 'RESOLVED' && i.status !== 'CLOSED');
 
 let prd: ServerRecord, dr: ServerRecord;
+let verified = false;
 before(async () => {
+  await assertConnectedToTestDatabase({ query: sql => query(sql) });
+  verified = true;
   await initStore();
   prd = mkServer('PRD', '203.0.113.41'); dr = mkServer('DR', '203.0.113.42');
   db.servers.push(prd, dr);
@@ -98,7 +103,7 @@ before(async () => {
 });
 after(async () => {
   globalThis.fetch = realFetch;
-  await query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+  await dropVerifiedTestSchema(verified, () => query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}));
   await closePool();
   fs.rmSync(process.env.DATA_DIR!, { recursive: true, force: true });
   setTimeout(() => process.exit(0), 100).unref();

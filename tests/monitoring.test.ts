@@ -14,7 +14,9 @@ import https from 'node:https';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import dotenv from 'dotenv';
+import { pinTestDatabaseUrl, assertConnectedToTestDatabase, dropVerifiedTestSchema } from './helpers/test-db-guard.ts';
 
+pinTestDatabaseUrl();
 dotenv.config({ quiet: true });
 process.env.DB_SCHEMA = `ops_montest_${process.pid}`;
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'scholario-montest-'));
@@ -98,7 +100,10 @@ function mkMonitor(appId: string, env: 'PRD' | 'DR', type: Monitor['type'], targ
 }
 const agentReport = (extra: Record<string, unknown> = {}) => ({ observedAt: new Date().toISOString(), cpuPercent: 10, ramPercent: 30, diskPercent: 40, load: [0.1, 0.1, 0.1], ...extra });
 
+let verified = false;
 before(async () => {
+  await assertConnectedToTestDatabase({ query: sql => query(sql) });
+  verified = true;
   await initStore();
   local = http.createServer((req, res) => { res.statusCode = req.url === '/down' ? 500 : 200; res.end('ok'); });
   await new Promise<void>(r => local.listen(0, '127.0.0.1', () => r()));
@@ -110,7 +115,7 @@ before(async () => {
 
 after(async () => {
   local?.close(); hook?.close();
-  await query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+  await dropVerifiedTestSchema(verified, () => query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}));
   await closePool();
   fs.rmSync(process.env.DATA_DIR!, { recursive: true, force: true });
   setTimeout(() => process.exit(0), 100).unref();

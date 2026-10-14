@@ -2,7 +2,7 @@
  * Production-behaviour tests (NODE_ENV=production, real PostgreSQL, throw-away schema):
  * health endpoints, startup without a database, auth / RBAC / lockout, realtime tickets,
  * agent telemetry ingestion, the incident engine, headers, and secrets never reaching logs.
- *   npm test
+ *   npm run test:local -- tests/production.test.ts
  */
 import { test, before, after } from 'node:test';
 import { execSync } from 'node:child_process';
@@ -15,9 +15,10 @@ import path from 'node:path';
 import dotenv from 'dotenv';
 import pg from 'pg';
 import { AGENT_VERSION } from '../server/agent.ts';
+import { pinTestDatabaseUrl, assertConnectedToTestDatabase, dropVerifiedTestSchema } from './helpers/test-db-guard.ts';
 
+const DATABASE_URL = pinTestDatabaseUrl();
 dotenv.config({ quiet: true });
-const DATABASE_URL = process.env.DATABASE_URL ?? '';
 const SCHEMA = `ops_prodtest_${process.pid}`;
 const PORT = 3990 + (process.pid % 9);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -52,7 +53,7 @@ let token = '';
 function spawnServer(extraEnv: Record<string, string> = {}, port = PORT) {
   const child = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
     env: {
-      ...process.env, NODE_ENV: 'production', PORT: String(port), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR,
+      ...process.env, DATABASE_URL, NODE_ENV: 'production', PORT: String(port), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR,
       ADMIN_EMAIL: ADMIN.email, ADMIN_PASSWORD: ADMIN.password, CLOUDFLARE_API_TOKEN: SECRETS.cf, JWT_SECRET: SECRETS.jwt,
       PUBLIC_URL: 'https://ops.test.invalid', HOSTINGER_API_TOKEN: '', DEADMAN_HEARTBEAT_URL: '', LOG_FORMAT: 'json',
       SMTP_SERVICE: '', SMTP_URL: '', SMTP_HOST: '', SMTP_USER: '', SMTP_PASS: '', SMTP_FROM: '', ...extraEnv,
@@ -86,9 +87,11 @@ const waitFor = async <T>(fn: () => Promise<T | undefined | null | false>, ms = 
   for (;;) { const v = await fn(); if (v) return v as T; if (Date.now() > end) throw new Error('timed out'); await new Promise(r => setTimeout(r, 400)); }
 };
 
+let verified = false;
 before(async () => {
-  assert.ok(DATABASE_URL, 'DATABASE_URL must be set');
   await pgc.connect();
+  await assertConnectedToTestDatabase(pgc);
+  verified = true;
   server = spawnServer();
   await waitReady();
   const r = await api('POST', '/api/auth/login', ADMIN, '');
@@ -99,7 +102,7 @@ before(async () => {
 after(async () => {
   server?.kill();
   await new Promise(r => setTimeout(r, 500));
-  await pgc.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+  await dropVerifiedTestSchema(verified, () => pgc.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}));
   await pgc.end().catch(() => {});
   fs.rmSync(DATA_DIR, { recursive: true, force: true });
 });

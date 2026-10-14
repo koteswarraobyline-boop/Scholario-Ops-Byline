@@ -144,6 +144,73 @@ export type DatabaseTelemetry = DatabaseReport;
 
 export type ProviderStatus = 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE' | 'UNKNOWN';
 
+/** Providers with an adapter. Further providers are added only after their API is checked. */
+export type ProviderKind = 'hostinger';
+
+export type ProviderSyncStatus = 'NOT_CONFIGURED' | 'OK' | 'AUTH_FAILED' | 'RATE_LIMITED' | 'ERROR' | 'PENDING';
+
+/** What the inventory shows. Derived from the token's presence and the last sync; never a secret. */
+export type ProviderDisplayStatus = 'NOT_CONFIGURED' | 'CONNECTED' | 'AUTH_FAILED' | 'SYNC_FAILED' | 'NOT_SYNCED' | 'DISABLED';
+
+/** Stored connection. The API token lives in the named environment variable, not in this record. */
+export interface ProviderConnectionRecord {
+  id: string;
+  name: string;
+  provider: ProviderKind;
+  tokenEnv: string;
+  syncEnabled: boolean;
+  legacy: boolean;
+  status: ProviderSyncStatus;
+  lastSyncAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Connection as returned to the browser. tokenConfigured reports presence only. */
+export interface ProviderConnectionView {
+  id: string;
+  name: string;
+  provider: ProviderKind;
+  tokenEnv: string;
+  tokenConfigured: boolean;
+  syncEnabled: boolean;
+  legacy: boolean;
+  status: ProviderSyncStatus;
+  displayStatus: ProviderDisplayStatus;
+  lastSyncAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  vmCount: number;
+}
+
+/** One VPS from one connection. Identity is connection + provider VM id, not IP or hostname. */
+export interface ProviderInstanceRecord {
+  id: string;
+  connectionId: string;
+  providerVmId: string;
+  hostname: string | null;
+  ipv4: string[];
+  ipv6: string[];
+  os: string | null;
+  region: string | null;
+  plan: string | null;
+  cpu: number | null;
+  ramGb: number | null;
+  diskGb: number | null;
+  powerState: string | null;
+  status: ProviderStatus;
+  fetchedAt: string | null;
+  lastSeenAt: string | null;
+  absent: boolean;
+}
+
+export interface ProviderInstanceView extends ProviderInstanceRecord {
+  provider: ProviderKind;
+  connectionName: string;
+}
+
 /** Normalised VPS facts from the Hostinger API (only fields the API returns) */
 export interface HostingerInfo {
   vmId: number;
@@ -878,9 +945,59 @@ export interface AuditLog {
   operator: string;
   action: string;
   category: 'INCIDENT' | 'FAILOVER' | 'MAINTENANCE' | 'MONITOR' | 'CLOUDFLARE' | 'INFRASTRUCTURE' | 'RUNBOOK'
-    | 'APPLICATION' | 'AUTH' | 'USER' | 'NOTIFICATION' | 'DEPLOYMENT' | 'BACKUP';
+    | 'APPLICATION' | 'AUTH' | 'USER' | 'NOTIFICATION' | 'DEPLOYMENT' | 'BACKUP' | 'REGISTRY';
   targetId: string;
   details: string;
+}
+
+/** What can be entered in the dependency register */
+export type RegistryKind = 'APPLICATION' | 'SERVER' | 'DATABASE' | 'STORAGE' | 'THIRD_PARTY_API' | 'PROVIDER' | 'BUSINESS_FEATURE';
+
+export interface RegistryComponent {
+  id: string;
+  kind: RegistryKind;
+  name: string;
+  owner: string;
+  tier: 'TIER_1' | 'TIER_2' | 'TIER_3';
+  description: string;
+  /** APPLICATION: the registered application it describes. BUSINESS_FEATURE: the application that provides it. */
+  applicationId: string | null;
+  /** SERVER only: the registered VPS server it describes */
+  serverId: string | null;
+  /** APPLICATION and BUSINESS_FEATURE only */
+  userCount: number | null;
+  /** Teams or customers served (APPLICATION and BUSINESS_FEATURE only) */
+  served: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** "from depends on to". HARD: from stops working without to. SOFT: from is degraded. */
+export interface DependencyLink {
+  id: string;
+  fromId: string;
+  toId: string;
+  type: 'HARD' | 'SOFT';
+  /** BUSINESS_FEATURE component that needs this dependency, if it is needed by one feature only */
+  featureId: string | null;
+  notes: string;
+  createdAt: string;
+}
+
+export interface RegistryImpact {
+  componentId: string;
+  /** Everything that stops (HARD) or is degraded (SOFT) when the component fails, nearest first */
+  affected: Array<{ id: string; name: string; kind: RegistryKind; tier: RegistryComponent['tier']; via: 'HARD' | 'SOFT'; userCount: number | null; served: string[] }>;
+  /**
+   * Largest single user count among the failed component and what stops. A lower bound on the
+   * people who lose service, not a total: counts overlap (an application and its features count
+   * the same people), so they are never added up. null = no user count recorded for any of them.
+   */
+  largestUserCountStopped: number | null;
+  /** As largestUserCountStopped, over everything affected (stopped or degraded) */
+  largestUserCountAffected: number | null;
+  /** Teams/customers served by the failed component and everything affected */
+  served: string[];
 }
 
 /**

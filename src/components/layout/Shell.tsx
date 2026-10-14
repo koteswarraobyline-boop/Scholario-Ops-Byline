@@ -149,7 +149,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     {
       title: 'Providers',
       items: [
-        { id: 'hostinger', label: 'Hostinger VPS', icon: Server },
+        { id: 'hostinger', label: 'Provider VPS', icon: Server },
         { id: 'cloudflare', label: 'Cloudflare Edge', icon: ShieldCheck, badge: !integrations?.cloudflare.configured ? 'Off' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'Degraded' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'Active' : 'Unknown', badgeColor: !integrations?.cloudflare.configured ? 'text-slate-500' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'text-amber-400' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'text-emerald-400' : 'text-slate-400' }
       ]
     },

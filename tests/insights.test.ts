@@ -9,7 +9,9 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import dotenv from 'dotenv';
+import { pinTestDatabaseUrl, assertConnectedToTestDatabase, dropVerifiedTestSchema } from './helpers/test-db-guard.ts';
 
+pinTestDatabaseUrl();
 dotenv.config({ quiet: true });
 process.env.DB_SCHEMA = `ops_insights_${process.pid}`;
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'scholario-insights-'));
@@ -64,9 +66,14 @@ function series(hours: number, f: (hAgo: number) => number) {
 const pass = () => ({ ok: true, degraded: false, latencyMs: 30, statusCode: 200, detail: 'HTTP 200', probeStatus: 'UP' as const });
 const fail = () => ({ ok: false, degraded: false, latencyMs: 30, statusCode: 503, detail: 'HTTP 503', probeStatus: 'DOWN' as const });
 
-before(async () => { await initStore(); });
+let verified = false;
+before(async () => {
+  await assertConnectedToTestDatabase({ query: sql => query(sql) });
+  verified = true;
+  await initStore();
+});
 after(async () => {
-  await query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+  await dropVerifiedTestSchema(verified, () => query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}));
   await closePool();
   fs.rmSync(process.env.DATA_DIR!, { recursive: true, force: true });
   setTimeout(() => process.exit(0), 100).unref();

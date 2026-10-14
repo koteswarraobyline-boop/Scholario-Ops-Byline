@@ -73,7 +73,7 @@ const ROUTES: Array<{ tab: string; title: string; subtitle: string; icon: Comman
   { tab: 'resilience', title: 'PRD / DR Readiness', subtitle: 'Disaster recovery readiness and traffic failover', icon: ShieldCheck, keywords: 'resilience dr disaster recovery readiness failover' },
   { tab: 'backups', title: 'Backups', subtitle: 'Backup records and freshness', icon: Database, keywords: 'backups restore snapshots' },
   { tab: 'dependencies', title: 'Dependencies', subtitle: 'Application dependency map', icon: Network, keywords: 'dependencies map topology' },
-  { tab: 'hostinger', title: 'Hostinger', subtitle: 'Hostinger VPS inventory from the provider API', icon: Cpu, keywords: 'hostinger provider vps vms' },
+  { tab: 'hostinger', title: 'Hostinger', subtitle: 'VPS inventory by provider account', icon: Cpu, keywords: 'hostinger provider vps vms account connection' },
   { tab: 'cloudflare', title: 'Cloudflare', subtitle: 'Zones, DNS records and DNS failover', icon: Cloud, keywords: 'cloudflare dns zones ssl edge' },
   { tab: 'deployments', title: 'Deployments', subtitle: 'Deployment history', icon: GitBranch, keywords: 'deployments releases versions' },
   { tab: 'runbooks', title: 'Runbooks', subtitle: 'Operational procedures', icon: Terminal, keywords: 'runbooks procedures sop' },
