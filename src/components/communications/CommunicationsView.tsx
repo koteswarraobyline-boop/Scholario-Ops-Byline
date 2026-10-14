@@ -299,7 +299,7 @@ export const CommunicationsView: React.FC = () => {
       }`}>
         <div>
           <h1 className="text-lg font-bold font-mono tracking-tight">
-            COMMUNICATIONS &amp; ESCALATION
+            NOTIFICATIONS &amp; ESCALATION
           </h1>
           <p className={`text-xs font-mono ${muted}`}>
             Notification channels for incident alerts and which channels each severity pages

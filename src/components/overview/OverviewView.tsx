@@ -471,7 +471,7 @@ export const OverviewView: React.FC = () => {
       {header}
       {loadErrorBanner}
 
-      {/* ── Load-Balancer-managed applications (ICT): live PRD / DR answer ── */}
+      {/* ── Load-Balancer-managed applications (e.g. ICT): live PRD / DR answer ── */}
       <IctStatusPanel />
 
       {/* ── Active route per application ─────────────────────────────────── */}

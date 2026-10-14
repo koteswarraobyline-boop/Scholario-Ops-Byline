@@ -7,6 +7,7 @@ import { Shell } from './components/layout/Shell';
 import { LoginPage } from './components/auth/LoginPage';
 import { ViewErrorBoundary } from './components/ui/ViewErrorBoundary';
 import { OverviewView } from './components/overview/OverviewView';
+import { NotFoundView } from './components/ui/NotFoundView';
 
 // Pages load on demand (Overview, the landing page, ships in the main bundle)
 const ApplicationsView = lazy(() => import('./components/applications/ApplicationsView').then(m => ({ default: m.ApplicationsView })));
@@ -141,6 +142,6 @@ const DashboardRoutes: React.FC = () => (
     <Route path="/reports"       element={<DashboardView tab="reports" />} />
     <Route path="/audit"         element={<DashboardView tab="audit" />} />
     <Route path="/users"         element={<DashboardView tab="users" />} />
-    <Route path="*"              element={<Navigate to="/overview" replace />} />
+    <Route path="*"              element={<Shell><NotFoundView /></Shell>} />
   </Routes>
 );

@@ -6,6 +6,7 @@ import { useAuth } from '../../context/AuthContext';
 import { Application, OperationalStatus, VpsServer } from '../../types';
 import { X, AlertTriangle, ArrowRight, Plus, Layers, Loader2 } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
+import { useDialog } from '../ui/useDialog';
 
 // ── Formatting helpers (null-safe) ──────────────────────────────────────────
 const fmtPct = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : `${v.toFixed(2)}%`);
@@ -50,6 +51,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
   } = useOps();
   const { hasRole, canDo } = useAuth();
   const navigate = useNavigate();
+  const dialog = useDialog(onClose);
 
   const isDark = theme === 'dark';
   const canFailover = hasRole('super_admin');
@@ -117,7 +119,9 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 overflow-y-auto animate-in fade-in">
       <div
-        className={`w-full max-w-4xl rounded border overflow-hidden flex flex-col max-h-[90vh] shadow-2xl ${
+        {...dialog}
+        aria-labelledby="application-detail-title"
+        className={`w-full max-w-4xl rounded border overflow-hidden flex flex-col max-h-[90vh] shadow-2xl focus:outline-none ${
           isDark ? 'bg-[#101624] text-slate-100 border-[#223048]' : 'bg-white text-slate-900 border-slate-300'
         }`}
         onClick={e => e.stopPropagation()}
@@ -130,7 +134,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
             <span className={`w-2 h-2 rounded-full ${statusDot(application.status)}`} />
             <div>
               <div className="flex items-center gap-2 font-mono">
-                <h2 className={`text-base font-bold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.name}</h2>
+                <h2 id="application-detail-title" className={`text-base font-bold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.name}</h2>
                 <span className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>· {application.tier.replace('_', ' ')}</span>
                 <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
                 <span className={`text-xs font-semibold ${statusColor(application.status)}`}>{application.status}</span>
@@ -147,9 +151,11 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
             </span>
             <button
               onClick={onClose}
+              aria-label="Close application details"
+              title="Close (Esc)"
               className={`p-1 transition-colors cursor-pointer ${isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800'}`}
             >
-              <X className="w-5 h-5" />
+              <X className="w-5 h-5" aria-hidden="true" />
             </button>
           </div>
         </div>

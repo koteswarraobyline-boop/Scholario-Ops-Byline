@@ -717,4 +717,85 @@ test('critical alerts in the browser: opt-in toggle, a new CRITICAL incident not
   }
 });
 
+test('UI polish: dialogs are named, take focus, close on Escape; refresh tooltip; runbook reset confirms; unknown URLs show a not-found page; page names', { skip: SKIP }, async () => {
+  const dialog = `(() => {
+    const d = document.querySelector('[role=dialog][aria-modal=true]');
+    if (!d) return null;
+    const id = d.getAttribute('aria-labelledby');
+    return { name: (id ? document.getElementById(id)?.textContent : d.getAttribute('aria-label'))?.trim() ?? '', focusInside: d.contains(document.activeElement),
+      close: [...d.querySelectorAll('button[aria-label^="Close"]')].map(b => b.getAttribute('aria-label')) };
+  })()`;
+  const esc = () => page!.eval(`(document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })), true`);
+  const clickText = (text: string) => page!.eval(`(() => { const b = [...document.querySelectorAll('button')].find(x => x.textContent.trim() === ${JSON.stringify(text)}); if (!b) throw new Error('no button ' + ${JSON.stringify(text)}); b.click(); return true; })()`);
+  const checkDialog = async (what: string, open: () => Promise<unknown>, name: RegExp, closeLabel: string) => {
+    await open();
+    await waitFor(async () => Boolean(await page!.eval(dialog)), `${what}: dialog opened`);
+    const d = (await page!.eval<{ name: string; focusInside: boolean; close: string[] }>(dialog))!;
+    assert.match(d.name, name, `${what}: accessible name`);
+    assert.ok(d.focusInside, `${what}: focus moved into the dialog`);
+    assert.ok(d.close.includes(closeLabel), `${what}: labelled close button (${d.close.join(', ')})`);
+    await shot(`dialog-${what.replace(/\W+/g, '-')}`);
+    await esc();
+    await waitFor(async () => !(await page!.eval(dialog)), `${what}: Escape closes it`);
+  };
+
+  // 1. Dialogs
+  const inc = (await api('POST', '/api/v1/incidents', { title: 'Dialog test incident', severity: 'WARNING', environment: 'PRD' })).data as { id: string };
+  await visit('/incidents', 1366, 'Declare incident');
+  await checkDialog('incident detail', () => page!.eval(`history.pushState({}, '', ${JSON.stringify(`/incidents?id=${inc.id}`)}); dispatchEvent(new PopStateEvent('popstate')); true`), /Dialog test incident/, 'Close incident details');
+  await checkDialog('declare incident', () => clickText('Declare incident'), /DECLARE INCIDENT/, 'Close declare incident');
+  await visit('/applications', 1366, 'Learning Management Platform');
+  await checkDialog('application detail', () => page!.eval(`document.querySelector('h3[title^="Learning Management Platform"]').closest('.cursor-pointer').click(), true`), /Learning Management Platform/, 'Close application details');
+  await visit('/infrastructure', 1366, 'VPS INFRASTRUCTURE');
+  await checkDialog('server detail', () => page!.eval(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Inspect').click(), true`), /^Server /, 'Close server details');
+  await visit('/monitors', 1366, 'CREATE MONITOR');
+  await checkDialog('create monitor', () => clickText('CREATE MONITOR'), /CREATE MONITOR/, 'Close create monitor');
+
+  // 2. The top-bar refresh button says what it does (it does not run the monitor checks)
+  const refresh = await page!.eval<{ title: string; label: string } | null>(`(() => { const b = document.querySelector('header button[aria-label^="Reload dashboard data"]'); return b && { title: b.title, label: b.getAttribute('aria-label') }; })()`);
+  assert.ok(refresh, 'refresh button labelled');
+  assert.match(refresh!.title, /does not run monitor checks/);
+  assert.doesNotMatch(refresh!.title, /probe all monitors/i);
+
+  // 3. Runbook reset asks first; Cancel keeps the progress, Reset clears it
+  const rb = (await api('POST', '/api/v1/runbooks', { title: 'Reset confirm runbook', description: '', category: 'DATABASE', estimatedDurationMin: 10, steps: [{ title: 'First step' }, { title: 'Second step' }] })).data as { id: string };
+  await api('POST', `/api/v1/runbooks/${rb.id}/steps/1/toggle`, {});
+  const done = async () => ((await api('GET', '/api/v1/runbooks')).data as Array<{ id: string; steps: Array<{ completed: boolean }> }>).find(r => r.id === rb.id)!.steps.filter(s => s.completed).length;
+  assert.equal(await done(), 1);
+  await visit('/runbooks', 1366, 'Reset confirm runbook');
+  await page!.eval(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('Reset confirm runbook')).click(), true`);
+  await waitText(t => t.includes('1 / 2 steps') && t.includes('Reset progress'), 'runbook selected');
+  await clickText('Reset progress');
+  await waitText(t => t.includes('Clear 1 completed step(s)?'), 'reset asks for confirmation');
+  await shot('runbook-reset-confirm');
+  assert.equal(await done(), 1, 'nothing reset before confirming');
+  await clickText('Cancel');
+  await waitText(t => !t.includes('Clear 1 completed step(s)?'), 'cancel closes the question');
+  assert.equal(await done(), 1, 'Cancel keeps the progress');
+  await clickText('Reset progress');
+  await waitText(t => t.includes('Clear 1 completed step(s)?'), 'asked again');
+  await clickText('Reset');
+  await waitFor(async () => (await done()) === 0, 'Reset clears the progress');
+  await api('DELETE', `/api/v1/runbooks/${rb.id}`);
+
+  // 4. Unknown URL: a not-found page inside the app (sidebar kept, address kept), with a way back
+  await visit('/no-such-page', 1366, 'Page not found');
+  assert.equal(await page!.eval<string>('location.pathname'), '/no-such-page', 'not redirected');
+  const nf = await bodyText();
+  assert.ok(nf.includes('There is no page at /no-such-page'), 'names the missing address');
+  assert.ok(await page!.eval<boolean>(`!!document.querySelector('aside')`), 'sidebar still available');
+  await shot('not-found-1366');
+  await clickText('Go to Overview');
+  await waitFor(async () => (await page!.eval<string>('location.pathname')) === '/overview', 'back to Overview');
+
+  // 5. One name per page: sidebar, page title and command palette agree
+  const nav = await page!.eval<string>(`document.querySelector('aside').innerText`);
+  for (const s of ['Notifications', 'PRD / DR Readiness', 'Alerting']) assert.ok(nav.toLowerCase().includes(s.toLowerCase()), `sidebar has ${s}`);
+  assert.ok(!/Communications/i.test(nav), 'no "Communications" in the sidebar');
+  await visit('/communications', 1366, 'NOTIFICATIONS & ESCALATION');
+  assert.ok(!(await bodyText()).includes('COMMUNICATIONS & ESCALATION'));
+  await visit('/resilience', 1366, 'PRD / DR READINESS');
+  assert.ok(!(await bodyText()).includes('DISASTER RECOVERY & TRAFFIC FAILOVER'));
+});
+
 if (SKIP) test(`responsive browser checks skipped: ${SKIP}`, { skip: SKIP }, () => {});

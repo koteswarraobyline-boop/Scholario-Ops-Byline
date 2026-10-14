@@ -162,7 +162,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       ]
     },
     {
-      title: 'Communications',
+      title: 'Alerting',
       items: [
         { id: 'communications', label: 'Notifications', icon: Bell, badge: unreadNotifications?.unread ? `${unreadNotifications.unread > 99 ? '99+' : unreadNotifications.unread}` : undefined, badgeColor: unreadNotifications?.unreadFailed ? 'text-rose-400 font-semibold' : 'text-blue-400 font-semibold' }
       ]
@@ -425,7 +425,6 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
             </button>
 
 
-            {/* Poll Probes */}
             <button
               onClick={handleManualRefresh}
               disabled={isRefreshing}
@@ -434,9 +433,10 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                   ? 'text-slate-400 hover:text-slate-100 hover:bg-[#162033]' 
                   : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
               } ${isRefreshing ? 'animate-spin text-blue-500' : ''}`}
-              title="Poll telemetry & probe all monitors"
+              title="Reload dashboard data and API status (does not run monitor checks — use Probe all on Monitors)"
+              aria-label={isRefreshing ? 'Reloading dashboard data' : 'Reload dashboard data'}
             >
-              <RefreshCw className="w-3.5 h-3.5" />
+              <RefreshCw className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
 
             {/* WebSocket status */}
