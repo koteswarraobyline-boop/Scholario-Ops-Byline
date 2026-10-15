@@ -32,18 +32,19 @@ jobs:
         env:
           POSTGRES_USER: scholario_ci
           POSTGRES_PASSWORD: ci-throwaway-only
-          POSTGRES_DB: scholario_ops_ci
+          POSTGRES_DB: scholario_ops_ui_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U scholario_ci -d scholario_ops_ci"
+          --health-cmd "pg_isready -U scholario_ci -d scholario_ops_ui_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
     env:
-      # Disposable database that exists only inside this job — never production.
+      # Disposable database that exists only inside this job — never production or scholario_ops_dev.
+      # The name must be scholario_ops_ui_test: tests/helpers/test-db-guard.ts refuses every other database.
       # The tests create their own throw-away schemas and drop them afterwards.
-      DATABASE_URL: postgresql://scholario_ci:ci-throwaway-only@127.0.0.1:5432/scholario_ops_ci
+      DATABASE_URL: postgresql://scholario_ci:ci-throwaway-only@127.0.0.1:5432/scholario_ops_ui_test
     steps:
       - name: Checkout
         uses: actions/checkout@v7
