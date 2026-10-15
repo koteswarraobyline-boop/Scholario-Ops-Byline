@@ -75,17 +75,27 @@ function applicationChecks(srv: ServerRecord, online: boolean, heavyInterval: nu
       intervalSec: heavyInterval, toleranceSec: config.telemetryStaleSec * HEAVY_EVERY,
     }));
   }
-  // Applications configured for this server whose check the agent has not reported (older agent / not yet run)
+  // Applications linked to this server that have no reported local check. A missing app port does not
+  // remove the application: there is no check to judge, so the heartbeat is UNKNOWN, never HEALTHY.
+  // URL monitors are a different signal and are not consulted here.
   for (const app of db.applications) {
     for (const env of ['PRD', 'DR'] as const) {
       if ((env === 'PRD' ? app.prdServerId : app.drServerId) !== srv.id) continue;
       const port = app.environments?.[env]?.appPort;
-      if (!port || reported.some(c => c.applicationId === app.id && c.port === port)) continue;
-      out.push(check({
-        kind: 'APPLICATION', key: `app:${app.id}:${port}`, name: app.name, state: 'UNKNOWN',
-        detail: srv.lastSeen ? 'Check not reported yet (needs agent 3.3 — reinstall from Setup)' : 'Agent not connected',
-        target: `127.0.0.1:${port}${app.environments?.[env]?.healthPath ?? '/'}`,
-      }));
+      if (port) {
+        if (reported.some(c => c.applicationId === app.id && c.port === port)) continue;
+        out.push(check({
+          kind: 'APPLICATION', key: `app:${app.id}:${port}`, name: app.name, state: 'UNKNOWN',
+          detail: srv.lastSeen ? 'Check not reported yet (needs agent 3.3 — reinstall from Setup)' : 'Agent not connected',
+          target: `127.0.0.1:${port}${app.environments?.[env]?.healthPath ?? '/'}`,
+        }));
+      } else if (!reported.some(c => c.applicationId === app.id) && !out.some(c => c.key === `app:${app.id}`)) {
+        out.push(check({
+          kind: 'APPLICATION', key: `app:${app.id}`, name: app.name, state: 'UNKNOWN',
+          detail: srv.lastSeen ? 'No app port configured — local health check cannot run' : 'Agent not connected',
+          target: null,
+        }));
+      }
     }
   }
   return out;

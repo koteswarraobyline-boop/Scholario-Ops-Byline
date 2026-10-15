@@ -157,7 +157,7 @@ const ServerCard: React.FC<{
                   <ul>{grp.checks.map(c => <CheckRow key={c.key} c={c} s={s} now={now} muted={muted} incident={incidentOf(c, s)} />)}</ul>
                 ) : (
                   <div className={`text-[10px] ${muted}`}>
-                    {g.key === 'applications' ? 'No application with an app port on this server (Setup → application → environment details).'
+                    {g.key === 'applications' ? 'No application linked to this server (Setup → application → PRD / DR server).'
                       : g.key === 'services' ? 'No watched services (SERVICES= in /etc/scholario-agent.conf).'
                         : 'No database probe (DB_ENGINE= in /etc/scholario-agent.conf).'}
                   </div>
