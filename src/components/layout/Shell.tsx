@@ -149,7 +149,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     {
       title: 'Providers',
       items: [
-        { id: 'hostinger', label: 'Hostinger VPS', icon: Server },
+        { id: 'hostinger', label: 'Provider VPS', icon: Server },
         { id: 'cloudflare', label: 'Cloudflare Edge', icon: ShieldCheck, badge: !integrations?.cloudflare.configured ? 'Off' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'Degraded' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'Active' : 'Unknown', badgeColor: !integrations?.cloudflare.configured ? 'text-slate-500' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'text-amber-400' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'text-emerald-400' : 'text-slate-400' }
       ]
     },
@@ -162,7 +162,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       ]
     },
     {
-      title: 'Communications',
+      title: 'Alerting',
       items: [
         { id: 'communications', label: 'Notifications', icon: Bell, badge: unreadNotifications?.unread ? `${unreadNotifications.unread > 99 ? '99+' : unreadNotifications.unread}` : undefined, badgeColor: unreadNotifications?.unreadFailed ? 'text-rose-400 font-semibold' : 'text-blue-400 font-semibold' }
       ]
@@ -425,7 +425,6 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
             </button>
 
 
-            {/* Poll Probes */}
             <button
               onClick={handleManualRefresh}
               disabled={isRefreshing}
@@ -434,9 +433,10 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                   ? 'text-slate-400 hover:text-slate-100 hover:bg-[#162033]' 
                   : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
               } ${isRefreshing ? 'animate-spin text-blue-500' : ''}`}
-              title="Poll telemetry & probe all monitors"
+              title="Reload dashboard data and API status (does not run monitor checks — use Probe all on Monitors)"
+              aria-label={isRefreshing ? 'Reloading dashboard data' : 'Reload dashboard data'}
             >
-              <RefreshCw className="w-3.5 h-3.5" />
+              <RefreshCw className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
 
             {/* WebSocket status */}

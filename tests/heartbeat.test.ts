@@ -13,7 +13,9 @@ import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import dotenv from 'dotenv';
+import { pinTestDatabaseUrl, assertConnectedToTestDatabase, dropVerifiedTestSchema } from './helpers/test-db-guard.ts';
 
+pinTestDatabaseUrl();
 dotenv.config({ quiet: true });
 
 // A would-be "external watchdog": it must never receive a request
@@ -72,7 +74,10 @@ const dbOk = { engine: 'mysql', name: 'app', available: true, latencyMs: 3, vers
 let prd: ServerRecord, dr: ServerRecord, lms: Application, ops: Application;
 const openInc = (fp: string) => db.incidents.filter(i => i.fingerprint === fp && i.status !== 'RESOLVED' && i.status !== 'CLOSED');
 
+let verified = false;
 before(async () => {
+  await assertConnectedToTestDatabase({ query: sql => query(sql) });
+  verified = true;
   await initStore();
   prd = mkServer('PRD', '203.0.113.31');
   dr = mkServer('DR', '203.0.113.32');
@@ -85,7 +90,7 @@ before(async () => {
 after(async () => {
   stopEngine();
   watchdog.close();
-  await query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+  await dropVerifiedTestSchema(verified, () => query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}));
   await closePool();
   fs.rmSync(process.env.DATA_DIR!, { recursive: true, force: true });
   setTimeout(() => process.exit(0), 100).unref();

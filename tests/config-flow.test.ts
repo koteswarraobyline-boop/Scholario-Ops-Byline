@@ -3,8 +3,9 @@
  *   admin enters config → API → PostgreSQL → monitoring uses it.
  *
  * Runs a real Scholario Ops server against a throw-away PostgreSQL schema (ops_test_<pid>)
- * in the database from DATABASE_URL, and drops the schema afterwards. Needs PostgreSQL.
- *   npm test
+ * in scholario_ops_ui_test only (tests/helpers/test-db-guard.ts refuses anything else, including a
+ * .env fallback) and drops the schema afterwards. Needs PostgreSQL.
+ *   npm run test:local -- tests/config-flow.test.ts
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,9 +15,10 @@ import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import pg from 'pg';
+import { pinTestDatabaseUrl, assertConnectedToTestDatabase, dropVerifiedTestSchema } from './helpers/test-db-guard.ts';
 
+const DATABASE_URL = pinTestDatabaseUrl();
 dotenv.config({ quiet: true });
-const DATABASE_URL = process.env.DATABASE_URL ?? '';
 const SCHEMA = `ops_test_${process.pid}`;
 const PORT = 3900 + (process.pid % 90);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -31,7 +33,7 @@ const pgc = new pg.Client({ connectionString: DATABASE_URL });
 async function startServer() {
   server = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
     env: {
-      ...process.env, PORT: String(PORT), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR, NODE_ENV: 'production',
+      ...process.env, DATABASE_URL, PORT: String(PORT), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR, NODE_ENV: 'production',
       ADMIN_EMAIL: ADMIN.email, ADMIN_PASSWORD: ADMIN.password, CLOUDFLARE_API_TOKEN: FAKE_CF_TOKEN, HOSTINGER_API_TOKEN: '', DEADMAN_HEARTBEAT_URL: '',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -76,16 +78,18 @@ const waitFor = async <T>(fn: () => Promise<T | undefined | null | false>, ms = 
   }
 };
 
+let verified = false;
 before(async () => {
-  assert.ok(DATABASE_URL, 'DATABASE_URL must be set (in .env) to run the tests');
   await pgc.connect();
+  await assertConnectedToTestDatabase(pgc);
+  verified = true;
   await startServer();
   await login();
 });
 
 after(async () => {
   await stopServer();
-  await pgc.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+  await dropVerifiedTestSchema(verified, () => pgc.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}));
   await pgc.end().catch(() => {});
   fs.rmSync(DATA_DIR, { recursive: true, force: true });
 });

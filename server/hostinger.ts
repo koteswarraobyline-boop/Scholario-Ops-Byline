@@ -4,15 +4,13 @@
  *   GET https://developers.hostinger.com/api/vps/v1/virtual-machines   VMs (plan, CPU, RAM, disk, IPs, state, template)
  *   GET https://developers.hostinger.com/api/vps/v1/data-centers       data centers (for the VM region)
  *
- * The token comes only from HOSTINGER_API_TOKEN and is never logged or returned. Every request
- * has a timeout; 429 and 5xx are retried once; 401/403 are reported as AUTH_FAILED. A failure
- * never throws into the monitoring engine and never invents values: unmatched / unknown fields stay null.
+ * The token is passed in by the caller (one account at a time) and is never logged or returned.
+ * Every request has a timeout; 429 and 5xx are retried once; 401/403 are reported as AUTH_FAILED.
+ * Error bodies are discarded. A failure never invents values: unknown fields stay null.
  */
 import { HostingerInfo, ProviderStatus } from '../src/types/index.ts';
 import { config, isHostingerConfigured } from './config.ts';
-import { db, persist } from './store.ts';
-import { broadcast } from './events.ts';
-import { log } from './logger.ts';
+import { db } from './store.ts';
 
 const API = 'https://developers.hostinger.com/api/vps/v1';
 
@@ -76,74 +74,90 @@ export function normalizeVm(vm: HostingerVm, dataCenters: DataCenter[], fetchedA
   };
 }
 
-async function hget<T>(path: string, attempt = 1): Promise<T> {
+async function hget<T>(path: string, token: string, envName: string, attempt = 1): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.hostingerTimeoutMs);
   let resp: Response;
   try {
-    resp = await fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${config.hostingerApiToken}`, Accept: 'application/json' }, signal: controller.signal });
+    resp = await fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, signal: controller.signal });
   } catch (err) {
     clearTimeout(timer);
     const msg = (err as Error).name === 'AbortError' ? `timeout after ${config.hostingerTimeoutMs / 1000}s` : (err as Error).message;
-    if (attempt < 2) return hget<T>(path, attempt + 1);
+    if (attempt < 2) return hget<T>(path, token, envName, attempt + 1);
     throw new HostingerError(`Hostinger API unreachable: ${msg}`, 'ERROR');
   }
   clearTimeout(timer);
   if (resp.ok) return (await resp.json()) as T;
-  const body = (await resp.text().catch(() => '')).slice(0, 200);
-  if (resp.status === 401 || resp.status === 403) throw new HostingerError(`Hostinger API rejected the token (HTTP ${resp.status}) — check HOSTINGER_API_TOKEN and its permissions`, 'AUTH_FAILED', resp.status);
+  await resp.text().catch(() => ''); // discard the body — it is never logged or returned
+  if (resp.status === 401 || resp.status === 403) throw new HostingerError(`Hostinger API rejected the token (HTTP ${resp.status}) — check ${envName} and its permissions`, 'AUTH_FAILED', resp.status);
   if (resp.status === 429) {
     const wait = Math.min(30, Number(resp.headers.get('retry-after')) || 5);
-    if (attempt < 2) { await new Promise(r => setTimeout(r, wait * 1000)); return hget<T>(path, attempt + 1); }
+    if (attempt < 2) { await new Promise(r => setTimeout(r, wait * 1000)); return hget<T>(path, token, envName, attempt + 1); }
     throw new HostingerError('Hostinger API rate limit reached (HTTP 429)', 'RATE_LIMITED', 429);
   }
-  if (resp.status >= 500 && attempt < 2) { await new Promise(r => setTimeout(r, 2000)); return hget<T>(path, attempt + 1); }
-  throw new HostingerError(`Hostinger API ${path} failed: HTTP ${resp.status}${body ? ` ${body}` : ''}`, 'ERROR', resp.status);
+  if (resp.status >= 500 && attempt < 2) { await new Promise(r => setTimeout(r, 2000)); return hget<T>(path, token, envName, attempt + 1); }
+  throw new HostingerError(`Hostinger API ${path} failed: HTTP ${resp.status}`, 'ERROR', resp.status);
 }
 
 const listOf = <T>(body: unknown): T[] => (Array.isArray(body) ? body : ((body as { data?: T[] })?.data ?? [])) as T[];
 
-export async function syncHostinger(): Promise<void> {
-  if (!isHostingerConfigured()) { hostingerState.status = 'NOT_CONFIGURED'; return; }
-  const now = new Date().toISOString();
-  hostingerState.lastSyncAt = now;
-  try {
-    const vms = listOf<HostingerVm>(await hget('/virtual-machines'));
-    // Region is optional: a data-center lookup failure must not fail the sync
-    const dataCenters = await hget<unknown>('/data-centers').then(b => listOf<DataCenter>(b)).catch(() => [] as DataCenter[]);
-    hostingerState.vms = vms.map(vm => normalizeVm(vm, dataCenters, now));
-    hostingerState.status = 'OK';
-    hostingerState.lastSuccessAt = now;
-    hostingerState.lastError = null;
+export function vmAddresses(vm: HostingerVm, kind: 'ipv4' | 'ipv6'): string[] {
+  return (vm[kind] ?? []).map(a => a.address).filter((a): a is string => Boolean(a));
+}
 
-    // Attach to registered servers that match a VM by IP. Agent-measured values are kept separately.
-    let changed = false;
-    for (const srv of db.servers) {
-      const raw = vms.find(v => (v.ipv4 ?? []).some(a => a.address === srv.ip) || (v.ipv6 ?? []).some(a => a.address === srv.ip));
-      const info = raw ? hostingerState.vms.find(i => i.vmId === raw.id) : undefined;
-      if (!info) {
-        if (srv.hostinger) { delete srv.hostinger; changed = true; }
-        continue;
-      }
-      srv.hostinger = info;
-      srv.hostingerVmId = info.vmId;
-      srv.hostingerState = info.state ?? undefined;
-      srv.provider = 'Hostinger';
-      if (info.plan) srv.plan = info.plan;
-      if (info.cpus && info.ramGb && info.diskGb) {
-        srv.planSpec = { name: info.plan || srv.planSpec?.name || '', cpuCores: info.cpus, ramGb: info.ramGb, diskGb: info.diskGb, source: 'hostinger' };
-      }
-      if (!srv.os && info.os) srv.os = info.os;
-      if (info.region && (!srv.region || srv.region === 'Unknown' || srv.region === 'Not available')) srv.region = info.region;
-      changed = true;
+/** Read-only list + data centers. The token is sent and then dropped; the response body of an error is not kept. */
+export async function pullHostinger(token: string, envName: string): Promise<{ vms: HostingerVm[]; infos: HostingerInfo[]; fetchedAt: string }> {
+  const fetchedAt = new Date().toISOString();
+  const vms = listOf<HostingerVm>(await hget('/virtual-machines', token, envName));
+  // Region is optional: a data-center lookup failure must not fail the sync
+  const dataCenters = await hget<unknown>('/data-centers', token, envName).then(b => listOf<DataCenter>(b)).catch(() => [] as DataCenter[]);
+  return { vms, infos: vms.map(vm => normalizeVm(vm, dataCenters, fetchedAt)), fetchedAt };
+}
+
+export function noteHostingerSuccess(infos: HostingerInfo[], now: string) {
+  hostingerState.vms = infos;
+  hostingerState.status = 'OK';
+  hostingerState.lastSuccessAt = now;
+  hostingerState.lastError = null;
+  hostingerState.lastSyncAt = now;
+}
+
+export function noteHostingerFailure(message: string, kind: HostingerSyncStatus, now: string) {
+  hostingerState.lastSyncAt = now;
+  hostingerState.status = kind;
+  hostingerState.lastError = message;
+}
+
+/**
+ * IP enrichment for the built-in HOSTINGER_API_TOKEN connection only.
+ * Other connections must not call this: a shared IP must not overwrite this server.
+ */
+export function attachLegacyServers(vms: HostingerVm[], infos: HostingerInfo[]): boolean {
+  let changed = false;
+  for (const srv of db.servers) {
+    const raw = vms.find(v => (v.ipv4 ?? []).some(a => a.address === srv.ip) || (v.ipv6 ?? []).some(a => a.address === srv.ip));
+    const info = raw ? infos.find(i => i.vmId === raw.id) : undefined;
+    if (!info) {
+      if (srv.hostinger) { delete srv.hostinger; changed = true; }
+      continue;
     }
-    if (changed) { persist(); broadcast('servers_changed', null); }
-  } catch (err) {
-    const e = err instanceof HostingerError ? err : new HostingerError((err as Error).message, 'ERROR');
-    hostingerState.status = e.kind;
-    hostingerState.lastError = e.message;
-    log.error('hostinger', `sync failed: ${e.message}`);
-    // Keep the last known VM facts but mark them as not current: the status above says the sync failed
-    throw e;
+    srv.hostinger = info;
+    srv.hostingerVmId = info.vmId;
+    srv.hostingerState = info.state ?? undefined;
+    srv.provider = 'Hostinger';
+    if (info.plan) srv.plan = info.plan;
+    if (info.cpus && info.ramGb && info.diskGb) {
+      srv.planSpec = { name: info.plan || srv.planSpec?.name || '', cpuCores: info.cpus, ramGb: info.ramGb, diskGb: info.diskGb, source: 'hostinger' };
+    }
+    if (!srv.os && info.os) srv.os = info.os;
+    if (info.region && (!srv.region || srv.region === 'Unknown' || srv.region === 'Not available')) srv.region = info.region;
+    changed = true;
   }
+  return changed;
+}
+
+/** Built-in account. Same entry point as before; extra accounts sync through their own connection id. */
+export async function syncHostinger(): Promise<void> {
+  const { syncLegacyHostinger } = await import('./providers/sync.ts');
+  return syncLegacyHostinger();
 }

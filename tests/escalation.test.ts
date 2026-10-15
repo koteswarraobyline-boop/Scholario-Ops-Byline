@@ -12,7 +12,9 @@ import path from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import dotenv from 'dotenv';
+import { pinTestDatabaseUrl, assertConnectedToTestDatabase, dropVerifiedTestSchema } from './helpers/test-db-guard.ts';
 
+pinTestDatabaseUrl();
 dotenv.config({ quiet: true });
 process.env.DB_SCHEMA = `ops_escalation_${process.pid}`;
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'scholario-escalation-'));
@@ -61,7 +63,10 @@ const minutesAgo = (inc: Incident, m: number) => { inc.startedAt = new Date(Date
 let n = 0;
 const alert = (severity: 'WARNING' | 'HIGH') => openAlert({ fingerprint: `esc-test:${++n}`, title: `Test ${n}`, severity, detail: 'something broke', source: 'Test' }).incident;
 
+let verified = false;
 before(async () => {
+  await assertConnectedToTestDatabase({ query: sql => query(sql) });
+  verified = true;
   await new Promise<void>(r => hook.listen(0, '127.0.0.1', () => r()));
   base = `http://127.0.0.1:${(hook.address() as AddressInfo).port}`;
   await initStore();
@@ -76,7 +81,7 @@ before(async () => {
 });
 after(async () => {
   hook.close();
-  await query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+  await dropVerifiedTestSchema(verified, () => query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}));
   await closePool();
   fs.rmSync(process.env.DATA_DIR!, { recursive: true, force: true });
   setTimeout(() => process.exit(0), 100).unref();

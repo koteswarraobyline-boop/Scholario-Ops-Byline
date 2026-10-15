@@ -4,6 +4,7 @@ import { useOps } from '../../context/OpsContext';
 import { VpsServer, TelemetryLevel } from '../../types';
 import { Search, X, Server, ChevronRight } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
+import { useDialog } from '../ui/useDialog';
 import { THRESHOLDS } from '../../lib/thresholds';
 import { fmtNum, fmtAgo, fmtTime, LevelBadge } from './telemetryUi';
 import { OverviewTab, ResourcesTab, ApplicationsTab, ServicesTab, NetworkTab, StorageTab, DatabaseTab, AgentTab } from './ServerTabs';
@@ -67,6 +68,7 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
   const { applications } = useOps();
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<DrawerTab>('overview');
+  const dialog = useDialog(onClose);
   const app = applications.find(a => a.id === server.applicationId);
   const reported = hasReported(server);
   const muted = isDark ? 'text-slate-400' : 'text-slate-500';
@@ -105,12 +107,11 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 overflow-y-auto animate-in fade-in">
       <div
-        className={`w-full max-w-6xl rounded-lg border overflow-hidden flex flex-col max-h-[90vh] shadow-2xl transition-colors ${
+        {...dialog}
+        className={`w-full max-w-6xl rounded-lg border overflow-hidden flex flex-col max-h-[90vh] shadow-2xl transition-colors focus:outline-none ${
           isDark ? 'bg-[#101624] text-slate-100 border-[#223048]' : 'bg-white text-slate-900 border-slate-200'
         }`}
         onClick={e => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
         aria-label={`Server ${server.hostname}`}
       >
         {/* Header */}
@@ -140,8 +141,8 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
               </p>
             </div>
           </div>
-          <button onClick={onClose} aria-label="Close" className={`p-1 transition-colors cursor-pointer ${isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800'}`}>
-            <X className="w-5 h-5" />
+          <button onClick={onClose} aria-label="Close server details" title="Close (Esc)" className={`p-1 transition-colors cursor-pointer ${isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800'}`}>
+            <X className="w-5 h-5" aria-hidden="true" />
           </button>
         </div>
 

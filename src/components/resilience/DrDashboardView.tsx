@@ -77,10 +77,10 @@ export const DrDashboardView: React.FC = () => {
     return (
       <div className="space-y-6">
         <div className={`pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
-          <h1 className="text-lg font-bold font-mono tracking-tight">DISASTER RECOVERY &amp; TRAFFIC FAILOVER</h1>
+          <h1 className="text-lg font-bold font-mono tracking-tight">PRD / DR READINESS</h1>
         </div>
         {isLoading ? (
-          <div className={`text-xs font-mono animate-pulse ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Loading DR dashboard…</div>
+          <div className={`text-xs font-mono animate-pulse ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Loading PRD / DR readiness…</div>
         ) : (
           <EmptyState
             icon={ShieldCheck}
@@ -172,7 +172,7 @@ export const DrDashboardView: React.FC = () => {
       }`}>
         <div>
           <h1 className="text-lg font-bold font-mono tracking-tight">
-            DISASTER RECOVERY &amp; TRAFFIC FAILOVER
+            PRD / DR READINESS
           </h1>
           <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
             DR readiness from live checks, and failover between PRD and DR (Cloudflare Load Balancer or DNS)

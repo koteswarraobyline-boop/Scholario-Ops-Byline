@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import {
   Application, VpsServer, Monitor, Incident, CloudflareZone, BackupRecord, Runbook, Deployment, MaintenanceWindow,
   CommunicationChannel, EscalationPolicy, AuditLog, DeadManControlPlane, IncidentStatus, IncidentSeverity, MonitorType,
-  IntegrationStatus, LoadBalancerState,
+  IntegrationStatus, LoadBalancerState, RegistryComponent, DependencyLink,
 } from '../types';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { api, ApiError, HealthCheckResponse, BootstrapData, SystemSummary } from '../services/api';
@@ -23,6 +23,8 @@ interface OpsContextType {
   cloudflareZones: CloudflareZone[];
   backups: BackupRecord[];
   runbooks: Runbook[];
+  registry: RegistryComponent[];
+  dependencyLinks: DependencyLink[];
   deployments: Deployment[];
   maintenanceWindows: MaintenanceWindow[];
   communicationChannels: CommunicationChannel[];
@@ -104,6 +106,12 @@ interface OpsContextType {
   createRunbook: (data: Partial<Runbook>) => Promise<Runbook | null>;
   updateRunbook: (id: string, data: Partial<Runbook>) => Promise<Runbook | null>;
   deleteRunbook: (id: string) => Promise<boolean>;
+
+  // Dependency register
+  saveRegistryComponent: (id: string | null, data: Partial<RegistryComponent>) => Promise<RegistryComponent | null>;
+  deleteRegistryComponent: (id: string) => Promise<boolean>;
+  saveDependencyLink: (id: string | null, data: Partial<DependencyLink>) => Promise<DependencyLink | null>;
+  deleteDependencyLink: (id: string) => Promise<boolean>;
 
   // Providers
   syncCloudflare: () => Promise<boolean>;
@@ -198,6 +206,8 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [cloudflareZones, setCloudflareZones] = useState<CloudflareZone[]>([]);
   const [backups, setBackups] = useState<BackupRecord[]>([]);
   const [runbooks, setRunbooks] = useState<Runbook[]>([]);
+  const [registry, setRegistry] = useState<RegistryComponent[]>([]);
+  const [dependencyLinks, setDependencyLinks] = useState<DependencyLink[]>([]);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [maintenanceWindows, setMaintenanceWindows] = useState<MaintenanceWindow[]>([]);
   const [communicationChannels, setCommunicationChannels] = useState<CommunicationChannel[]>([]);
@@ -305,6 +315,8 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setEscalationPolicies(d.escalationPolicies);
     setMaintenanceWindows(d.maintenanceWindows);
     setRunbooks(d.runbooks);
+    setRegistry(d.registry ?? []);
+    setDependencyLinks(d.dependencyLinks ?? []);
     setDeployments(d.deployments);
     setBackups(d.backups);
     setAuditLogs(d.auditLogs);
@@ -409,6 +421,10 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         case 'maintenance_update': setMaintenanceWindows(prev => upsert(prev, data)); break;
         case 'maintenance_deleted': setMaintenanceWindows(prev => prev.filter(w => w.id !== (raw as { id: string }).id)); break;
         case 'runbooks_changed': refetch('runbooks', async () => setRunbooks(await api.getRunbooks())); break;
+        case 'registry_changed': refetch('registry', async () => {
+          const r = await api.getRegistry();
+          setRegistry(r.components); setDependencyLinks(r.links);
+        }); break;
         case 'deployments_changed': refetch('deployments', async () => setDeployments(await api.getDeployments())); break;
         case 'backups_changed': refetch('backups', async () => setBackups(await api.getBackups())); break;
         case 'cloudflare_update': setCloudflareZones(raw as CloudflareZone[]); refetch('integrations', async () => setIntegrations(await api.integrations())); break;
@@ -647,6 +663,33 @@ Fail over anyway? The override is recorded in the audit log.`)) {
     return Boolean(r);
   }, [run]);
 
+  // ── Dependency register ───────────────────────────────────────────────────
+  // Deletes cascade to links and feature references, so the register is reloaded as a whole
+  const reloadRegistry = useCallback(async () => {
+    const r = await api.getRegistry().catch(() => null);
+    if (r) { setRegistry(r.components); setDependencyLinks(r.links); }
+  }, []);
+  const saveRegistryComponent = useCallback(async (id: string | null, data: Partial<RegistryComponent>) => {
+    const c = await run(() => (id ? api.updateRegistryComponent(id, data) : api.createRegistryComponent(data)), id ? 'Register entry updated' : 'Register entry added');
+    if (c) await reloadRegistry();
+    return c;
+  }, [run, reloadRegistry]);
+  const deleteRegistryComponent = useCallback(async (id: string) => {
+    const r = await run(() => api.deleteRegistryComponent(id), 'Register entry deleted');
+    if (r) await reloadRegistry();
+    return Boolean(r);
+  }, [run, reloadRegistry]);
+  const saveDependencyLink = useCallback(async (id: string | null, data: Partial<DependencyLink>) => {
+    const l = await run(() => (id ? api.updateDependencyLink(id, data) : api.createDependencyLink(data)), id ? 'Dependency updated' : 'Dependency added');
+    if (l) await reloadRegistry();
+    return l;
+  }, [run, reloadRegistry]);
+  const deleteDependencyLink = useCallback(async (id: string) => {
+    const r = await run(() => api.deleteDependencyLink(id), 'Dependency removed');
+    if (r) await reloadRegistry();
+    return Boolean(r);
+  }, [run, reloadRegistry]);
+
   // ── Providers ─────────────────────────────────────────────────────────────
   const syncCloudflare = useCallback(async () => {
     const zones = await run(() => api.syncCloudflare(), 'Cloudflare synced');
@@ -676,7 +719,7 @@ Fail over anyway? The override is recorded in the audit log.`)) {
   return (
     <OpsContext.Provider
       value={{
-        applications, servers, monitors, incidents, cloudflareZones, backups, runbooks, deployments,
+        applications, servers, monitors, incidents, cloudflareZones, backups, runbooks, registry, dependencyLinks, deployments,
         maintenanceWindows, communicationChannels, escalationPolicies, auditLogs, deadMan, integrations,
         loadBalancer, syncLoadBalancers,
         isLoading, loadError, realtimeStatus, refreshAll,
@@ -691,6 +734,7 @@ Fail over anyway? The override is recorded in the audit log.`)) {
         sendTestNotification, createChannel, updateChannel, deleteChannel, saveEscalationPolicies,
         createMaintenance, completeMaintenance, deleteMaintenance,
         toggleRunbookStep, resetRunbook, createRunbook, updateRunbook, deleteRunbook,
+        saveRegistryComponent, deleteRegistryComponent, saveDependencyLink, deleteDependencyLink,
         syncCloudflare, syncHostinger,
         apiHealth, triggerHealthCheck,
         theme, setTheme, toggleTheme,

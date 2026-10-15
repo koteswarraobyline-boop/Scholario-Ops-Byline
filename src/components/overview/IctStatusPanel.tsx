@@ -10,7 +10,7 @@ type Env = 'PRD' | 'DR';
 
 /**
  * Live answer to "is the real Production and DR infrastructure healthy right now?"
- * for every application mapped to a Cloudflare Load Balancer (ICT). Every value
+ * for every application mapped to a Cloudflare Load Balancer (e.g. the ICT application). Every value
  * comes from the backend; missing data is shown as missing.
  */
 export const IctStatusPanel: React.FC = () => {
@@ -172,7 +172,7 @@ const AppPanel: React.FC<{ app: Application }> = ({ app }) => {
         {card('Disaster Recovery / Standby', dr)}
       </div>
       <div className="flex flex-wrap gap-3 text-[11px] font-mono">
-        <button onClick={() => navigate('/resilience')} className="text-blue-400 hover:underline cursor-pointer">DR readiness & failover pre-flight →</button>
+        <button onClick={() => navigate('/resilience')} className="text-blue-400 hover:underline cursor-pointer">PRD / DR Readiness & failover pre-flight →</button>
         <button onClick={() => navigate('/cloudflare')} className="text-blue-400 hover:underline cursor-pointer">Cloudflare pools →</button>
         <button onClick={() => navigate('/infrastructure')} className="text-blue-400 hover:underline cursor-pointer">VPS telemetry →</button>
       </div>

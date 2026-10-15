@@ -9,6 +9,7 @@ import { deadManLabel } from '../ui/deadman';
 import { useAuth } from '../../context/AuthContext';
 import { api, AgentInstallInfo, CloudflarePoolOption } from '../../services/api';
 import { Application, VpsServer } from '../../types';
+import { DependencyRegisterSection } from './DependencyRegister';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Small shared UI helpers (match the rest of the dashboard's look)
@@ -110,7 +111,7 @@ const IntegrationsPanel: React.FC = () => {
       key: 'hostinger', icon: Server, title: 'Hostinger API', ok: integrations.hostinger.configured && !integrations.hostinger.lastError,
       configured: integrations.hostinger.configured,
       detail: !integrations.hostinger.configured
-        ? <>Optional. Set <code className={st.code}>HOSTINGER_API_TOKEN</code> to import plan / CPU / RAM / state.</>
+        ? <>Optional. Set <code className={st.code}>HOSTINGER_API_TOKEN</code> in .env and restart. Extra accounts use <code className={st.code}>HOSTINGER_&lt;LABEL&gt;_API_TOKEN</code> on the Hostinger page.</>
         : integrations.hostinger.lastError
           ? <span className="text-rose-500">{integrations.hostinger.lastError}</span>
           : <>{integrations.hostinger.vmCount} VM(s) · synced {timeAgo(integrations.hostinger.lastSyncAt)}</>,
@@ -903,6 +904,7 @@ export const SetupView: React.FC = () => {
 
       <ServersSection />
       <ApplicationsSection />
+      <DependencyRegisterSection />
       {canDo('run_probe') && <ToolsSection />}
 
       {showChannelsHint && (

@@ -12,7 +12,9 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import dotenv from 'dotenv';
+import { pinTestDatabaseUrl, assertConnectedToTestDatabase, dropVerifiedTestSchema } from './helpers/test-db-guard.ts';
 
+pinTestDatabaseUrl();
 dotenv.config({ quiet: true });
 process.env.DB_SCHEMA = `ops_secrets_${process.pid}`;
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'scholario-secrets-'));
@@ -28,9 +30,14 @@ const { query, closePool, SCHEMA, T } = await import('../server/db.ts');
 const TARGET = 'https://prod-12.westeurope.logic.azure.com/workflows/abc123/triggers/manual/paths/invoke?sig=TOPSECRETSIGNATURE';
 const rowData = async (id: string) => (await query(`SELECT data FROM ${T('channels')} WHERE id = $1`, [id])).rows[0]?.data as { targetEndpoint: string } | undefined;
 
-before(async () => { await initStore(); });
+let verified = false;
+before(async () => {
+  await assertConnectedToTestDatabase({ query: sql => query(sql) });
+  verified = true;
+  await initStore();
+});
 after(async () => {
-  await query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+  await dropVerifiedTestSchema(verified, () => query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}));
   await closePool();
   fs.rmSync(process.env.DATA_DIR!, { recursive: true, force: true });
   setTimeout(() => process.exit(0), 100).unref();
@@ -233,7 +240,7 @@ test('existing install without a stored fingerprint: the next start stores it (c
     assert.equal(await storedFp(), undefined, 'safe mode leaves the database as copied');
     assert.equal(await cipher(), sealed);
   } finally {
-    await query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {});
+    await dropVerifiedTestSchema(verified, () => query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {}));
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });

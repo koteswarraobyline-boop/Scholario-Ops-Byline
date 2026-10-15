@@ -7,7 +7,7 @@ import {
   Deployment, BackupRecord, IncidentStatus, IncidentSeverity, MonitorType, IntegrationStatus, CheckRecord,
 } from '../src/types/index.ts';
 import { config, isCloudflareConfigured, isHostingerConfigured, smtpSettingsReport } from './config.ts';
-import { db, persist, flush, liveMetrics, minuteMetrics, deleteServerMetrics, ServerRecord, UserRecord } from './store.ts';
+import { db, persist, flush, databaseSaveStatus, saveFailureClient, liveMetrics, minuteMetrics, deleteServerMetrics, ServerRecord, UserRecord } from './store.ts';
 import { broadcast, audit, addSseClient, sseClientCount } from './events.ts';
 import {
   requireAuth, requireRole, operatorName, hashPasswordAsync, verifyPassword, validatePasswordStrength, issueTokens,
@@ -23,7 +23,11 @@ import {
 import { httpProbe, tcpProbe, dnsProbe, sslProbe, parseHostPort, normalizeUrl } from './probes.ts';
 import { sendToChannel, notifyIncident, notifyTargetPolicy, deliveryRuntime, pendingGroupedAlerts, CHANNEL_FAILING_AFTER, verifySmtp, smtpConfigProblem, smtpEndpoint, smtpServerLabel, teamsTargetProblem } from './notify.ts';
 import { cfState, syncCloudflare, CloudflareError, listCloudflareAccounts, listLoadBalancerPools } from './cloudflare.ts';
-import { hostingerState, syncHostinger } from './hostinger.ts';
+import { HostingerError, hostingerState, syncHostinger } from './hostinger.ts';
+import { ensureLegacyHostingerConnection, createProviderConnection, renameProviderConnection, setProviderSyncEnabled, viewConnection } from './providers/connections.ts';
+import { instancesForApi, syncConnection, testProviderConnection, ProviderSyncError } from './providers/sync.ts';
+import { redactSecrets } from './providers/env.ts';
+import { filterProviderInstances } from '../src/lib/providerInventory.ts';
 import { buildInstaller, buildUninstaller, AGENT_VERSION } from './agent.ts';
 import { appChecksFor, LIST_KEYS, NULLABLE_LIST_KEYS, NULLABLE_OBJECT_KEYS } from './telemetry.ts';
 import { agentHealth, serverHealth } from './telemetryHealth.ts';
@@ -41,6 +45,7 @@ import { quietHoursProblem, type QuietHours } from '../src/lib/quietHours.ts';
 import { listDeliveries, getDelivery, getDeliveryForUser, deliveryChain, deliveryStats, unreadCounts, setRead, markAllRead, deliveryHealth, pendingLogWrites } from './deliveries.ts';
 import { workerState } from './leader.ts';
 import { notificationStatus } from './alerts.ts';
+import { buildComponent, buildLink, removeComponent, forgetRegistryReferences, registryImpact, RegistryConflict, kindLabel } from './registry.ts';
 import { log } from './logger.ts';
 
 const VERSION = '3.0.0';
@@ -495,6 +500,8 @@ export function buildRouter(): Router {
         cloudflare_load_balancing: lbState.status,
         vps_telemetry_stream: `${db.servers.filter(x => x.agentStatus === 'CONNECTED').length}/${db.servers.length} agents connected`,
         continuous_probes: `${s.healthyMonitors}/${s.totalMonitors} HEALTHY`,
+        /** OK | RETRYING (connection) | CONFLICT (lock, deadlock, or serialization) | REJECTED (row refused) */
+        database_save: databaseSaveStatus(),
       },
       counts: {
         applications: s.totalApps,
@@ -699,7 +706,11 @@ export function buildRouter(): Router {
     const send = res.json.bind(res);
     res.json = ((payload: unknown) => {
       void flush().then(saved => {
-        if (!saved && res.statusCode < 400) { res.status(503); send({ success: false, message: 'The change was applied but is not in the database yet (PostgreSQL unreachable) — it is saved automatically when the database is back. Do not repeat it.' }); return; }
+        if (!saved && res.statusCode < 400) {
+          const failure = saveFailureClient();
+          if (failure) { res.status(failure.status); send({ success: false, code: failure.code, message: failure.message }); return; }
+          res.status(503); send({ success: false, message: 'The change was applied but is not in the database yet (PostgreSQL unreachable) — it is saved automatically when the database is back. Do not repeat it.' }); return;
+        }
         send(payload);
       });
       return res;
@@ -748,6 +759,8 @@ export function buildRouter(): Router {
       escalationPolicies: db.escalationPolicies,
       maintenanceWindows: db.maintenanceWindows,
       runbooks: db.runbooks,
+      registry: db.registry,
+      dependencyLinks: db.dependencyLinks,
       deployments: db.deployments.slice(0, 200),
       backups: db.backups.slice(0, 200),
       auditLogs: db.auditLogs.slice(0, 200),
@@ -816,6 +829,7 @@ export function buildRouter(): Router {
     db.servers = db.servers.filter(x => x.id !== srv.id);
     void deleteServerMetrics(srv.id);
     forgetServer(srv.id);
+    forgetRegistryReferences({ serverId: srv.id });
     closeIncidentsReferencing([srv.id, ...removedMonitors.map(m => m.id)], operatorName(req), `server ${srv.hostname} was removed`);
     persist();
     audit(operatorName(req), 'SERVER_REMOVED', 'INFRASTRUCTURE', srv.id, `${srv.hostname} (${srv.ip}) removed with ${removedMonitors.length} monitor(s)`);
@@ -933,6 +947,7 @@ export function buildRouter(): Router {
     db.applications = db.applications.filter(a => a.id !== app.id);
     closeIncidentsReferencing([app.id, ...removed.map(m => m.id)], operatorName(req), `application ${app.name} was deleted`);
     for (const s of db.servers) if (s.applicationId === app.id) s.applicationId = '';
+    forgetRegistryReferences({ applicationId: app.id });
     persist();
     audit(operatorName(req), 'APPLICATION_DELETED', 'APPLICATION', app.id, `${app.name} deleted with ${removed.length} monitor(s)`);
     broadcast('applications_changed', null);
@@ -1616,6 +1631,70 @@ export function buildRouter(): Router {
     ok(res, rb);
   });
 
+  // ── Dependency register ────────────────────────────────────────────────────
+  const registryChanged = () => { persist(); broadcast('registry_changed', null); };
+  r.get('/v1/registry', (_req, res) => { ok(res, { components: db.registry, links: db.dependencyLinks }); });
+  r.get('/v1/registry/:id/impact', (req, res) => {
+    const impact = registryImpact(req.params.id);
+    if (!impact) return fail(res, 404, 'Register entry not found');
+    ok(res, impact);
+  });
+  r.post('/v1/registry', requireRole('it_administrator'), h((req, res) => {
+    const c = buildComponent(req);
+    db.registry.push(c);
+    db.registry.sort((a, b) => a.name.localeCompare(b.name));
+    registryChanged();
+    audit(operatorName(req), 'REGISTRY_COMPONENT_CREATED', 'REGISTRY', c.id, `${kindLabel(c.kind)} ${c.name} · owner ${c.owner} · ${c.tier}`);
+    ok(res, c, 201);
+  }));
+  r.patch('/v1/registry/:id', requireRole('it_administrator'), h((req, res) => {
+    const idx = db.registry.findIndex(x => x.id === req.params.id);
+    if (idx === -1) return fail(res, 404, 'Register entry not found');
+    const c = buildComponent(req, db.registry[idx]);
+    db.registry[idx] = c;
+    db.registry.sort((a, b) => a.name.localeCompare(b.name));
+    registryChanged();
+    audit(operatorName(req), 'REGISTRY_COMPONENT_UPDATED', 'REGISTRY', c.id, `${kindLabel(c.kind)} ${c.name} · owner ${c.owner} · ${c.tier}`);
+    ok(res, c);
+  }));
+  r.delete('/v1/registry/:id', requireRole('it_administrator'), h((req, res) => {
+    const linkCount = db.dependencyLinks.filter(l => l.fromId === req.params.id || l.toId === req.params.id).length;
+    const c = removeComponent(req.params.id);
+    if (!c) return fail(res, 404, 'Register entry not found');
+    registryChanged();
+    audit(operatorName(req), 'REGISTRY_COMPONENT_DELETED', 'REGISTRY', c.id, `${kindLabel(c.kind)} ${c.name} · ${linkCount} dependency link(s) removed`);
+    ok(res, { deleted: true, linksRemoved: linkCount });
+  }));
+  const linkLabel = (l: { fromId: string; toId: string; type: string; featureId: string | null }) => {
+    const name = (id: string | null) => db.registry.find(c => c.id === id)?.name ?? '?';
+    return `${name(l.fromId)} → ${name(l.toId)} (${l.type})${l.featureId ? ` for ${name(l.featureId)}` : ''}`;
+  };
+  r.post('/v1/dependency-links', requireRole('it_administrator'), h((req, res) => {
+    const l = buildLink(req);
+    db.dependencyLinks.push(l);
+    registryChanged();
+    audit(operatorName(req), 'DEPENDENCY_LINK_CREATED', 'REGISTRY', l.id, linkLabel(l));
+    ok(res, l, 201);
+  }));
+  r.patch('/v1/dependency-links/:id', requireRole('it_administrator'), h((req, res) => {
+    const idx = db.dependencyLinks.findIndex(x => x.id === req.params.id);
+    if (idx === -1) return fail(res, 404, 'Dependency link not found');
+    const l = buildLink(req, db.dependencyLinks[idx]);
+    db.dependencyLinks[idx] = l;
+    registryChanged();
+    audit(operatorName(req), 'DEPENDENCY_LINK_UPDATED', 'REGISTRY', l.id, linkLabel(l));
+    ok(res, l);
+  }));
+  r.delete('/v1/dependency-links/:id', requireRole('it_administrator'), h((req, res) => {
+    const l = db.dependencyLinks.find(x => x.id === req.params.id);
+    if (!l) return fail(res, 404, 'Dependency link not found');
+    const label = linkLabel(l);
+    db.dependencyLinks = db.dependencyLinks.filter(x => x.id !== l.id);
+    registryChanged();
+    audit(operatorName(req), 'DEPENDENCY_LINK_DELETED', 'REGISTRY', l.id, label);
+    ok(res, { deleted: true });
+  }));
+
   // ── Deployments & backups (read; written by CI / agents above) ─────────────
   r.get('/v1/deployments', (req, res) => { res.json(paginate(req, db.deployments, 200)); });
   r.get('/v1/backups/status', (_req, res) => { ok(res, db.applications.map(a => backupStatus(a))); });
@@ -1725,10 +1804,111 @@ export function buildRouter(): Router {
     try {
       await syncHostinger();
     } catch (err) {
-      return fail(res, 502, (err as Error).message);
+      const message = redactSecrets((err as Error).message);
+      if (err instanceof ProviderSyncError) return fail(res, err.statusCode, message);
+      if (err instanceof HostingerError) return fail(res, 502, message);
+      throw err;
     }
     ok(res, hostingerState.vms);
   }));
+
+  const providerError = (res: Response, err: unknown) => {
+    const message = redactSecrets((err as Error).message);
+    if (err instanceof ProviderSyncError) return fail(res, err.statusCode, message);
+    if (err instanceof HostingerError) return fail(res, 502, message);
+    throw err;
+  };
+  const connectionOr404 = (res: Response, id: string) => {
+    const row = db.providerConnections.find(c => c.id === id);
+    if (!row) { fail(res, 404, 'Connection not found'); return null; }
+    return row;
+  };
+  r.get('/v1/providers/connections', (_req, res) => {
+    ensureLegacyHostingerConnection();
+    ok(res, db.providerConnections.map(viewConnection));
+  });
+  r.post('/v1/providers/connections', requireRole('it_administrator'), h(async (req, res) => {
+    const b = body(req);
+    if (Object.keys(b).some(k => k !== 'tokenEnv' && /token|secret|authorization|password/i.test(k))) {
+      throw new ValidationError('Token values are not accepted. Set the environment variable on the server and restart.');
+    }
+    const row = createProviderConnection({
+      name: reqStr(b, 'name', 'Connection name', 80),
+      provider: reqStr(b, 'provider', 'Provider', 40),
+      tokenEnv: reqStr(b, 'tokenEnv', 'Environment variable', 80),
+    });
+    audit(operatorName(req), 'PROVIDER_CONNECTION_ADDED', 'INFRASTRUCTURE', row.id, `${row.name} · ${row.provider} · ${row.tokenEnv}`);
+    ok(res, viewConnection(row), 201);
+  }));
+  r.patch('/v1/providers/connections/:id', requireRole('it_administrator'), h(async (req, res) => {
+    const row = connectionOr404(res, req.params.id);
+    if (!row) return;
+    const b = body(req);
+    if (Object.keys(b).some(k => /token|secret|authorization|password/i.test(k))) {
+      throw new ValidationError('Token values are not accepted. Set the environment variable on the server and restart.');
+    }
+    const name = optStr(b, 'name', 'Connection name', 80);
+    const enabled = optBool(b, 'syncEnabled');
+    if (name === undefined && enabled === undefined) throw new ValidationError('Nothing to update');
+    if (name !== undefined) renameProviderConnection(row.id, name);
+    if (enabled !== undefined) setProviderSyncEnabled(row.id, enabled);
+    const updated = db.providerConnections.find(c => c.id === row.id)!;
+    audit(operatorName(req), 'PROVIDER_CONNECTION_UPDATED', 'INFRASTRUCTURE', updated.id, `${updated.name} · sync ${updated.syncEnabled ? 'enabled' : 'disabled'} · ${updated.tokenEnv}`);
+    ok(res, viewConnection(updated));
+  }));
+  r.post('/v1/providers/connections/:id/test', requireRole('operator'), h(async (req, res) => {
+    const row = connectionOr404(res, req.params.id);
+    if (!row) return;
+    try {
+      const result = await testProviderConnection(row.id);
+      audit(operatorName(req), 'PROVIDER_CONNECTION_TEST', 'INFRASTRUCTURE', row.id, `${row.name} · ${row.tokenEnv} · ${result.vmCount} VM(s)`);
+      ok(res, { ...result, connection: viewConnection(db.providerConnections.find(c => c.id === row.id)!) });
+    } catch (err) {
+      audit(operatorName(req), 'PROVIDER_CONNECTION_TEST_FAILED', 'INFRASTRUCTURE', row.id, `${row.name} · ${redactSecrets((err as Error).message)}`);
+      providerError(res, err);
+    }
+  }));
+  r.post('/v1/providers/connections/:id/sync', requireRole('operator'), h(async (req, res) => {
+    const row = connectionOr404(res, req.params.id);
+    if (!row) return;
+    try {
+      await syncConnection(row.id, { manual: true });
+      const current = db.providerConnections.find(c => c.id === row.id)!;
+      audit(operatorName(req), 'PROVIDER_CONNECTION_SYNC', 'INFRASTRUCTURE', row.id, `${current.name} · ${current.tokenEnv} · ${viewConnection(current).vmCount} VM(s)`);
+      ok(res, { connection: viewConnection(current), instances: instancesForApi().filter(i => i.connectionId === row.id) });
+    } catch (err) {
+      audit(operatorName(req), 'PROVIDER_CONNECTION_SYNC_FAILED', 'INFRASTRUCTURE', row.id, `${row.name} · ${redactSecrets((err as Error).message)}`);
+      providerError(res, err);
+    }
+  }));
+  r.post('/v1/providers/sync', requireRole('operator'), h(async (req, res) => {
+    ensureLegacyHostingerConnection();
+    const results: Array<{ id: string; name: string; ok: boolean; skipped?: boolean; message?: string }> = [];
+    for (const c of [...db.providerConnections]) {
+      if (!c.syncEnabled) { results.push({ id: c.id, name: c.name, ok: true, skipped: true }); continue; }
+      try {
+        await syncConnection(c.id, { manual: true });
+        results.push({ id: c.id, name: c.name, ok: true });
+      } catch (err) {
+        results.push({ id: c.id, name: c.name, ok: false, message: redactSecrets((err as Error).message) });
+      }
+    }
+    audit(operatorName(req), 'PROVIDER_SYNC', 'INFRASTRUCTURE', 'providers', results.map(r => `${r.name}: ${r.skipped ? 'skipped' : r.ok ? 'ok' : 'failed'}`).join('; ') || 'no connections');
+    ok(res, results);
+  }));
+  r.get('/v1/providers/instances', (req, res) => {
+    ensureLegacyHostingerConnection();
+    const connections = db.providerConnections.map(viewConnection);
+    const data = filterProviderInstances(instancesForApi(), connections, {
+      provider: String(req.query.provider ?? ''),
+      connectionId: String(req.query.connectionId ?? ''),
+      connectionStatus: String(req.query.connectionStatus ?? ''),
+      region: String(req.query.region ?? ''),
+      status: String(req.query.status ?? ''),
+      q: String(req.query.q ?? ''),
+    });
+    res.json({ success: true, data, connections });
+  });
 
   // ── Users ──────────────────────────────────────────────────────────────────
   r.get('/v1/users', requireRole('it_administrator'), (req, res) => { res.json(paginate(req, db.users.map(safeUser), 100)); });
@@ -1856,6 +2036,7 @@ export function buildRouter(): Router {
   r.use((_req, res) => { fail(res, 404, 'API endpoint not found'); });
   r.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof ValidationError) return fail(res, 400, err.message);
+    if (err instanceof RegistryConflict) return fail(res, 409, err.message);
     if (err instanceof SecretsKeyMissingError) return fail(res, 503, err.message);
     if ((err as { type?: string }).type === 'entity.parse.failed') return fail(res, 400, 'Request body is not valid JSON');
     log.error('api', 'unhandled error', { error: err as Error });

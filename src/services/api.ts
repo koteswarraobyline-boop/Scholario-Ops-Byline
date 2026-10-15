@@ -3,8 +3,9 @@ import {
   CommunicationChannel, EscalationPolicy, MaintenanceWindow, Runbook, Deployment, BackupRecord,
   IntegrationStatus, HttpProbeResult, TcpProbeResult, ServerMetricPoint, DrReadinessItem, OpsUser,
   LoadBalancerState, FailoverPreflight, DrOverall, CheckRecord, BackupStatus, DatabaseHealth, DatabaseReport, HostingerInfo,
+  ProviderConnectionView, ProviderInstanceView,
   ReliabilityInsights, OpsBackupHealth, NotificationDelivery, NotificationDeliveryStats, NotificationDeliveryDetail, NotificationHealth,
-  SmtpCheckResult,
+  SmtpCheckResult, RegistryComponent, DependencyLink, RegistryImpact,
 } from '../types';
 
 export interface HealthCheckResponse {
@@ -25,6 +26,7 @@ export interface HealthCheckResponse {
     cloudflare_load_balancing?: string;
     vps_telemetry_stream: string;
     continuous_probes: string;
+    database_save?: 'OK' | 'RETRYING' | 'CONFLICT' | 'REJECTED';
   };
   counts: {
     applications: number;
@@ -74,6 +76,9 @@ export interface BootstrapData {
   escalationPolicies: EscalationPolicy[];
   maintenanceWindows: MaintenanceWindow[];
   runbooks: Runbook[];
+  /** Absent from servers older than the dependency register */
+  registry?: RegistryComponent[];
+  dependencyLinks?: DependencyLink[];
   deployments: Deployment[];
   backups: BackupRecord[];
   auditLogs: AuditLog[];
@@ -354,6 +359,16 @@ export const api = {
   deleteRunbook: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/runbooks/${encodeURIComponent(id)}`)),
   toggleRunbookStep: (id: string, stepId: number) => unwrap(api.post<ApiResponse<Runbook>>(`/api/v1/runbooks/${encodeURIComponent(id)}/steps/${stepId}/toggle`)),
   resetRunbook: (id: string) => unwrap(api.post<ApiResponse<Runbook>>(`/api/v1/runbooks/${encodeURIComponent(id)}/reset`)),
+
+  // ── Dependency register ─────────────────────────────────────────────────────
+  getRegistry: () => unwrap(api.get<ApiResponse<{ components: RegistryComponent[]; links: DependencyLink[] }>>('/api/v1/registry')),
+  getRegistryImpact: (id: string) => unwrap(api.get<ApiResponse<RegistryImpact>>(`/api/v1/registry/${encodeURIComponent(id)}/impact`)),
+  createRegistryComponent: (data: Partial<RegistryComponent>) => unwrap(api.post<ApiResponse<RegistryComponent>>('/api/v1/registry', data)),
+  updateRegistryComponent: (id: string, data: Partial<RegistryComponent>) => unwrap(api.patch<ApiResponse<RegistryComponent>>(`/api/v1/registry/${encodeURIComponent(id)}`, data)),
+  deleteRegistryComponent: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean; linksRemoved: number }>>(`/api/v1/registry/${encodeURIComponent(id)}`)),
+  createDependencyLink: (data: Partial<DependencyLink>) => unwrap(api.post<ApiResponse<DependencyLink>>('/api/v1/dependency-links', data)),
+  updateDependencyLink: (id: string, data: Partial<DependencyLink>) => unwrap(api.patch<ApiResponse<DependencyLink>>(`/api/v1/dependency-links/${encodeURIComponent(id)}`, data)),
+  deleteDependencyLink: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/dependency-links/${encodeURIComponent(id)}`)),
   getDeployments: () => api.get<PaginatedApiResponse<Deployment>>('/api/v1/deployments?pageSize=200').then(r => r.data),
   getBackups: () => api.get<PaginatedApiResponse<BackupRecord>>('/api/v1/backups?pageSize=200').then(r => r.data),
   getBackupStatus: () => unwrap(api.get<ApiResponse<BackupStatus[]>>('/api/v1/backups/status')),
@@ -371,6 +386,12 @@ export const api = {
   syncCloudflare: () => unwrap(api.post<ApiResponse<CloudflareZone[]>>('/api/v1/cloudflare/sync')),
   getHostingerVms: () => api.get<{ success: boolean; configured: boolean; status: string; lastSyncAt: string | null; lastSuccessAt: string | null; lastError: string | null; data: HostingerInfo[] }>('/api/v1/hostinger/vms'),
   syncHostinger: () => unwrap(api.post<ApiResponse<Array<Record<string, unknown>>>>('/api/v1/hostinger/sync')),
+  getProviderConnections: () => unwrap(api.get<ApiResponse<ProviderConnectionView[]>>('/api/v1/providers/connections')),
+  createProviderConnection: (body: { name: string; provider: 'hostinger'; tokenEnv: string }) => unwrap(api.post<ApiResponse<ProviderConnectionView>>('/api/v1/providers/connections', body)),
+  updateProviderConnection: (id: string, body: { name?: string; syncEnabled?: boolean }) => unwrap(api.patch<ApiResponse<ProviderConnectionView>>(`/api/v1/providers/connections/${encodeURIComponent(id)}`, body)),
+  testProviderConnection: (id: string) => unwrap(api.post<ApiResponse<{ vmCount: number; connection: ProviderConnectionView }>>(`/api/v1/providers/connections/${encodeURIComponent(id)}/test`)),
+  syncProviderConnection: (id: string) => unwrap(api.post<ApiResponse<{ connection: ProviderConnectionView; instances: ProviderInstanceView[] }>>(`/api/v1/providers/connections/${encodeURIComponent(id)}/sync`)),
+  getProviderInstances: () => api.get<{ success: boolean; data: ProviderInstanceView[]; connections: ProviderConnectionView[] }>('/api/v1/providers/instances'),
   getLoadBalancers: () => unwrap(api.get<ApiResponse<LoadBalancerState>>('/api/v1/loadbalancers')),
   /** Cloudflare lookups for the configuration forms — the API token stays on the server */
   getCloudflareAccounts: () => unwrap(api.get<ApiResponse<Array<{ id: string; name: string }>>>('/api/v1/cloudflare/accounts')),
@@ -414,7 +435,7 @@ export const api = {
     const EVENTS = [
       'connected', 'telemetry_tick', 'server_update', 'servers_changed', 'applications_changed', 'application_update',
       'monitor_update', 'monitor_deleted', 'monitors_changed', 'incident_created', 'incident_update', 'audit',
-      'channel_update', 'channels_changed', 'maintenance_update', 'maintenance_deleted', 'runbooks_changed',
+      'channel_update', 'channels_changed', 'maintenance_update', 'maintenance_deleted', 'runbooks_changed', 'registry_changed',
       'deployments_changed', 'backups_changed', 'cloudflare_update', 'deadman_update', 'loadbalancer_update',
     ];
     let source: EventSource | null = null;

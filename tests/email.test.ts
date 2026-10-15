@@ -11,7 +11,9 @@ import path from 'node:path';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import dotenv from 'dotenv';
+import { pinTestDatabaseUrl, assertConnectedToTestDatabase, dropVerifiedTestSchema } from './helpers/test-db-guard.ts';
 
+pinTestDatabaseUrl();
 dotenv.config({ quiet: true });
 
 /** What the fake server received */
@@ -94,10 +96,15 @@ notify.RETRY_DELAYS_MS.splice(0, notify.RETRY_DELAYS_MS.length, 50, 50);
 const ch = (target: string) => ({ id: `ch-mail-${Math.random()}`, name: 'Ops mail', type: 'EMAIL', targetEndpoint: target, enabled: true, failureCount: 0 }) as never;
 const msg = { title: 'INC-77 API <down>', text: 'Severity: CRITICAL\nDetail: HTTP 503', severity: 'CRITICAL', status: 'FIRING' as const, incidentId: 'INC-77', link: 'https://ops.example/incidents?id=INC-77' };
 
-before(async () => { await initStore(); });
+let verified = false;
+before(async () => {
+  await assertConnectedToTestDatabase({ query: sql => query(sql) });
+  verified = true;
+  await initStore();
+});
 after(async () => {
   smtp.close();
-  await query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+  await dropVerifiedTestSchema(verified, () => query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}));
   await closePool();
 });
 

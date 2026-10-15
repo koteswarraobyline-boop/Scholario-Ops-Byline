@@ -17,14 +17,16 @@ import path from 'node:path';
 import http from 'node:http';
 import dotenv from 'dotenv';
 import pg from 'pg';
+import { pinTestDatabaseUrl, assertConnectedToTestDatabase, dropVerifiedTestSchema } from './helpers/test-db-guard.ts';
 
+const DATABASE_URL = pinTestDatabaseUrl();
 dotenv.config({ quiet: true });
 
 const CHROME = [process.env.CHROME_PATH, 'C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
   '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
   .find(p => p && fs.existsSync(p));
 const BUILT = fs.existsSync(path.join('dist', 'index.html'));
-const SKIP = !CHROME ? 'no Chrome / Chromium / Edge found (set CHROME_PATH)' : !BUILT ? 'frontend not built (run npm run build)' : !process.env.DATABASE_URL ? 'DATABASE_URL not set' : false;
+const SKIP = !CHROME ? 'no Chrome / Chromium / Edge found (set CHROME_PATH)' : !BUILT ? 'frontend not built (run npm run build)' : false;
 
 const SCHEMA = `ops_resptest_${process.pid}`;
 const PORT = 4300 + (process.pid % 50);
@@ -127,7 +129,7 @@ ${conns}`;
 };
 /** Database sessions of the test database at the moment of a failure (query text only, never parameter values) */
 const dbEvidence = async () => {
-  const c = new pg.Client({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 3000 });
+  const c = new pg.Client({ connectionString: DATABASE_URL, connectionTimeoutMillis: 3000 });
   try {
     await c.connect();
     const rows = (await c.query(`select state, coalesce(wait_event_type || '/' || wait_event, '-') wait, round(extract(epoch from now() - coalesce(xact_start, query_start)))::int age_s,
@@ -142,13 +144,18 @@ const waitFor = async (pred: () => Promise<boolean>, what = 'condition', timeout
   throw new Error(`${what}: not met in time${evidenceReport()}${await serverEvidence()}${await dbEvidence()}`);
 };
 
+let verified = false;
 before(async () => {
   if (SKIP) return;
+  const probe = new pg.Client({ connectionString: DATABASE_URL, connectionTimeoutMillis: 3000 });
+  await probe.connect();
+  try { await assertConnectedToTestDatabase(probe); } finally { await probe.end().catch(() => {}); }
+  verified = true;
   // Deprecated external watchdog URL is set on purpose: it must be ignored (no request ever reaches it)
   watchdog = http.createServer((_q, r) => { watchdogHits++; r.end('OK'); });
   await new Promise<void>(r => watchdog!.listen(0, '127.0.0.1', () => r()));
   server = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
-    env: { ...process.env, NODE_ENV: 'production', PORT: String(PORT), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR, ADMIN_EMAIL: ADMIN.email, ADMIN_PASSWORD: ADMIN.password,
+    env: { ...process.env, DATABASE_URL, NODE_ENV: 'production', PORT: String(PORT), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR, ADMIN_EMAIL: ADMIN.email, ADMIN_PASSWORD: ADMIN.password,
       JWT_SECRET: 'r'.repeat(40), PUBLIC_URL: 'https://ops.test.invalid', CLOUDFLARE_API_TOKEN: '', HOSTINGER_API_TOKEN: '', LOG_FORMAT: 'json',
       DEADMAN_HEARTBEAT_URL: `http://127.0.0.1:${(watchdog.address() as { port: number }).port}/ping/secret-uuid`, DEADMAN_INTERVAL_SEC: '10',
       NOTIFY_ALLOWED_PRIVATE_TARGETS: '127.0.0.1' },
@@ -167,7 +174,7 @@ before(async () => {
     prdServerId: prd.id, drServerId: dr.id, prdUrl: `https://${'subdomain.'.repeat(4)}example.com/health/${LONG}`, drUrl: 'https://dr.example.com/health',
     loadBalancer: { accountId: 'a'.repeat(32), hostname: `lms.${'region.'.repeat(3)}example.com`, prdPoolId: 'b'.repeat(32), drPoolId: 'c'.repeat(32) },
   });
-  const pgc = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  const pgc = new pg.Client({ connectionString: DATABASE_URL });
   await pgc.connect();
   const tokens = Object.fromEntries((await pgc.query(`select id, agent_token from ${SCHEMA}.servers`)).rows.map(r => [r.id, r.agent_token]));
   await pgc.end();
@@ -227,10 +234,10 @@ after(async () => {
   server?.kill();
   watchdog?.close();
   await sleep(500);
-  if (!SKIP) {
-    const pgc = new pg.Client({ connectionString: process.env.DATABASE_URL });
-    await pgc.connect().then(() => pgc.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`)).catch(() => {}).finally(() => pgc.end().catch(() => {}));
-  }
+  await dropVerifiedTestSchema(verified, async () => {
+    const pgc = new pg.Client({ connectionString: DATABASE_URL });
+    try { await pgc.connect(); await pgc.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`); } finally { await pgc.end().catch(() => {}); }
+  });
   for (const d of [DATA_DIR, PROFILE]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* chrome may still hold files */ } }
 });
 
@@ -715,6 +722,195 @@ test('critical alerts in the browser: opt-in toggle, a new CRITICAL incident not
     await page!.send('Page.removeScriptToEvaluateOnNewDocument', { identifier });
     await page!.eval(`localStorage.removeItem('scholario.criticalAlerts'), true`);
   }
+});
+
+test('UI polish: dialogs are named, take focus, close on Escape; refresh tooltip; runbook reset confirms; unknown URLs show a not-found page; page names', { skip: SKIP }, async () => {
+  const dialog = `(() => {
+    const d = document.querySelector('[role=dialog][aria-modal=true]');
+    if (!d) return null;
+    const id = d.getAttribute('aria-labelledby');
+    return { name: (id ? document.getElementById(id)?.textContent : d.getAttribute('aria-label'))?.trim() ?? '', focusInside: d.contains(document.activeElement),
+      close: [...d.querySelectorAll('button[aria-label^="Close"]')].map(b => b.getAttribute('aria-label')) };
+  })()`;
+  const esc = () => page!.eval(`(document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })), true`);
+  const clickText = (text: string) => page!.eval(`(() => { const b = [...document.querySelectorAll('button')].find(x => x.textContent.trim() === ${JSON.stringify(text)}); if (!b) throw new Error('no button ' + ${JSON.stringify(text)}); b.click(); return true; })()`);
+  const checkDialog = async (what: string, open: () => Promise<unknown>, name: RegExp, closeLabel: string) => {
+    await open();
+    await waitFor(async () => Boolean(await page!.eval(dialog)), `${what}: dialog opened`);
+    const d = (await page!.eval<{ name: string; focusInside: boolean; close: string[] }>(dialog))!;
+    assert.match(d.name, name, `${what}: accessible name`);
+    assert.ok(d.focusInside, `${what}: focus moved into the dialog`);
+    assert.ok(d.close.includes(closeLabel), `${what}: labelled close button (${d.close.join(', ')})`);
+    await shot(`dialog-${what.replace(/\W+/g, '-')}`);
+    await esc();
+    await waitFor(async () => !(await page!.eval(dialog)), `${what}: Escape closes it`);
+  };
+
+  // 1. Dialogs
+  const inc = (await api('POST', '/api/v1/incidents', { title: 'Dialog test incident', severity: 'WARNING', environment: 'PRD' })).data as { id: string };
+  await visit('/incidents', 1366, 'Declare incident');
+  await checkDialog('incident detail', () => page!.eval(`history.pushState({}, '', ${JSON.stringify(`/incidents?id=${inc.id}`)}); dispatchEvent(new PopStateEvent('popstate')); true`), /Dialog test incident/, 'Close incident details');
+  await checkDialog('declare incident', () => clickText('Declare incident'), /DECLARE INCIDENT/, 'Close declare incident');
+  await visit('/applications', 1366, 'Learning Management Platform');
+  await checkDialog('application detail', () => page!.eval(`document.querySelector('h3[title^="Learning Management Platform"]').closest('.cursor-pointer').click(), true`), /Learning Management Platform/, 'Close application details');
+  await visit('/infrastructure', 1366, 'VPS INFRASTRUCTURE');
+  await checkDialog('server detail', () => page!.eval(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Inspect').click(), true`), /^Server /, 'Close server details');
+  await visit('/monitors', 1366, 'CREATE MONITOR');
+  await checkDialog('create monitor', () => clickText('CREATE MONITOR'), /CREATE MONITOR/, 'Close create monitor');
+
+  // 2. The top-bar refresh button says what it does (it does not run the monitor checks)
+  const refresh = await page!.eval<{ title: string; label: string } | null>(`(() => { const b = document.querySelector('header button[aria-label^="Reload dashboard data"]'); return b && { title: b.title, label: b.getAttribute('aria-label') }; })()`);
+  assert.ok(refresh, 'refresh button labelled');
+  assert.match(refresh!.title, /does not run monitor checks/);
+  assert.doesNotMatch(refresh!.title, /probe all monitors/i);
+
+  // 3. Runbook reset asks first; Cancel keeps the progress, Reset clears it
+  const rb = (await api('POST', '/api/v1/runbooks', { title: 'Reset confirm runbook', description: '', category: 'DATABASE', estimatedDurationMin: 10, steps: [{ title: 'First step' }, { title: 'Second step' }] })).data as { id: string };
+  await api('POST', `/api/v1/runbooks/${rb.id}/steps/1/toggle`, {});
+  const done = async () => ((await api('GET', '/api/v1/runbooks')).data as Array<{ id: string; steps: Array<{ completed: boolean }> }>).find(r => r.id === rb.id)!.steps.filter(s => s.completed).length;
+  assert.equal(await done(), 1);
+  await visit('/runbooks', 1366, 'Reset confirm runbook');
+  await page!.eval(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('Reset confirm runbook')).click(), true`);
+  await waitText(t => t.includes('1 / 2 steps') && t.includes('Reset progress'), 'runbook selected');
+  await clickText('Reset progress');
+  await waitText(t => t.includes('Clear 1 completed step(s)?'), 'reset asks for confirmation');
+  await shot('runbook-reset-confirm');
+  assert.equal(await done(), 1, 'nothing reset before confirming');
+  await clickText('Cancel');
+  await waitText(t => !t.includes('Clear 1 completed step(s)?'), 'cancel closes the question');
+  assert.equal(await done(), 1, 'Cancel keeps the progress');
+  await clickText('Reset progress');
+  await waitText(t => t.includes('Clear 1 completed step(s)?'), 'asked again');
+  await clickText('Reset');
+  await waitFor(async () => (await done()) === 0, 'Reset clears the progress');
+  await api('DELETE', `/api/v1/runbooks/${rb.id}`);
+
+  // 4. Unknown URL: a not-found page inside the app (sidebar kept, address kept), with a way back
+  await visit('/no-such-page', 1366, 'Page not found');
+  assert.equal(await page!.eval<string>('location.pathname'), '/no-such-page', 'not redirected');
+  const nf = await bodyText();
+  assert.ok(nf.includes('There is no page at /no-such-page'), 'names the missing address');
+  assert.ok(await page!.eval<boolean>(`!!document.querySelector('aside')`), 'sidebar still available');
+  await shot('not-found-1366');
+  await clickText('Go to Overview');
+  await waitFor(async () => (await page!.eval<string>('location.pathname')) === '/overview', 'back to Overview');
+
+  // 5. One name per page: sidebar, page title and command palette agree
+  const nav = await page!.eval<string>(`document.querySelector('aside').innerText`);
+  for (const s of ['Notifications', 'PRD / DR Readiness', 'Alerting']) assert.ok(nav.toLowerCase().includes(s.toLowerCase()), `sidebar has ${s}`);
+  assert.ok(!/Communications/i.test(nav), 'no "Communications" in the sidebar');
+  await visit('/communications', 1366, 'NOTIFICATIONS & ESCALATION');
+  assert.ok(!(await bodyText()).includes('COMMUNICATIONS & ESCALATION'));
+  await visit('/resilience', 1366, 'PRD / DR READINESS');
+  assert.ok(!(await bodyText()).includes('DISASTER RECOVERY & TRAFFIC FAILOVER'));
+});
+
+test('Setup: dependency register — add entries, record and edit a dependency, see who is affected, delete with confirmation', { skip: SKIP }, async () => {
+  const SECTION = 'section[aria-labelledby="dependency-register-title"]';
+  const clickText = (text: string, within = SECTION) => page!.eval(`(() => { const b = [...document.querySelectorAll(${JSON.stringify(within)} + ' button')].find(x => x.textContent.trim() === ${JSON.stringify(text)}); if (!b) throw new Error('no button ' + ${JSON.stringify(text)}); b.click(); return true; })()`);
+  const clickLabel = (label: string) => page!.eval(`(() => { const b = document.querySelector(${JSON.stringify(`${SECTION} button[aria-label="${label}"]`)}); if (!b) throw new Error('no button ' + ${JSON.stringify(label)}); b.click(); return true; })()`);
+  // Sets a field of the open editor form the way typing / choosing does (React listens for input/change events)
+  const fill = (form: string, field: string, value: string) => page!.eval(`(() => {
+    const f = document.querySelector(${JSON.stringify(`form[aria-label="${form}"]`)});
+    const l = f && [...f.querySelectorAll('label')].find(x => x.querySelector('span')?.textContent.trim() === ${JSON.stringify(field)});
+    const el = l && l.querySelector('input, select');
+    if (!el) throw new Error('no field ' + ${JSON.stringify(field)});
+    if (el.tagName === 'SELECT') {
+      const opt = [...el.options].find(o => o.value === ${JSON.stringify(value)} || o.textContent.startsWith(${JSON.stringify(value)}));
+      if (!opt) throw new Error('no option ' + ${JSON.stringify(value)});
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(el, opt.value);
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, ${JSON.stringify(value)});
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    return true;
+  })()`);
+  const submit = (form: string) => page!.eval(`(document.querySelector(${JSON.stringify(`form[aria-label="${form}"]`)}).requestSubmit(), true)`);
+  const registry = async () => (await api('GET', '/api/v1/registry')).data as { components: Array<{ id: string; name: string; kind: string; owner: string; tier: string; userCount: number | null; served: string[] }>; links: Array<{ id: string; type: string; fromId: string; toId: string; featureId: string | null }> };
+  const sectionText = () => page!.eval<string>(`document.querySelector(${JSON.stringify(SECTION)})?.innerText ?? ''`);
+  const showSection = () => page!.eval(`(document.querySelector(${JSON.stringify(SECTION)}).scrollIntoView({ block: 'start' }), true)`).then(() => sleep(200));
+
+  await visit('/setup', 1366, 'DEPENDENCY REGISTER');
+  // 1. Add an application with users and teams served, then a database
+  await clickText('Add entry');
+  await waitFor(async () => Boolean(await page!.eval(`!!document.querySelector('form[aria-label="New register entry"]')`)), 'entry editor opened');
+  await fill('New register entry', 'Kind', 'APPLICATION');
+  await fill('New register entry', 'Name', 'Reg UI Portal');
+  await fill('New register entry', 'Owner', 'Student Services');
+  await fill('New register entry', 'Tier', 'TIER_1');
+  await fill('New register entry', 'Users', '2400');
+  await fill('New register entry', 'Teams or customers served', 'Students, Parents');
+  await showSection();
+  await shot('register-new-entry-1366');
+  await submit('New register entry');
+  await waitFor(async () => (await registry()).components.some(c => c.name === 'Reg UI Portal'), 'application saved');
+  const portal = (await registry()).components.find(c => c.name === 'Reg UI Portal')!;
+  assert.equal(portal.kind, 'APPLICATION');
+  assert.equal(portal.owner, 'Student Services');
+  assert.equal(portal.userCount, 2400);
+  assert.deepEqual(portal.served, ['Students', 'Parents']);
+
+  await waitFor(async () => !(await page!.eval<boolean>(`!!document.querySelector('form[aria-label="New register entry"]')`)), 'editor closed after saving');
+  await clickText('Add entry');
+  await waitFor(async () => Boolean(await page!.eval(`!!document.querySelector('form[aria-label="New register entry"]')`)), 'entry editor opened again');
+  await fill('New register entry', 'Kind', 'DATABASE');
+  const dbFields = await page!.eval<string>(`document.querySelector('form[aria-label="New register entry"]').innerText`);
+  assert.ok(!dbFields.includes('Users') && !dbFields.includes('Teams or customers served'), 'a database has no user count or audience fields');
+  await fill('New register entry', 'Name', 'Reg UI Database');
+  await fill('New register entry', 'Owner', 'DBA team');
+  await fill('New register entry', 'Tier', 'TIER_1');
+  await submit('New register entry');
+  await waitFor(async () => (await registry()).components.some(c => c.name === 'Reg UI Database'), 'database saved');
+  const dbc = (await registry()).components.find(c => c.name === 'Reg UI Database')!;
+  await waitText(t => t.includes('Reg UI Portal') && t.includes('Reg UI Database') && t.includes('Student Services') && t.includes('2,400'), 'both rows shown');
+
+  // 2. Record "Portal depends on Database" (soft), then edit it to hard
+  await clickText('Add dependency');
+  await waitFor(async () => Boolean(await page!.eval(`!!document.querySelector('form[aria-label="New dependency"]')`)), 'dependency editor opened');
+  await fill('New dependency', 'A (depends on B)', portal.id);
+  await fill('New dependency', 'B (needed by A)', dbc.id);
+  await fill('New dependency', 'Type', 'SOFT');
+  await fill('New dependency', 'Notes', 'Read-only mode without the database');
+  await submit('New dependency');
+  await waitFor(async () => (await registry()).links.some(l => l.fromId === portal.id && l.toId === dbc.id && l.type === 'SOFT'), 'soft link saved');
+  await waitFor(async () => /Reg UI Portal depends on Reg UI Database\s*SOFT/.test(await sectionText()), 'link listed as SOFT');
+  await clickLabel('Edit dependency Reg UI Portal on Reg UI Database');
+  await waitFor(async () => Boolean(await page!.eval(`!!document.querySelector('form[aria-label="Edit dependency"]')`)), 'link editor opened');
+  await fill('Edit dependency', 'Type', 'HARD');
+  await submit('Edit dependency');
+  await waitFor(async () => (await registry()).links.some(l => l.fromId === portal.id && l.toId === dbc.id && l.type === 'HARD'), 'edited to HARD');
+  await waitFor(async () => /Reg UI Portal depends on Reg UI Database\s*HARD/.test(await sectionText()), 'link listed as HARD');
+
+  // 3. Impact of the database: the portal stops, with its users and teams
+  await clickLabel('Impact of Reg UI Database');
+  await waitFor(async () => /IF REG UI DATABASE FAILS[\s\S]*Users who lose service: at least 2,400\.[\s\S]*not a total[\s\S]*Students, Parents[\s\S]*Stops working \(1\)[\s\S]*Reg UI Portal/.test(await sectionText()), 'impact shown');
+  assert.doesNotMatch(await sectionText(), /up to|degraded only/i, 'counts are lower bounds, not a maximum');
+  await showSection();
+  await shot('register-impact-1366');
+  for (const w of [1366, 1024]) {
+    await page!.send('Emulation.setDeviceMetricsOverride', { width: w, height: 1000, deviceScaleFactor: 1, mobile: false });
+    await sleep(300);
+    await showSection();
+    const r = await page!.eval<{ problems: string[]; error?: string }>(CHECK(SECTION));
+    assert.ok(!r.error, r.error);
+    assert.deepEqual(r.problems, [], `register layout at ${w}px`);
+    await shot(`register-${w}`);
+  }
+  await clickLabel('Close impact');
+
+  // 4. Delete asks first; Cancel keeps it; Delete removes the entry and its link
+  await clickLabel('Delete Reg UI Database');
+  await waitFor(async () => (await sectionText()).includes('Delete with 1 link(s)?'), 'delete asks');
+  assert.ok((await registry()).components.some(c => c.id === dbc.id), 'nothing deleted before confirming');
+  await clickText('Cancel');
+  await waitFor(async () => !(await sectionText()).includes('Delete with 1 link(s)?'), 'cancel closes the question');
+  await clickLabel('Delete Reg UI Database');
+  await waitFor(async () => (await sectionText()).includes('Delete with 1 link(s)?'), 'asked again');
+  await clickText('Delete');
+  await waitFor(async () => { const r = await registry(); return !r.components.some(c => c.id === dbc.id) && !r.links.some(l => l.toId === dbc.id); }, 'entry and link deleted');
+  await waitFor(async () => !(await sectionText()).includes('Reg UI Database'), 'row gone');
+  await api('DELETE', `/api/v1/registry/${portal.id}`);
 });
 
 if (SKIP) test(`responsive browser checks skipped: ${SKIP}`, { skip: SKIP }, () => {});
