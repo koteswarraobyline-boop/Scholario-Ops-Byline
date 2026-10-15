@@ -244,6 +244,7 @@ test('heartbeat 13: not-configured categories are NOT CONFIGURED, never counted 
   assert.match(h, /DB.*— not configured/s);
   assert.match(h, /— NOT CONFIGURED/);
   assert.match(h, /No database probe/);
+  assert.match(h, /No application linked to this server/);
   assert.equal(stateCounts(d).HEALTHY, 4, 'only configured heartbeats are counted');
   const unknownApp = node('PRD', { applications: grp([app('PRD', { state: 'UNKNOWN', lastCheckAt: null, lastSuccessAt: null, detail: 'Check not reported yet' })]) });
   assert.equal(nodeState(unknownApp).state, 'UNKNOWN', 'unknown data is not healthy');

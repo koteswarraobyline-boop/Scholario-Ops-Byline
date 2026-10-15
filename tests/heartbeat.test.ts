@@ -36,6 +36,7 @@ const { initStore, db } = await import('../server/store.ts');
 const { query, closePool, SCHEMA } = await import('../server/db.ts');
 const { ingestAgentReport, recomputeDerived, startEngine, stopEngine } = await import('../server/engine.ts');
 const { infraHeartbeat, serverHeartbeat } = await import('../server/heartbeat.ts');
+const { filterRecords } = await import('../src/lib/heartbeatView.ts');
 const { evaluateAlerts } = await import('../server/alerts.ts');
 const { config } = await import('../server/config.ts');
 type ServerRecord = import('../server/store.ts').ServerRecord;
@@ -128,6 +129,68 @@ test('healthy server heartbeat: freshness, delivery latency, real report interva
   assert.equal(hb.status, 'HEALTHY');
   assert.equal(hb.servers[1].state, 'HEALTHY', 'DR has no database probe: not counted against it');
   assert.equal(hb.servers[1].databases.total, 0);
+});
+
+test('configured application with no app port is UNKNOWN on PRD and DR; monitors do not add, hide, or pass it', () => {
+  const servicesBefore = serverHeartbeat(dr).services.checks.map(c => `${c.key}:${c.state}`);
+  const serverCheckBefore = serverHeartbeat(prd).server.state;
+  const bare = mkServer('DR', '203.0.113.33');
+  bare.hostname = 'hb-unconfigured';
+  bare.lastSeen = new Date().toISOString();
+  bare.agentStatus = 'CONNECTED';
+  bare.services = [{ name: 'cron', status: 'active', pid: 1, memoryMb: 1, cpuPercent: 0, version: '', lastRestart: '' }];
+  const ict = mkApp('ICT', prd.id, dr.id, 0);
+  ict.environments = {
+    PRD: { ...ict.environments!.PRD!, appPort: null, healthPath: null },
+    DR: { ...ict.environments!.DR!, appPort: null, healthPath: null },
+  };
+  const monitorsBefore = db.monitors.length;
+  db.applications.push(ict);
+  db.servers.push(bare);
+  try {
+    const on = (srv: ServerRecord) => serverHeartbeat(srv).applications.checks.find(c => c.name === 'ICT');
+    const prdIct = on(prd)!;
+    const drIct = on(dr)!;
+    assert.ok(prdIct && drIct, 'a linked application appears on its PRD and DR servers');
+    assert.equal(prdIct.state, 'UNKNOWN');
+    assert.equal(drIct.state, 'UNKNOWN');
+    assert.equal(prdIct.target, null);
+    assert.match(prdIct.detail, /No app port configured/);
+    assert.equal(prdIct.key, `app:${ict.id}`);
+    const lms = serverHeartbeat(prd).applications.checks.find(c => c.name === 'LMS')!;
+    assert.equal(lms.state, 'HEALTHY', 'a reported application check is unchanged');
+    assert.equal(serverHeartbeat(prd).server.state, serverCheckBefore, 'the server heartbeat itself is unchanged');
+    assert.deepEqual(serverHeartbeat(dr).services.checks.map(c => `${c.key}:${c.state}`), servicesBefore, 'service heartbeats are unchanged');
+    assert.equal(serverHeartbeat(prd).state, 'UNKNOWN', 'a configured application with no check is not healthy');
+
+    db.monitors.push({
+      id: crypto.randomUUID(), name: 'ICT DR URL', type: 'HTTPS', target: 'https://ict.example', applicationId: ict.id,
+      serverId: dr.id, environment: 'DR', intervalSec: 60, timeoutSec: 5, retries: 1, warningThresholdMs: 1000, criticalThresholdMs: 3000,
+      failureConfirmationThreshold: 1, recoveryConfirmationThreshold: 1, consecutiveFailures: 0, consecutiveRecoveries: 1,
+      status: 'HEALTHY', lastCheck: new Date().toISOString(), lastSuccess: new Date().toISOString(), responseTimeMs: 20, uptimePercent: 100,
+      history: [], enabled: true, activeMaintenance: false, managedBy: 'app-url',
+    });
+    assert.equal(on(dr)!.state, 'UNKNOWN', 'a healthy application monitor is not an application heartbeat');
+    db.monitors.pop();
+    assert.equal(db.monitors.length, monitorsBefore);
+    assert.equal(on(dr)!.state, 'UNKNOWN', 'the same application with no monitor is still listed');
+
+    const unconfigured = serverHeartbeat(bare);
+    assert.equal(unconfigured.applications.total, 0, 'no linked application stays unconfigured');
+    assert.equal(unconfigured.services.checks[0].state, 'HEALTHY');
+    assert.equal(unconfigured.databases.total, 0);
+
+    const drApps = filterRecords(infraHeartbeat(), { type: 'APPLICATION', status: 'ALL', server: 'DR' });
+    assert.ok(drApps.some(r => r.check.name === 'ICT' && r.server.environment === 'DR' && r.check.state === 'UNKNOWN'));
+    assert.equal(drApps.every(r => r.check.kind === 'APPLICATION' && r.server.environment === 'DR'), true);
+    assert.equal(drApps.some(r => r.check.name === 'LMS'), true, 'reported DR application checks stay in the same filter');
+  } finally {
+    db.applications = db.applications.filter(a => a.id !== ict.id);
+    db.servers = db.servers.filter(s => s.id !== bare.id);
+    db.monitors = db.monitors.filter(m => m.applicationId !== ict.id);
+  }
+  assert.equal(serverHeartbeat(prd).applications.checks.some(c => c.name === 'ICT'), false);
+  assert.equal(serverHeartbeat(prd).state, 'HEALTHY');
 });
 
 test('application heartbeat: healthy → degraded (1st failure) → failing (repeated) → recovery; last success kept', () => {
