@@ -50,8 +50,8 @@ function checkProductionConfig() {
   const errors: string[] = [];
   const warnings: string[] = [];
   if (!config.databaseUrl) errors.push('DATABASE_URL is not set');
-  if (!config.publicUrl) warnings.push('PUBLIC_URL is not set — agent install commands and notification links will use the request host');
-  else if (!config.publicUrl.startsWith('https://')) warnings.push(`PUBLIC_URL (${config.publicUrl}) is not https:// — agents would send telemetry unencrypted`);
+  if (!config.publicUrl) warnings.push('PUBLIC_URL is not set — notification links use the request host, and the agent installer is withheld unless that host is https and not this computer');
+  else if (!config.publicUrl.startsWith('https://')) warnings.push('PUBLIC_URL is not https:// — the agent installer will refuse it');
   if ((process.env.JWT_SECRET ?? '').trim().length < 32) warnings.push('JWT_SECRET is not set (or < 32 chars) — using a generated secret stored in DATA_DIR; set one in .env so sessions survive a DATA_DIR loss');
   if (config.host === '0.0.0.0' || config.host === '::') warnings.push(`HOST=${config.host} exposes Node directly — behind nginx use HOST=127.0.0.1`);
   if (!process.env.CLOUDFLARE_API_TOKEN) warnings.push('CLOUDFLARE_API_TOKEN is not set — Cloudflare pages will show "Not configured"');

@@ -29,6 +29,7 @@ import { instancesForApi, syncConnection, testProviderConnection, ProviderSyncEr
 import { redactSecrets } from './providers/env.ts';
 import { filterProviderInstances } from '../src/lib/providerInventory.ts';
 import { buildInstaller, buildUninstaller, AGENT_VERSION } from './agent.ts';
+import { resolveAgentBaseUrl, agentInstallInfo, refusedInstallScript } from '../src/lib/agentEndpoint.ts';
 import { appChecksFor, LIST_KEYS, NULLABLE_LIST_KEYS, NULLABLE_OBJECT_KEYS } from './telemetry.ts';
 import { agentHealth, serverHealth } from './telemetryHealth.ts';
 import { infraHeartbeat } from './heartbeat.ts';
@@ -100,6 +101,11 @@ function publicBaseUrl(req: Request) {
   return `${req.protocol}://${req.get('host')}`;
 }
 
+/** Base URL the agent will call. Refuses loopback and non-HTTPS; does not invent a host. */
+function agentBase(req: Request) {
+  return resolveAgentBaseUrl(config.publicUrl, `${req.protocol}://${req.get('host') ?? ''}`);
+}
+
 const isAdmin = (req: Request) => (req.user ? ROLE_LEVEL[req.user.roleName] >= 3 : false);
 
 /** Hides push-monitor secrets from users who cannot manage monitors */
@@ -123,6 +129,7 @@ function integrationStatus(req: Request): IntegrationStatus {
       problem: smtpConfigProblem(),
     },
     publicUrl: publicBaseUrl(req),
+    publicUrlConfigured: Boolean(config.publicUrl),
   };
 }
 
@@ -603,8 +610,10 @@ export function buildRouter(): Router {
     if (!srv || !safeEqual(key, srv.agentToken)) {
       return res.status(404).type('text/plain').send('echo "Unknown server or invalid key" >&2; exit 1\n');
     }
+    const base = agentBase(req);
+    if (!base.ok) return res.status(200).type('text/plain').send(refusedInstallScript(base.reason));
     const services = String(req.query.services ?? 'nginx apache2 mysql mariadb postgresql redis-server docker php8.3-fpm php8.2-fpm php8.1-fpm pm2-root');
-    res.type('text/plain').send(buildInstaller({ serverUrl: publicBaseUrl(req), agentToken: srv.agentToken, hostname: srv.hostname, services }));
+    res.type('text/plain').send(buildInstaller({ serverUrl: base.base, agentToken: srv.agentToken, hostname: srv.hostname, services }));
   }));
 
   r.get('/v1/agent/uninstall', (_req, res) => { res.type('text/plain').send(buildUninstaller()); });
@@ -840,15 +849,7 @@ export function buildRouter(): Router {
   r.get('/v1/servers/:id/agent', requireRole('it_administrator'), (req, res) => {
     const srv = db.servers.find(x => x.id === req.params.id);
     if (!srv) return fail(res, 404, 'Server not found');
-    const base = publicBaseUrl(req);
-    const url = `${base}/api/v1/agent/install/${srv.id}?key=${srv.agentToken}`;
-    ok(res, {
-      installCommand: `curl -fsSL '${url}' | sudo bash`,
-      uninstallCommand: `curl -fsSL '${base}/api/v1/agent/uninstall' | sudo bash`,
-      ingestUrl: `${base}/api/v1/agent/ingest`,
-      agentVersion: AGENT_VERSION,
-      publicUrlConfigured: Boolean(config.publicUrl),
-    });
+    ok(res, agentInstallInfo(agentBase(req), srv, { agentVersion: AGENT_VERSION, publicUrlConfigured: Boolean(config.publicUrl) }));
   });
   r.post('/v1/servers/:id/rotate-token', requireRole('it_administrator'), (req, res) => {
     const srv = db.servers.find(x => x.id === req.params.id);

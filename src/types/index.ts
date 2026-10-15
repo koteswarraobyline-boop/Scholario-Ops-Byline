@@ -1199,6 +1199,8 @@ export interface IntegrationStatus {
   loadBalancing: { configured: boolean; status: LbSyncStatus; lastSyncAt: string | null; lastError: string | null; poolCount: number };
   smtp: { configured: boolean; server?: string | null; from?: string | null; problem?: string | null };
   publicUrl: string;
+  /** True when PUBLIC_URL is set. The displayed publicUrl may still be the browser address. */
+  publicUrlConfigured?: boolean;
 }
 
 /** Result of Check SMTP; settings carry names and presence only, never values */

@@ -407,7 +407,8 @@ test('heartbeat stream in the browser: ICT stopped on PRD → server stays CONNE
   await report(seed!.prdId, { services: svc, appChecks: ict('DOWN') });
   await report(seed!.drId, { services: svc });
   await visit('/monitors', 1366, 'Dead-Man Watchdog Heartbeat Stream');
-  await waitText(t => t.includes('Reason: 1 application heartbeat failing (ICT Production)'), 'collapsed PRD reason');
+  // The seeded LMS URL monitor can also be failing by the time this runs. The PRD reason must name ICT.
+  await waitText(t => /application heartbeats? failing \([^)]*ICT Production/.test(t), 'collapsed PRD reason');
   await shot('heartbeat-ict-down-collapsed');
   let t = await bodyText();
   for (const x of ['PRD VPS · 198.51.100.71', 'DR VPS · 198.51.100.72', 'Overall node', 'UI stream: 1 Hz refresh (animation only)', 'Heartbeat type']) assert.ok(t.includes(x), x);
@@ -422,19 +423,20 @@ test('heartbeat stream in the browser: ICT stopped on PRD → server stays CONNE
   // Filters: failing applications → only ICT on PRD
   await setSelect('Heartbeat type', 'APPLICATION');
   await setSelect('Status', 'FAILING');
-  await waitText(x => x.toLowerCase().includes('1 matching heartbeat'), 'filtered list');
+  await waitText(x => /ICT Production\s*— PRD/.test(x), 'filtered list');
   t = await bodyText();
-  assert.ok(/ICT Production\s*— PRD/.test(t), 'only ICT on PRD');
+  assert.ok(/ICT Production\s*— PRD/.test(t), 'ICT on PRD');
+  assert.equal(/ICT Production\s*— DR/.test(t), false, 'the ICT agent check was reported for PRD only');
   assert.equal(t.includes('pm2-root'), false);
   await setSelect('Server', 'DR');
-  await waitText(x => x.includes('No heartbeats match these filters'), 'DR has no failing application');
+  await waitText(x => !/ICT Production/.test(x), 'ICT failure is not on DR');
   await setSelect('Heartbeat type', 'SERVICE'); await setSelect('Status', 'HEALTHY'); await setSelect('Server', 'PRD');
   await waitText(x => /2 matching heartbeats/i.test(x), 'healthy PRD services');
   await page!.eval(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('Clear filters')).click(), true`);
   await waitText(x => x.includes('Overall node'), 'back to the server-first view');
   // Recovery arrives over the live stream; the parent recalculates without a reload
   await report(seed!.prdId, { services: svc, appChecks: ict('HEALTHY') });
-  await waitText(x => !x.includes('Reason: 1 application heartbeat failing'), 'PRD recovered without reload');
+  await waitText(x => !/application heartbeats? failing \([^)]*ICT Production/.test(x), 'PRD ICT recovered without reload');
   await visit('/overview', 1366, 'Dead-Man');
   assert.ok((await bodyText()).includes('PRD VPS + DR VPS'), 'dead-man card names the monitored servers');
   const html = await page!.eval<string>('document.documentElement.outerHTML');

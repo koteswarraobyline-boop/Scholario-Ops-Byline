@@ -159,6 +159,8 @@ export interface AgentInstallInfo {
   ingestUrl: string;
   agentVersion: string;
   publicUrlConfigured: boolean;
+  /** Set when no install command is safe to copy. Never contains the agent token. */
+  problem?: string;
 }
 
 export class ApiError extends Error {

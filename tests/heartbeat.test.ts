@@ -36,7 +36,7 @@ const { initStore, db } = await import('../server/store.ts');
 const { query, closePool, SCHEMA } = await import('../server/db.ts');
 const { ingestAgentReport, recomputeDerived, startEngine, stopEngine } = await import('../server/engine.ts');
 const { infraHeartbeat, serverHeartbeat } = await import('../server/heartbeat.ts');
-const { filterRecords } = await import('../src/lib/heartbeatView.ts');
+const { filterRecords, incidentFor } = await import('../src/lib/heartbeatView.ts');
 const { evaluateAlerts } = await import('../server/alerts.ts');
 const { config } = await import('../server/config.ts');
 type ServerRecord = import('../server/store.ts').ServerRecord;
@@ -131,7 +131,7 @@ test('healthy server heartbeat: freshness, delivery latency, real report interva
   assert.equal(hb.servers[1].databases.total, 0);
 });
 
-test('configured application with no app port is UNKNOWN on PRD and DR; monitors do not add, hide, or pass it', () => {
+test('configured application with no app port is listed on PRD and DR; a URL monitor shows its result and error', () => {
   const servicesBefore = serverHeartbeat(dr).services.checks.map(c => `${c.key}:${c.state}`);
   const serverCheckBefore = serverHeartbeat(prd).server.state;
   const bare = mkServer('DR', '203.0.113.33');
@@ -163,17 +163,42 @@ test('configured application with no app port is UNKNOWN on PRD and DR; monitors
     assert.deepEqual(serverHeartbeat(dr).services.checks.map(c => `${c.key}:${c.state}`), servicesBefore, 'service heartbeats are unchanged');
     assert.equal(serverHeartbeat(prd).state, 'UNKNOWN', 'a configured application with no check is not healthy');
 
+    const monId = crypto.randomUUID();
+    db.monitors.push({
+      id: monId, name: 'ICT DR URL', type: 'HTTPS', target: 'https://ict.example', applicationId: ict.id,
+      serverId: dr.id, environment: 'DR', intervalSec: 60, timeoutSec: 5, retries: 1, warningThresholdMs: 1000, criticalThresholdMs: 3000,
+      failureConfirmationThreshold: 1, recoveryConfirmationThreshold: 1, consecutiveFailures: 2, consecutiveRecoveries: 0,
+      status: 'CRITICAL', lastCheck: new Date().toISOString(), lastSuccess: '', lastProbeStatus: 'DOWN', lastStatusCode: 503, responseTimeMs: 20, uptimePercent: 0,
+      history: [{ t: new Date().toISOString(), ok: false, probeStatus: 'DOWN', statusCode: 503, latencyMs: 20, detail: 'HTTP 503 — origin unhealthy' }],
+      enabled: true, activeMaintenance: false, managedBy: 'app-url',
+    });
+    const failing = on(dr)!;
+    assert.equal(failing.state, 'FAILING');
+    assert.match(failing.detail, /HTTP 503 — origin unhealthy/);
+    assert.equal(failing.httpStatus, 503);
+    const drNode = serverHeartbeat(dr);
+    const shown = incidentFor(failing, drNode, [{ id: 'INC-1018', title: 'ICT DR down', status: 'OPEN', fingerprint: `monitor:${monId}`, applicationId: ict.id, environment: 'DR' }] as never, [ict]);
+    assert.equal(shown?.id, 'INC-1018', 'the application incident is attached to this heartbeat');
+    db.monitors.pop();
+    assert.equal(on(dr)!.state, 'UNKNOWN', 'with the monitor removed, a missing check stays unknown');
     db.monitors.push({
       id: crypto.randomUUID(), name: 'ICT DR URL', type: 'HTTPS', target: 'https://ict.example', applicationId: ict.id,
       serverId: dr.id, environment: 'DR', intervalSec: 60, timeoutSec: 5, retries: 1, warningThresholdMs: 1000, criticalThresholdMs: 3000,
       failureConfirmationThreshold: 1, recoveryConfirmationThreshold: 1, consecutiveFailures: 0, consecutiveRecoveries: 1,
-      status: 'HEALTHY', lastCheck: new Date().toISOString(), lastSuccess: new Date().toISOString(), responseTimeMs: 20, uptimePercent: 100,
-      history: [], enabled: true, activeMaintenance: false, managedBy: 'app-url',
+      status: 'HEALTHY', lastCheck: new Date().toISOString(), lastSuccess: new Date().toISOString(), lastProbeStatus: 'UP', lastStatusCode: 200, responseTimeMs: 100, uptimePercent: 100,
+      history: [{ t: new Date().toISOString(), ok: true, probeStatus: 'UP', statusCode: 200, latencyMs: 100, detail: 'HTTP 200 in 100ms' }],
+      enabled: true, activeMaintenance: false, managedBy: 'app-url',
     });
-    assert.equal(on(dr)!.state, 'UNKNOWN', 'a healthy application monitor is not an application heartbeat');
-    db.monitors.pop();
-    assert.equal(db.monitors.length, monitorsBefore);
-    assert.equal(on(dr)!.state, 'UNKNOWN', 'the same application with no monitor is still listed');
+    const healthyUrl = on(dr)!;
+    assert.equal(healthyUrl.state, 'HEALTHY');
+    assert.match(healthyUrl.detail, /HTTP 200 in 100ms/);
+    assert.equal(on(prd)!.state, 'UNKNOWN', 'PRD has no monitor result and no local check');
+    ict.environments!.DR!.dbEngine = 'mysql';
+    ict.environments!.DR!.dbName = 'ict';
+    const dbRow = serverHeartbeat(dr).databases.checks.find(c => c.name === 'ICT mysql')!;
+    assert.equal(dbRow.state, 'UNKNOWN');
+    assert.match(dbRow.detail, /no mysql probe/);
+    ict.environments!.DR!.dbEngine = null;
 
     const unconfigured = serverHeartbeat(bare);
     assert.equal(unconfigured.applications.total, 0, 'no linked application stays unconfigured');
@@ -181,7 +206,7 @@ test('configured application with no app port is UNKNOWN on PRD and DR; monitors
     assert.equal(unconfigured.databases.total, 0);
 
     const drApps = filterRecords(infraHeartbeat(), { type: 'APPLICATION', status: 'ALL', server: 'DR' });
-    assert.ok(drApps.some(r => r.check.name === 'ICT' && r.server.environment === 'DR' && r.check.state === 'UNKNOWN'));
+    assert.ok(drApps.some(r => r.check.name === 'ICT' && r.server.environment === 'DR' && r.check.state === 'HEALTHY'));
     assert.equal(drApps.every(r => r.check.kind === 'APPLICATION' && r.server.environment === 'DR'), true);
     assert.equal(drApps.some(r => r.check.name === 'LMS'), true, 'reported DR application checks stay in the same filter');
   } finally {
