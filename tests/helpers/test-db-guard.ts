@@ -13,8 +13,12 @@
  *   PGSERVICEFILE, PGOPTIONS) that could send a client somewhere other than that URL. node-pg uses
  *   PGPORT when the URL omits the port, and libpq uses PGHOSTADDR / a service file in preference to
  *   parts of the URL.
- * - After connecting, confirms the server reports current_database() = scholario_ops_ui_test on a
- *   loopback address; any failure to establish that is a refusal too.
+ * - After connecting, confirms the server reports current_database() = scholario_ops_ui_test.
+ *   The address may be loopback, or a private address. GitHub Actions publishes the job's
+ *   Postgres container onto 127.0.0.1, and PostgreSQL then reports the container bridge
+ *   address from inet_server_addr(). A public address is still refused. The client must
+ *   already have dialed a loopback host (resolveTestDatabaseUrl). Any failure to establish
+ *   the database name is a refusal too.
  * - dropVerifiedTestSchema() is the only schema cleanup. It does nothing unless that confirmation
  *   has already succeeded, so a refused target cannot drop a schema.
  */
@@ -102,14 +106,29 @@ export function assertScratchDatabaseName(name: string): void {
   }
 }
 
+/** Loopback, or a private address reported when a local port-forward reaches Postgres (Docker, GitHub Actions). */
+function isAcceptedServerAddress(addr: string): boolean {
+  if (addr === '::1') return true;
+  const v4 = addr.startsWith('::ffff:') ? addr.slice('::ffff:'.length) : addr;
+  const parts = v4.split('.');
+  if (parts.length !== 4) return false;
+  const nums = parts.map(p => (/^\d{1,3}$/.test(p) ? Number(p) : NaN));
+  if (nums.some(n => !Number.isInteger(n) || n > 255)) return false;
+  const [a, b] = nums;
+  if (a === 127 || a === 10) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  return false;
+}
+
 /** Confirms what the connected server reports; throws TestDatabaseRefused otherwise (also when the check itself fails) */
 export async function assertConnectedToTestDatabase(client: { query: (sql: string) => Promise<{ rows: Array<Record<string, unknown>> }> }): Promise<void> {
   let row: Record<string, unknown> | undefined;
   try { row = (await client.query('select current_database() as db, host(inet_server_addr()) as addr')).rows[0]; }
   catch (err) { throw new TestDatabaseRefused(`could not confirm the connected database (${(err as Error).message})`); }
   if (!row || row.db !== TEST_DATABASE) throw new TestDatabaseRefused(`connected database is "${String(row?.db ?? '(unknown)')}", not ${TEST_DATABASE}`);
-  // NULL address = Unix-domain socket (local)
-  if (row.addr !== null && row.addr !== undefined && row.addr !== '127.0.0.1' && row.addr !== '::1') {
-    throw new TestDatabaseRefused(`connected server address ${String(row.addr)} is not a loopback address`);
+  // NULL address = Unix-domain socket (local). A private address is the container behind a published loopback port.
+  if (row.addr !== null && row.addr !== undefined && !isAcceptedServerAddress(String(row.addr))) {
+    throw new TestDatabaseRefused(`connected server address ${String(row.addr)} is not a local address`);
   }
 }
