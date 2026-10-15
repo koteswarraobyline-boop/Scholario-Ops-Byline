@@ -85,10 +85,15 @@ test('assertConnectedToTestDatabase refuses another database, a remote server an
   await assertConnectedToTestDatabase(client({ db: 'scholario_ops_ui_test', addr: '127.0.0.1' }));
   await assertConnectedToTestDatabase(client({ db: 'scholario_ops_ui_test', addr: '::1' }));
   await assertConnectedToTestDatabase(client({ db: 'scholario_ops_ui_test', addr: null }));
+  // GitHub Actions publishes Postgres onto 127.0.0.1; the server reports the container bridge address.
+  await assertConnectedToTestDatabase(client({ db: 'scholario_ops_ui_test', addr: '172.18.0.2' }));
+  await assertConnectedToTestDatabase(client({ db: 'scholario_ops_ui_test', addr: '10.1.0.4' }));
+  await assertConnectedToTestDatabase(client({ db: 'scholario_ops_ui_test', addr: '192.168.65.1' }));
   const no = async (c: Parameters<typeof assertConnectedToTestDatabase>[0], why: RegExp) =>
     assert.rejects(assertConnectedToTestDatabase(c), (e: Error) => e instanceof TestDatabaseRefused && why.test(e.message));
   await no(client({ db: 'scholario_ops_dev', addr: '127.0.0.1' }), /"scholario_ops_dev"/);
-  await no(client({ db: 'scholario_ops_ui_test', addr: '10.0.0.5' }), /not a loopback address/);
+  await no(client({ db: 'scholario_ops_ui_test', addr: '203.0.113.10' }), /not a local address/);
+  await no(client({ db: 'scholario_ops_ui_test', addr: '8.8.8.8' }), /not a local address/);
   await no(client(undefined), /"\(unknown\)"/);
   await no({ query: async () => { throw new Error('connection refused'); } }, /could not confirm the connected database/);
 });
