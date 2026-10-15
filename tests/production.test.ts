@@ -426,6 +426,28 @@ test('telemetry: only an authenticated agent report updates a server, values are
   await waitFor(async () => (await one(`select state->'telemetry'->>'cpuPercent' c from ${SCHEMA}.servers where id = $1`, [id]))?.c === '12.5');
 });
 
+test('agent install command uses PUBLIC_URL and not the localhost request host', async () => {
+  const srv = await api('POST', '/api/v1/servers', { hostname: 'agent-url', ip: '192.0.2.53', environment: 'DR' });
+  assert.equal(srv.status, 201, srv.raw);
+  const id = srv.body.data.id as string;
+  const info = await api('GET', `/api/v1/servers/${id}/agent`);
+  assert.equal(info.status, 200);
+  const data = info.body.data as { ingestUrl: string; installCommand: string; publicUrlConfigured: boolean; problem?: string };
+  assert.equal(data.ingestUrl, 'https://ops.test.invalid/api/v1/agent/ingest');
+  assert.equal(data.publicUrlConfigured, true);
+  assert.equal(data.problem, undefined);
+  assert.equal(data.installCommand.includes('https://ops.test.invalid/api/v1/agent/install/'), true);
+  assert.equal(data.installCommand.includes('127.0.0.1'), false);
+  assert.equal(data.installCommand.includes('localhost'), false);
+  const agentToken = (await one(`select agent_token from ${SCHEMA}.servers where id = $1`, [id])).agent_token as string;
+  assert.equal(data.ingestUrl.includes(agentToken), false);
+  const scriptRes = await fetch(`${BASE}/api/v1/agent/install/${id}?key=${encodeURIComponent(agentToken)}`);
+  const text = await scriptRes.text();
+  assert.equal(scriptRes.status, 200);
+  assert.equal(text.includes('SERVER_URL=https://ops.test.invalid'), true);
+  assert.equal(/SERVER_URL=https?:\/\/(127\.0\.0\.1|localhost)/.test(text), false);
+});
+
 test('telemetry API (agent 3.3): backward-compatible responses, new sections, fleet summaries, validation, no secrets', async () => {
   const cols = (await pgc.query(`select column_name from information_schema.columns where table_schema = $1 and table_name = 'server_metrics'`, [SCHEMA])).rows.map(r => r.column_name);
   for (const c of ['cpu', 'ram', 'disk', 'load1', 'net_in', 'net_out', 'swap', 'iowait', 'steal', 'disk_read', 'disk_write', 'disk_util']) assert.ok(cols.includes(c), `server_metrics.${c}`);

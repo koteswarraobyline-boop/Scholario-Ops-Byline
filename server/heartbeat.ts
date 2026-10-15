@@ -3,16 +3,18 @@
  * heartbeat of its telemetry agent, its application health checks, its watched systemd services and
  * its database probes. Scholario Ops is the monitoring control plane, not a monitored target.
  *
- * Everything is derived from agent reports that were already pushed and stored (no polling, no
- * outbound request, no external watchdog). Missing or stale data is UNKNOWN — never HEALTHY.
+ * Server, service and database heartbeats come from agent reports already stored. An application
+ * with no local agent check uses its checked URL monitor instead, including that monitor's error.
+ * Nothing is polled from here and nothing is sent to an external watchdog. Missing data is
+ * UNKNOWN — never HEALTHY.
  */
 import {
-  DeadManControlPlane, HeartbeatCheck, HeartbeatGroup, HeartbeatState, ServerHeartbeat,
+  DeadManControlPlane, HeartbeatCheck, HeartbeatGroup, HeartbeatState, Monitor, ServerHeartbeat,
 } from '../src/types/index.ts';
 import { THRESHOLDS } from '../src/lib/thresholds.ts';
 import { config } from './config.ts';
 import { db, ServerRecord } from './store.ts';
-import { agentState } from './health.ts';
+import { agentState, databaseHealth, urlMonitor } from './health.ts';
 
 const RANK: Record<HeartbeatState, number> = { HEALTHY: 0, UNKNOWN: 1, DEGRADED: 2, FAILING: 3 };
 export const worstState = (states: HeartbeatState[], fallback: HeartbeatState = 'UNKNOWN'): HeartbeatState =>
@@ -75,21 +77,27 @@ function applicationChecks(srv: ServerRecord, online: boolean, heavyInterval: nu
       intervalSec: heavyInterval, toleranceSec: config.telemetryStaleSec * HEAVY_EVERY,
     }));
   }
-  // Applications linked to this server that have no reported local check. A missing app port does not
-  // remove the application: there is no check to judge, so the heartbeat is UNKNOWN, never HEALTHY.
-  // URL monitors are a different signal and are not consulted here.
+  // Linked applications the agent has not checked. A checked URL monitor supplies the result and its
+  // error. With neither a local check nor a monitor result, the heartbeat is UNKNOWN, never HEALTHY.
   for (const app of db.applications) {
     for (const env of ['PRD', 'DR'] as const) {
       if ((env === 'PRD' ? app.prdServerId : app.drServerId) !== srv.id) continue;
       const port = app.environments?.[env]?.appPort;
+      if (port && reported.some(c => c.applicationId === app.id && c.port === port)) continue;
+      if (!port && reported.some(c => c.applicationId === app.id)) continue;
+      if (out.some(c => c.key === `app:${app.id}` || c.key.startsWith(`app:${app.id}:`))) continue;
+      const monitored = urlMonitor(app, env);
+      if (monitored?.lastCheck) {
+        out.push(monitorApplication(app.name, app.id, monitored));
+        continue;
+      }
       if (port) {
-        if (reported.some(c => c.applicationId === app.id && c.port === port)) continue;
         out.push(check({
           kind: 'APPLICATION', key: `app:${app.id}:${port}`, name: app.name, state: 'UNKNOWN',
           detail: srv.lastSeen ? 'Check not reported yet (needs agent 3.3 — reinstall from Setup)' : 'Agent not connected',
           target: `127.0.0.1:${port}${app.environments?.[env]?.healthPath ?? '/'}`,
         }));
-      } else if (!reported.some(c => c.applicationId === app.id) && !out.some(c => c.key === `app:${app.id}`)) {
+      } else {
         out.push(check({
           kind: 'APPLICATION', key: `app:${app.id}`, name: app.name, state: 'UNKNOWN',
           detail: srv.lastSeen ? 'No app port configured — local health check cannot run' : 'Agent not connected',
@@ -99,6 +107,26 @@ function applicationChecks(srv: ServerRecord, online: boolean, heavyInterval: nu
     }
   }
   return out;
+}
+
+/** URL-monitor result for an application the agent has not checked locally. The detail is the probe error or the HTTP result. */
+function monitorApplication(name: string, applicationId: string, m: Monitor): HeartbeatCheck {
+  const state: HeartbeatState = m.activeMaintenance || !m.lastProbeStatus
+    ? 'UNKNOWN'
+    : m.status === 'HEALTHY' ? 'HEALTHY'
+      : m.status === 'WARNING' || m.status === 'STALE' ? 'DEGRADED'
+        : m.status === 'CRITICAL' ? 'FAILING' : 'UNKNOWN';
+  return check({
+    kind: 'APPLICATION', key: `app:${applicationId}`, name, state,
+    detail: m.history[0]?.detail || `${m.name}: ${m.lastProbeStatus ?? 'not checked yet'}`,
+    target: null,
+    lastCheckAt: m.lastCheck || null,
+    lastSuccessAt: m.lastSuccess || null,
+    latencyMs: m.responseTimeMs ?? null,
+    failures: m.consecutiveFailures ?? null,
+    httpStatus: m.lastStatusCode ?? null,
+    intervalSec: m.intervalSec,
+  });
 }
 
 function serviceChecks(srv: ServerRecord, online: boolean, heavyInterval: number | null): HeartbeatCheck[] {
@@ -116,7 +144,7 @@ function serviceChecks(srv: ServerRecord, online: boolean, heavyInterval: number
 }
 
 function databaseChecks(srv: ServerRecord, online: boolean, heavyInterval: number | null): HeartbeatCheck[] {
-  return (srv.databases ?? []).map(d => {
+  const reported = (srv.databases ?? []).map(d => {
     const label = `${d.engine}${d.name ? ` ${d.name}` : ''}`;
     const pressure = d.connectionUsagePercent != null && d.connectionUsagePercent >= THRESHOLDS.dbConnectionUsagePercent.critical;
     const repl = d.replication?.role === 'replica' && d.replication.state !== 'running';
@@ -132,6 +160,22 @@ function databaseChecks(srv: ServerRecord, online: boolean, heavyInterval: numbe
       intervalSec: heavyInterval, toleranceSec: config.telemetryStaleSec * HEAVY_EVERY,
     });
   });
+  // A database declared for an application on this server, with no agent probe: show that error, never a pass.
+  for (const app of db.applications) {
+    for (const env of ['PRD', 'DR'] as const) {
+      if ((env === 'PRD' ? app.prdServerId : app.drServerId) !== srv.id) continue;
+      const engine = app.environments?.[env]?.dbEngine;
+      if (!engine || reported.some(c => c.key.startsWith(`db:${engine}:`))) continue;
+      const h = databaseHealth(app, env);
+      if (h.status === 'NOT_CONFIGURED' || h.status === 'HEALTHY') continue;
+      const state: HeartbeatState = h.status === 'DOWN' ? 'FAILING' : h.status === 'DEGRADED' ? 'DEGRADED' : 'UNKNOWN';
+      reported.push(check({
+        kind: 'DATABASE', key: `db:${app.id}:${env}`, name: `${app.name} ${engine}`, state,
+        detail: h.detail, target: engine, lastCheckAt: h.observedAt, lastSuccessAt: h.status === 'DEGRADED' ? h.observedAt : null,
+      }));
+    }
+  }
+  return reported;
 }
 
 export function serverHeartbeat(srv: ServerRecord, now = Date.now()): ServerHeartbeat {

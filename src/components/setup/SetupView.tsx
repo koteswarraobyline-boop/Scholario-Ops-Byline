@@ -9,6 +9,7 @@ import { deadManLabel } from '../ui/deadman';
 import { useAuth } from '../../context/AuthContext';
 import { api, AgentInstallInfo, CloudflarePoolOption } from '../../services/api';
 import { Application, VpsServer } from '../../types';
+import { resolveAgentBaseUrl } from '../../lib/agentEndpoint';
 import { DependencyRegisterSection } from './DependencyRegister';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -94,7 +95,7 @@ const IntegrationsPanel: React.FC = () => {
     try { await fn(); } finally { setBusy(null); }
   };
 
-  const publicUrlMissing = integrations.publicUrl.includes('localhost') || integrations.publicUrl.includes('127.0.0.1');
+  const agentBase = resolveAgentBaseUrl(integrations.publicUrlConfigured ? integrations.publicUrl : '', integrations.publicUrl);
 
   const items = [
     {
@@ -137,10 +138,10 @@ const IntegrationsPanel: React.FC = () => {
       ),
     },
     {
-      key: 'url', icon: Link2, title: 'Public URL', ok: !publicUrlMissing, configured: !publicUrlMissing,
-      detail: publicUrlMissing
-        ? <>Agents use <code className={st.code}>{integrations.publicUrl}</code> — set <code className={st.code}>PUBLIC_URL</code> to the address your VPS can reach (e.g. https://ops.example.com).</>
-        : <><code className={st.code}>{integrations.publicUrl}</code></>,
+      key: 'url', icon: Link2, title: 'Public URL', ok: agentBase.ok, configured: agentBase.ok,
+      detail: agentBase.ok
+        ? <><code className={st.code}>{agentBase.base}</code></>
+        : <>{agentBase.reason}</>,
     },
   ];
 
@@ -321,23 +322,32 @@ const AgentPanel: React.FC<{ server: VpsServer; onClose: () => void }> = ({ serv
       {error && <div className="text-xs text-rose-500">{error}</div>}
       {info && (
         <>
-          {!info.publicUrlConfigured && (
+          {info.problem ? (
             <div className="flex items-start gap-2 text-[11px] text-amber-500">
               <AlertTriangle className="w-4 h-4 shrink-0" />
-              PUBLIC_URL is not set on the Ops server, so this command uses the address in your browser. Make sure the VPS can reach it, or set PUBLIC_URL in .env.
+              <span>{info.problem} The install command is hidden so it cannot point the VPS at this computer.</span>
             </div>
+          ) : (
+            <>
+              {!info.publicUrlConfigured && (
+                <div className="flex items-start gap-2 text-[11px] text-amber-500">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  PUBLIC_URL is not set on the Ops server, so this command uses the address in your browser. Make sure the VPS can reach it, or set PUBLIC_URL in .env.
+                </div>
+              )}
+              <p className={`text-[11px] ${st.muted}`}>1. SSH into <b>{server.ip}</b> as root (or a sudo user) and run:</p>
+              <CopyBox value={info.installCommand} />
+              <p className={`text-[11px] ${st.muted}`}>
+                It installs a small Python 3 agent as the <code className={st.code}>scholario-agent</code> systemd service. It reports CPU, RAM, disk, load, network, top processes,
+                service states (nginx, mysql, …) and warning/error logs every 10 seconds. Check it with <code className={st.code}>journalctl -u scholario-agent -f</code>.
+              </p>
+              <p className={`text-[11px] ${st.muted}`}>2. Status here switches to <b className="text-emerald-500">CONNECTED</b> within ~15 seconds. Current: <b className={statusColor(server.agentStatus)}>{server.agentStatus}</b> (last report {timeAgo(server.lastSeen)}).</p>
+              <details className={`text-[11px] ${st.muted}`}>
+                <summary className="cursor-pointer">Uninstall</summary>
+                <div className="mt-2"><CopyBox value={info.uninstallCommand} /></div>
+              </details>
+            </>
           )}
-          <p className={`text-[11px] ${st.muted}`}>1. SSH into <b>{server.ip}</b> as root (or a sudo user) and run:</p>
-          <CopyBox value={info.installCommand} />
-          <p className={`text-[11px] ${st.muted}`}>
-            It installs a small Python 3 agent as the <code className={st.code}>scholario-agent</code> systemd service. It reports CPU, RAM, disk, load, network, top processes,
-            service states (nginx, mysql, …) and warning/error logs every 10 seconds. Check it with <code className={st.code}>journalctl -u scholario-agent -f</code>.
-          </p>
-          <p className={`text-[11px] ${st.muted}`}>2. Status here switches to <b className="text-emerald-500">CONNECTED</b> within ~15 seconds. Current: <b className={statusColor(server.agentStatus)}>{server.agentStatus}</b> (last report {timeAgo(server.lastSeen)}).</p>
-          <details className={`text-[11px] ${st.muted}`}>
-            <summary className="cursor-pointer">Uninstall</summary>
-            <div className="mt-2"><CopyBox value={info.uninstallCommand} /></div>
-          </details>
           <button onClick={rotate} disabled={rotating} className={`${st.btn} ${st.danger}`}><KeyRound className="w-3 h-3" /> {rotating ? 'Rotating…' : 'Rotate agent token'}</button>
         </>
       )}

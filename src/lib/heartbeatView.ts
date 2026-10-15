@@ -103,7 +103,12 @@ export function incidentFor(check: HeartbeatCheck, server: ServerHeartbeat, inci
   const fps: string[] = [];
   const pfx = `telemetry:${server.serverId}:`;
   if (check.kind === 'SERVER') fps.push(`agent-offline:${server.serverId}`);
-  if (check.kind === 'APPLICATION') fps.push(`${pfx}app-health:${check.key.slice('app:'.length)}`);
+  if (check.kind === 'APPLICATION') {
+    const appId = check.key.slice('app:'.length).split(':')[0];
+    fps.push(`${pfx}app-health:${check.key.slice('app:'.length)}`);
+    const monitorIncident = open.find(i => i.fingerprint?.startsWith('monitor:') && i.applicationId === appId && i.environment === server.environment);
+    if (monitorIncident && !fps.includes(monitorIncident.fingerprint)) return monitorIncident;
+  }
   if (check.kind === 'SERVICE') fps.push(`${pfx}systemd:${check.key.slice('service:'.length)}`);
   if (check.kind === 'DATABASE') {
     fps.push(`${pfx}db-down:${check.name}`);

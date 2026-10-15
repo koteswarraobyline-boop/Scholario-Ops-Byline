@@ -12,6 +12,8 @@
  * - Hourly: kernel, architecture, boot time, timezone, Node.js / npm versions.
  * - Authenticates with a per-server secret token.
  */
+import { resolveAgentBaseUrl } from '../src/lib/agentEndpoint.ts';
+
 /** Single source of truth for the current agent version (the UI compares reported versions against it). */
 export const AGENT_VERSION = '3.3.1';
 
@@ -819,8 +821,12 @@ if __name__ == "__main__":
 `.replace('__VERSION__', AGENT_VERSION);
 
 export function buildInstaller(opts: { serverUrl: string; agentToken: string; hostname: string; services: string }) {
-  // Values are written into a quoted heredoc, so they must be single-line and shell-safe
-  if (!/^https?:\/\/[^\s'"`$\\]+$/.test(opts.serverUrl)) throw new Error('Invalid server URL for agent installer');
+  // Values are written into a quoted heredoc, so they must be single-line and shell-safe.
+  // The same rule as Setup: https, and not this computer. An http or loopback URL is refused
+  // before the agent token is written into the script.
+  const resolved = resolveAgentBaseUrl(opts.serverUrl, '');
+  if (!resolved.ok) throw new Error('Invalid server URL for agent installer');
+  opts = { ...opts, serverUrl: resolved.base };
   if (!/^[a-f0-9]{32,128}$/.test(opts.agentToken)) throw new Error('Invalid agent token');
   const services = opts.services.split(/[\s,]+/).filter(s => /^[\w@.\-]+$/.test(s)).join(' ');
   opts = { ...opts, services, hostname: opts.hostname.replace(/[^\w.\-]/g, '') };
