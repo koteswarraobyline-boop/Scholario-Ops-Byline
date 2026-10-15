@@ -29,7 +29,7 @@ const useStyles = () => {
     primary: 'bg-blue-600 hover:bg-blue-700 text-white',
     ghost: isDark ? 'bg-[#162033] hover:bg-[#1D2B44] text-slate-200 border border-[#23334E]' : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300',
     danger: isDark ? 'bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-900' : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300',
-    code: `px-1 rounded ${isDark ? 'bg-[#1A2436] text-emerald-300' : 'bg-slate-100 text-emerald-700'}`,
+    code: `px-1 rounded break-all ${isDark ? 'bg-[#1A2436] text-emerald-300' : 'bg-slate-100 text-emerald-700'}`,
   };
 };
 
@@ -149,7 +149,7 @@ const IntegrationsPanel: React.FC = () => {
       {items.map(it => {
         const Icon = it.icon;
         return (
-          <div key={it.key} className={st.card}>
+          <div key={it.key} className={`${st.card} min-w-0`}>
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-xs font-bold font-mono">
                 <Icon className="w-4 h-4 text-blue-500" />
@@ -159,7 +159,7 @@ const IntegrationsPanel: React.FC = () => {
                 {it.ok ? 'CONNECTED' : it.configured ? 'ERROR' : 'NOT SET'}
               </span>
             </div>
-            <p className={`text-[11px] mt-2 leading-relaxed ${st.muted}`}>{it.detail}</p>
+            <p className={`text-[11px] mt-2 leading-relaxed break-words ${st.muted}`}>{it.detail}</p>
             {it.action && (
               <button onClick={it.action} disabled={busy === it.key} className={`${st.btn} ${st.ghost} mt-3`}>
                 <RefreshCw className={`w-3 h-3 ${busy === it.key ? 'animate-spin' : ''}`} /> Sync now
