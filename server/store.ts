@@ -88,6 +88,22 @@ function emptyStore(): StoreData {
 /** In-memory working set. Populated by initStore(); empty until then. */
 export const db: StoreData = emptyStore();
 
+/** Keeps the newest AUDIT_RETENTION_ENTRIES rows in memory (default 5000). Newest first. */
+export function applyAuditRetention(): boolean {
+  if (db.auditLogs.length <= config.auditRetention) return false;
+  db.auditLogs.length = config.auditRetention;
+  return true;
+}
+
+/** Deletes audit rows beyond AUDIT_RETENTION_ENTRIES in PostgreSQL. Returns how many rows were removed. */
+export async function pruneAuditLog(): Promise<number> {
+  const res = await query(
+    `DELETE FROM ${T('audit_logs')} WHERE id IN (SELECT id FROM ${T('audit_logs')} ORDER BY ts DESC, id DESC OFFSET $1)`,
+    [config.auditRetention],
+  );
+  return res.rowCount ?? 0;
+}
+
 /** In-memory time series (5s resolution, last hour) + persisted 1-minute rollups */
 export const liveMetrics: Record<string, ServerMetricPoint[]> = {};
 export const minuteMetrics: Record<string, ServerMetricPoint[]> = {};
@@ -671,6 +687,20 @@ export async function flushMetrics(): Promise<void> {
   }
 }
 
+/** Deletes server metric rollups older than METRICS_RETENTION_HOURS (default 48). Returns how many rows were removed. */
+export async function pruneServerMetrics(): Promise<number> {
+  const cutoffMs = Date.now() - config.metricsRetentionHours * 3600 * 1000;
+  const cutoff = new Date(cutoffMs).toISOString();
+  for (const id of Object.keys(minuteMetrics)) {
+    const series = minuteMetrics[id];
+    let i = 0;
+    while (i < series.length && Date.parse(series[i].t) < cutoffMs) i++;
+    if (i > 0) minuteMetrics[id] = series.slice(i);
+  }
+  const res = await query(`DELETE FROM ${T('server_metrics')} WHERE t < $1`, [cutoff]);
+  return res.rowCount ?? 0;
+}
+
 export async function deleteServerMetrics(serverId: string) {
   delete liveMetrics[serverId];
   delete minuteMetrics[serverId];
@@ -802,17 +832,19 @@ export async function initStore(): Promise<{ migrations: string[]; imported: str
   }
   const fingerprintAdded = checkKeyFingerprint(db.channels);
   ready = true;
-  // An install from before fingerprints (encrypted targets, no fingerprint yet): store it now.
-  // Not on a local production copy (LOCAL_UI_SAFE_MODE): no write at startup, it is stored with the next save.
-  if (fingerprintAdded && process.env.LOCAL_UI_SAFE_MODE !== 'true') { dirty = true; await flush(); }
   // LOCAL_UI_SAFE_MODE=true (set by `npm run dev:prodcopy`, never in production): no metric rollup
-  // writes or pruning on a local copy of production data, so its history stays as it was copied
-  if (process.env.LOCAL_UI_SAFE_MODE !== 'true') {
+  // writes or pruning on a local copy of production data, so its history stays as it was copied.
+  const localCopy = process.env.LOCAL_UI_SAFE_MODE === 'true';
+  const auditTrimmed = localCopy ? false : applyAuditRetention();
+  // An install from before fingerprints (encrypted targets, no fingerprint yet): store it now.
+  // Not on a local production copy: no write at startup, it is stored with the next save.
+  if ((fingerprintAdded || auditTrimmed) && !localCopy) { dirty = true; await flush(); }
+  if (!localCopy) {
     setInterval(() => { void flushMetrics(); }, 10_000).unref();
-    setInterval(() => {
-      const cutoff = new Date(Date.now() - config.metricsRetentionHours * 3600 * 1000).toISOString();
-      void query(`DELETE FROM ${T('server_metrics')} WHERE t < $1`, [cutoff]).catch(() => {});
-    }, 3600_000).unref();
+    const pruneMetrics = () => { void pruneServerMetrics().catch(err => log.error('store', `metrics prune failed: ${(err as Error).message}`)); };
+    await pruneServerMetrics().catch(err => log.error('store', `metrics prune failed: ${(err as Error).message}`));
+    setInterval(pruneMetrics, 3600_000).unref();
+    await pruneAuditLog().catch(err => log.error('store', `audit prune failed: ${(err as Error).message}`));
   }
   return { migrations, imported };
 }

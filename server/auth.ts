@@ -7,6 +7,21 @@ import { config, DATA_DIR } from './config.ts';
 import { db, persist, UserRecord } from './store.ts';
 import { log } from './logger.ts';
 
+/**
+ * Compares two secrets in constant time. The byte compare always runs, including when the
+ * lengths differ, so a wrong token does not return early.
+ */
+export function safeEqual(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  const len = Math.max(x.length, y.length, 1);
+  const xb = Buffer.alloc(len);
+  const yb = Buffer.alloc(len);
+  x.copy(xb);
+  y.copy(yb);
+  return crypto.timingSafeEqual(xb, yb) && x.length === y.length;
+}
+
 export type Role = OpsUser['roleName'];
 export const ROLES: Role[] = ['viewer', 'operator', 'it_administrator', 'super_admin'];
 export const ROLE_LEVEL: Record<Role, number> = { viewer: 1, operator: 2, it_administrator: 3, super_admin: 4 };

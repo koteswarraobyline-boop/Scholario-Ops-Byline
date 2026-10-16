@@ -43,7 +43,7 @@ async function freePort(): Promise<number> {
   }
 }
 const ADMIN = { email: 'prod-admin@example.com', password: 'ProdTestPassw0rd!' };
-const SECRETS = { cf: 'prodtest-fake-cloudflare-token-9d2e', jwt: 'x'.repeat(16) + 'prodtest-jwt-secret-value-0123456789' };
+const SECRETS = { cf: 'prodtest-fake-cloudflare-token-9d2e', jwt: 'x'.repeat(16) + 'prodtest-jwt-secret-value-0123456789', deploy: 'prodtest-deploy-report-token-6b8c' };
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'scholario-prodtest-'));
 const pgc = new pg.Client({ connectionString: DATABASE_URL });
 let server: ChildProcess | null = null;
@@ -55,7 +55,7 @@ function spawnServer(extraEnv: Record<string, string> = {}, port = PORT) {
     env: {
       ...process.env, DATABASE_URL, NODE_ENV: 'production', PORT: String(port), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR,
       ADMIN_EMAIL: ADMIN.email, ADMIN_PASSWORD: ADMIN.password, CLOUDFLARE_API_TOKEN: SECRETS.cf, JWT_SECRET: SECRETS.jwt,
-      PUBLIC_URL: 'https://ops.test.invalid', HOSTINGER_API_TOKEN: '', DEADMAN_HEARTBEAT_URL: '', LOG_FORMAT: 'json',
+      PUBLIC_URL: 'https://ops.test.invalid', HOSTINGER_API_TOKEN: '', DEADMAN_HEARTBEAT_URL: '', LOG_FORMAT: 'json', DEPLOY_REPORT_TOKEN: SECRETS.deploy,
       SMTP_SERVICE: '', SMTP_URL: '', SMTP_HOST: '', SMTP_USER: '', SMTP_PASS: '', SMTP_FROM: '', ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -426,6 +426,52 @@ test('telemetry: only an authenticated agent report updates a server, values are
   await waitFor(async () => (await one(`select state->'telemetry'->>'cpuPercent' c from ${SCHEMA}.servers where id = $1`, [id]))?.c === '12.5');
 });
 
+test('agent token rotation: the old token is rejected and the new token is accepted', async () => {
+  const srv = await api('POST', '/api/v1/servers', { hostname: 'rotate-token', ip: '192.0.2.54', environment: 'PRD' });
+  assert.equal(srv.status, 201, srv.raw);
+  const id = srv.body.data.id as string;
+  const oldToken = (await one(`select agent_token from ${SCHEMA}.servers where id = $1`, [id])).agent_token as string;
+  const report = { observedAt: new Date().toISOString(), cpuPercent: 10, ramPercent: 20, diskPercent: 30 };
+  const post = (agentToken: string) => fetch(`${BASE}/api/v1/agent/ingest`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${agentToken}` }, body: JSON.stringify(report) });
+  assert.equal((await post(oldToken)).status, 200);
+  const rotated = await api('POST', `/api/v1/servers/${id}/rotate-token`);
+  assert.equal(rotated.status, 200, rotated.raw);
+  assert.equal(rotated.body.data.rotated, true);
+  assert.equal(rotated.raw.includes(oldToken), false, 'the old token must not be returned');
+  const newToken = await waitFor(async () => {
+    const t = (await one(`select agent_token from ${SCHEMA}.servers where id = $1`, [id])).agent_token as string;
+    return t !== oldToken ? t : null;
+  });
+  assert.equal(rotated.raw.includes(newToken), false, 'the new token must not be returned to the browser');
+  assert.equal((await post(oldToken)).status, 401);
+  assert.equal((await fetch(`${BASE}/api/v1/agent/install/${id}?key=${encodeURIComponent(oldToken)}`)).status, 404);
+  report.observedAt = new Date().toISOString();
+  assert.equal((await post(newToken)).status, 200);
+  assert.equal((await fetch(`${BASE}/api/v1/agent/install/${id}?key=${encodeURIComponent(newToken)}`)).status, 200);
+});
+
+test('CI deployment token: a matching token is accepted, a wrong token is rejected, and the token never reaches the browser', async () => {
+  const prd = await api('POST', '/api/v1/servers', { hostname: 'deploy-prd', ip: '192.0.2.55', environment: 'PRD' });
+  const dr = await api('POST', '/api/v1/servers', { hostname: 'deploy-dr', ip: '192.0.2.56', environment: 'DR' });
+  assert.equal(prd.status, 201, prd.raw);
+  assert.equal(dr.status, 201, dr.raw);
+  const app = await api('POST', '/api/v1/applications', { name: 'Deploy App', codeName: 'deploy-app', tier: 'TIER_2', prdServerId: prd.body.data.id, drServerId: dr.body.data.id });
+  assert.equal(app.status, 201, app.raw);
+  const body = { application: 'deploy-app', version: '1.4.0', status: 'SUCCESS', environment: 'PRD', commitHash: 'abc123' };
+  const report = (bearer: string) => fetch(`${BASE}/api/v1/deployments/report`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: bearer }, body: JSON.stringify(body) });
+  assert.equal((await report('')).status, 401);
+  assert.equal((await report('Bearer wrong-token')).status, 401);
+  const okReport = await report(`Bearer ${SECRETS.deploy}`);
+  const raw = await okReport.text();
+  assert.equal(okReport.status, 201, raw);
+  assert.equal(raw.includes(SECRETS.deploy), false, 'the deployment token must not be echoed');
+  const saved = JSON.parse(raw).data as { version: string; status: string; environment: string };
+  assert.deepEqual([saved.version, saved.status, saved.environment], ['1.4.0', 'SUCCESS', 'PRD']);
+  const listed = await api('GET', '/api/v1/deployments');
+  assert.equal(listed.raw.includes(SECRETS.deploy), false);
+  assert.equal((await api('GET', '/api/v1/bootstrap')).raw.includes(SECRETS.deploy), false);
+});
+
 test('agent install command uses PUBLIC_URL and not the localhost request host', async () => {
   const srv = await api('POST', '/api/v1/servers', { hostname: 'agent-url', ip: '192.0.2.53', environment: 'DR' });
   assert.equal(srv.status, 201, srv.raw);
@@ -486,6 +532,9 @@ test('telemetry API (agent 3.3): backward-compatible responses, new sections, fl
   const skewed = await post({ ...report, observedAt: new Date(Date.now() - 3600_000).toISOString() });
   assert.equal(skewed.status, 400);
   assert.match(await skewed.text(), /NTP/);
+  assert.equal((await post({ ...report, observedAt: new Date(Date.now() - 301_000).toISOString() })).status, 400, '301 seconds in the past is rejected');
+  assert.equal((await post({ ...report, observedAt: new Date(Date.now() + 301_000).toISOString() })).status, 400, '301 seconds in the future is rejected');
+  assert.equal((await post({ ...report, observedAt: new Date(Date.now() - 200_000).toISOString() })).status, 200, '200 seconds off is still accepted');
   assert.equal((await post(report)).status, 200);
 
   const s = await api('GET', `/api/v1/servers/${id}`);
@@ -656,7 +705,7 @@ test('logs are structured JSON and contain no secrets', async () => {
   const lines = logs.split('\n').filter(l => l.startsWith('{'));
   assert.ok(lines.length > 3, 'expected JSON log lines');
   for (const l of lines.slice(0, 50)) { const j = JSON.parse(l); assert.ok(j.ts && j.level && j.service === 'scholario-ops' && j.msg); }
-  for (const secret of [ADMIN.password, 'ViewerPassw0rd!', SECRETS.cf, SECRETS.jwt, token]) assert.equal(logs.includes(secret), false, 'a secret appeared in the logs');
+  for (const secret of [ADMIN.password, 'ViewerPassw0rd!', SECRETS.cf, SECRETS.jwt, SECRETS.deploy, token]) assert.equal(logs.includes(secret), false, 'a secret appeared in the logs');
   const agentTokens = (await pgc.query(`select agent_token from ${SCHEMA}.servers`)).rows.map(r => r.agent_token as string);
   for (const t of agentTokens) assert.equal(logs.includes(t), false, 'an agent token appeared in the logs');
 });

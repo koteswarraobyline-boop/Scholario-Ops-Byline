@@ -8,7 +8,7 @@ import { poolFor, onLoadBalancerUpdate, originHealthy, lbState } from './loadbal
 import { config, isCloudflareConfigured } from './config.ts';
 import { db, persist, liveMetrics, minuteMetrics, queueMetric, ServerRecord, MonitorBucket } from './store.ts';
 import { broadcast, audit } from './events.ts';
-import { httpProbe, tcpProbe, dnsProbe, sslProbe, parseHostPort } from './probes.ts';
+import { httpProbe, tcpProbe, dnsProbe, sslProbe, parseHostPort, classifySocketError } from './probes.ts';
 import { notifyIncident, notifyAll, escalateStep, policySteps, stopEscalation, NEVER_QUIET } from './notify.ts';
 import { isQuietTime } from '../src/lib/quietHours.ts';
 import { isNotificationWorker } from './leader.ts';
@@ -44,7 +44,7 @@ async function executeCheck(m: Monitor): Promise<CheckOutcome> {
   const timeoutMs = Math.max(1, m.timeoutSec) * 1000;
 
   if (HTTP_TYPES.includes(m.type)) {
-    const r = await httpProbe(m.target, { timeoutMs });
+    const r = await httpProbe(m.target, { timeoutMs, scheme: m.type === 'HTTPS' ? 'https' : 'http' });
     if (!r.reachable) {
       const kind = r.probeStatus ?? 'UNKNOWN';
       return { ok: false, degraded: false, latencyMs: r.latencyMs, probeStatus: kind, detail: `${kind.replace('_', ' ')}: ${r.error || 'Unreachable'}` };
@@ -65,25 +65,36 @@ async function executeCheck(m: Monitor): Promise<CheckOutcome> {
 
   if (TCP_TYPES.includes(m.type)) {
     const hp = parseHostPort(m.target);
-    if (!hp) return { ok: false, degraded: false, latencyMs: 0, detail: `Invalid target "${m.target}" — use host:port` };
+    if (!hp) return { ok: false, degraded: false, latencyMs: 0, probeStatus: 'CONNECTION_ERROR', detail: `Invalid target "${m.target}" — use host:port` };
     const r = await tcpProbe(hp.host, hp.port, timeoutMs);
-    if (!r.open) return { ok: false, degraded: false, latencyMs: r.latencyMs, probeStatus: /timed out/i.test(r.error ?? '') ? 'TIMEOUT' : /ENOTFOUND|EAI_AGAIN/.test(r.error ?? '') ? 'DNS_ERROR' : 'CONNECTION_ERROR', detail: `TCP ${hp.host}:${hp.port} closed — ${r.error}` };
+    if (!r.open) {
+      const kind = classifySocketError(r.error ?? '');
+      const why = kind === 'TIMEOUT' ? 'timed out' : kind === 'DNS_ERROR' ? 'name not resolved' : 'connection failed';
+      return { ok: false, degraded: false, latencyMs: r.latencyMs, probeStatus: kind, detail: `TCP ${hp.host}:${hp.port} ${why} — ${r.error}` };
+    }
+    if (m.criticalThresholdMs > 0 && r.latencyMs > m.criticalThresholdMs) {
+      return { ok: false, degraded: false, latencyMs: r.latencyMs, probeStatus: 'DEGRADED', detail: `TCP ${hp.host}:${hp.port} open but too slow: ${r.latencyMs}ms > ${m.criticalThresholdMs}ms critical threshold` };
+    }
     const slow = m.warningThresholdMs > 0 && r.latencyMs > m.warningThresholdMs;
     return { ok: true, degraded: slow, latencyMs: r.latencyMs, probeStatus: slow ? 'DEGRADED' : 'UP', detail: `TCP ${hp.host}:${hp.port} open in ${r.latencyMs}ms` };
   }
 
   if (m.type === 'DNS') {
     const r = await dnsProbe(m.target, timeoutMs);
-    return { ok: r.ok, degraded: false, latencyMs: r.latencyMs, probeStatus: r.ok ? 'UP' : 'DNS_ERROR', detail: r.detail };
+    return { ok: r.ok, degraded: false, latencyMs: r.latencyMs, probeStatus: r.probeStatus, detail: r.detail };
   }
 
   if (m.type === 'SSL') {
     const r = await sslProbe(m.target, timeoutMs);
     if (!r.ok) {
-      const kind: ProbeStatus = /timed out/i.test(r.detail) ? 'TIMEOUT' : /ENOTFOUND|EAI_AGAIN/.test(r.detail) ? 'DNS_ERROR' : /ECONNREFUSED|ECONNRESET|EHOSTUNREACH/.test(r.detail) ? 'CONNECTION_ERROR' : 'TLS_ERROR';
+      const socket = classifySocketError(r.detail);
+      const kind: ProbeStatus = socket === 'TIMEOUT' || socket === 'DNS_ERROR'
+        ? socket
+        : /ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH/.test(r.detail) || r.detail === 'Invalid target'
+          ? 'CONNECTION_ERROR'
+          : 'TLS_ERROR';
       return { ok: false, degraded: false, latencyMs: r.latencyMs, probeStatus: kind, detail: r.detail };
     }
-    if (r.daysLeft !== null && r.daysLeft < 7) return { ok: false, degraded: false, latencyMs: r.latencyMs, probeStatus: 'TLS_ERROR', detail: `Certificate expires in ${r.daysLeft} days` };
     const expiring = r.daysLeft !== null && r.daysLeft < config.sslExpiryWarnDays;
     return { ok: true, degraded: expiring, latencyMs: r.latencyMs, probeStatus: expiring ? 'DEGRADED' : 'UP', detail: r.detail };
   }
@@ -107,16 +118,20 @@ async function executeCheck(m: Monitor): Promise<CheckOutcome> {
     if (last === null) {
       const createdAt = monitorCreatedAt.get(m.id) ?? Date.now();
       if (Date.now() - createdAt < graceMs) return { ok: true, degraded: false, latencyMs: 0, detail: 'Waiting for first ping', pending: true };
-      return { ok: false, degraded: false, latencyMs: 0, detail: `No ping received (expected every ${m.intervalSec}s)` };
+      return { ok: false, degraded: false, latencyMs: 0, probeStatus: 'DOWN', detail: `No ping received (expected every ${m.intervalSec}s)` };
     }
-    const ageSec = Math.round((Date.now() - last) / 1000);
-    if (Date.now() - last > graceMs) return { ok: false, degraded: false, latencyMs: 0, detail: `Last ping ${ageSec}s ago (expected every ${m.intervalSec}s)` };
+    const ageMs = Date.now() - last;
+    const ageSec = Math.round(ageMs / 1000);
+    if (ageMs > graceMs) return { ok: false, degraded: false, latencyMs: ageMs, probeStatus: 'DOWN', detail: `Last ping ${ageSec}s ago (expected every ${m.intervalSec}s)` };
     if (m.type === 'DB_REPLICATION' && typeof m.lastValue === 'number') {
       const lagMs = m.lastValue * 1000;
-      if (m.criticalThresholdMs > 0 && lagMs > m.criticalThresholdMs) return { ok: false, degraded: false, latencyMs: lagMs, detail: `Replication lag ${m.lastValue}s exceeds ${m.criticalThresholdMs / 1000}s` };
-      return { ok: true, degraded: m.warningThresholdMs > 0 && lagMs > m.warningThresholdMs, latencyMs: lagMs, detail: `Replication lag ${m.lastValue}s` };
+      const late = m.warningThresholdMs > 0 && lagMs > m.warningThresholdMs;
+      if (m.criticalThresholdMs > 0 && lagMs > m.criticalThresholdMs) return { ok: false, degraded: false, latencyMs: lagMs, probeStatus: 'DOWN', detail: `Replication lag ${m.lastValue}s exceeds ${m.criticalThresholdMs / 1000}s` };
+      return { ok: true, degraded: late, latencyMs: lagMs, probeStatus: late ? 'DEGRADED' : 'UP', detail: `Replication lag ${m.lastValue}s` };
     }
-    return { ok: true, degraded: false, latencyMs: 0, detail: `Last ping ${ageSec}s ago${typeof m.lastValue === 'number' ? ` (value ${m.lastValue})` : ''}` };
+    // Past the expected interval, but still inside the grace window: late, not failed.
+    const late = ageSec > m.intervalSec;
+    return { ok: true, degraded: late, latencyMs: ageMs, probeStatus: late ? 'DEGRADED' : 'UP', detail: `Last ping ${ageSec}s ago${typeof m.lastValue === 'number' ? ` (value ${m.lastValue})` : ''}${late ? ` (late, expected every ${m.intervalSec}s)` : ''}` };
   }
 
   return { ok: false, degraded: false, latencyMs: 0, detail: `Unsupported monitor type ${m.type}` };

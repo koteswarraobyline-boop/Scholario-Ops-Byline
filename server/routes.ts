@@ -11,7 +11,7 @@ import { db, persist, flush, databaseSaveStatus, saveFailureClient, liveMetrics,
 import { broadcast, audit, addSseClient, sseClientCount } from './events.ts';
 import {
   requireAuth, requireRole, operatorName, hashPasswordAsync, verifyPassword, validatePasswordStrength, issueTokens,
-  consumeRefreshToken, revokeRefreshToken, safeUser, loginRateLimited, recordLoginFailure, clearLoginFailures, dummyPasswordHash, ROLES, ROLE_LEVEL, Role, issueStreamTicket,
+  consumeRefreshToken, revokeRefreshToken, safeUser, loginRateLimited, recordLoginFailure, clearLoginFailures, dummyPasswordHash, ROLES, ROLE_LEVEL, Role, issueStreamTicket, safeEqual,
 } from './auth.ts';
 import {
   ValidationError, body, reqStr, optStr, optInt, optBool, oneOf, optOneOf, optDate, strArray, isHostname, isDomain, isEmail,
@@ -75,11 +75,6 @@ async function isLinkLocalTarget(rawUrl: string): Promise<boolean> {
   try { return (await dns.promises.lookup(host, { all: true })).some(a => bad(a.address)); } catch { return false; }
 }
 
-/** Constant-time string compare that never throws (byte lengths are compared, not string lengths) */
-const safeEqual = (a: string, b: string) => {
-  const x = Buffer.from(a), y = Buffer.from(b);
-  return x.length === y.length && crypto.timingSafeEqual(x, y);
-};
 const ok = (res: Response, data: unknown, status = 200) => res.status(status).json({ success: true, data });
 const fail = (res: Response, status: number, message: string) => res.status(status).json({ success: false, message });
 const newToken = () => crypto.randomBytes(24).toString('hex');
@@ -186,7 +181,7 @@ function summary() {
 // ─────────────────────────────────────────────────────────────────────────────
 function validateMonitorTarget(type: MonitorType, target: string, serverId?: string): string {
   if (HTTP_TYPES.includes(type)) {
-    const url = normalizeUrl(target);
+    const url = normalizeUrl(target, type === 'HTTPS' ? 'https' : 'http');
     try {
       const u = new URL(url);
       if (!u.hostname) throw new Error();
@@ -569,7 +564,12 @@ export function buildRouter(): Router {
     const header = req.headers.authorization;
     const token = header?.startsWith('Bearer ') ? header.slice(7).trim() : '';
     if (!token) return undefined;
-    return db.servers.find(s => safeEqual(s.agentToken, token));
+    // Compare every server token. Stopping at the first match would reveal which server it was.
+    let found: ServerRecord | undefined;
+    for (const s of db.servers) {
+      if (safeEqual(s.agentToken, token) && !found) found = s;
+    }
+    return found;
   };
 
   r.post('/v1/agent/ingest', h((req, res) => {
@@ -638,7 +638,7 @@ export function buildRouter(): Router {
 
   r.post('/v1/deployments/report', h((req, res) => {
     const header = req.headers.authorization ?? '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+    const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
     if (!config.deployReportToken || !safeEqual(token, config.deployReportToken)) {
       return fail(res, 401, 'Invalid deploy report token');
     }

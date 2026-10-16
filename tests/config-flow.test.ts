@@ -119,11 +119,27 @@ test('server: create with capacity → stored in PostgreSQL columns', async () =
   ids.dr = dr.body.data.id;
 });
 
+test('role and environment lists: a valid value is stored, anything else is rejected', async () => {
+  const goodRole = await api('POST', '/api/v1/users', { email: 'good-role@example.com', password: 'GoodRolePassw0rd!', fullName: 'Good Role', roleName: 'operator' });
+  assert.equal(goodRole.status, 201, goodRole.raw);
+  assert.equal(goodRole.body.data.roleName, 'operator');
+  const badRole = await api('POST', '/api/v1/users', { email: 'bad-role@example.com', password: 'BadRolePassw0rd!', fullName: 'Bad Role', roleName: 'owner' });
+  assert.equal(badRole.status, 400, badRole.raw);
+  assert.match(badRole.body.message, /Role must be one of: viewer, operator, it_administrator, super_admin/);
+  const badEnv = await api('POST', '/api/v1/servers', { hostname: 'bad-env', ip: '192.0.2.77', environment: 'STAGING' });
+  assert.equal(badEnv.status, 400, badEnv.raw);
+  assert.match(badEnv.body.message, /Environment must be one of: PRD, DR/);
+  const goodEnv = await api('POST', '/api/v1/servers', { hostname: 'good-env', ip: '192.0.2.78', environment: 'DR' });
+  assert.equal(goodEnv.status, 201, goodEnv.raw);
+  assert.equal(goodEnv.body.data.environment, 'DR');
+});
+
 test('server: validation rejects bad input', async () => {
   const cases: Array<[Record<string, unknown>, RegExp]> = [
     [{ hostname: 'bad-ip', ip: '999.1.1.1', environment: 'PRD' }, /IP address/],
     [{ hostname: 'neg-cpu', ip: '192.0.2.30', environment: 'PRD', planCpuCores: -2, planRamGb: 8, planDiskGb: 10 }, /CPU cores/],
     [{ hostname: 'zero-ram', ip: '192.0.2.31', environment: 'PRD', planCpuCores: 2, planRamGb: 0, planDiskGb: 10 }, /RAM/],
+    [{ hostname: 'zero-disk', ip: '192.0.2.33', environment: 'PRD', planCpuCores: 2, planRamGb: 8, planDiskGb: 0 }, /Disk/],
     [{ hostname: 'partial', ip: '192.0.2.32', environment: 'PRD', planCpuCores: 2 }, /together/],
     [{ hostname: 'dup-ip', ip: '192.0.2.10', environment: 'PRD' }, /already registered/],
   ];
