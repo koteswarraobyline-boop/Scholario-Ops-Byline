@@ -4,12 +4,14 @@
  * escalated to CRITICAL later alerts once more. Pure so it can be unit-tested.
  */
 import type { Incident } from '../types';
+import { isMockIncident } from './mockIncident';
 
 export const ALERT_SEVERITIES: ReadonlyArray<Incident['severity']> = ['CRITICAL', 'EMERGENCY'];
 
 export const isOpen = (i: Pick<Incident, 'status'>) => i.status !== 'RESOLVED' && i.status !== 'CLOSED';
 export const alertKey = (i: Pick<Incident, 'id' | 'severity'>) => `${i.id}:${i.severity}`;
-export const needsAlert = (i: Incident) => isOpen(i) && !i.acknowledged && ALERT_SEVERITIES.includes(i.severity);
+/** A TEST incident from the automatic-alert check is not announced as a production outage. */
+export const needsAlert = (i: Incident) => isOpen(i) && !i.acknowledged && ALERT_SEVERITIES.includes(i.severity) && !isMockIncident(i);
 
 /** Incidents to announce now; `seen` is updated in place (also with incidents that need no alert). */
 export function takeNewCriticalAlerts(incidents: Incident[], seen: Set<string>): Incident[] {

@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
 import { DeliveryLog, useDeliveryStats } from './DeliveryLog';
+import { MockIncidentPanel } from './MockIncidentPanel';
 import { NotificationHealthCard } from './NotificationHealthCard';
 import { api } from '../../services/api';
 
@@ -451,6 +452,8 @@ export const CommunicationsView: React.FC = () => {
           </button>
         </div>
       )}
+
+      {isOperator && <MockIncidentPanel isDark={isDark} cardCls={cardCls} muted={muted} />}
 
       {/* Delivery health (operators+): success rate, retries, latency, waiting, failing channels */}
       {isOperator && <NotificationHealthCard />}

@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { takeNewCriticalAlerts, titleWithCriticalCount } from '../src/lib/criticalAlerts.ts';
+import { MOCK_INCIDENT_FINGERPRINT } from '../src/lib/mockIncident.ts';
 import type { Incident } from '../src/types/index.ts';
 
 const inc = (id: string, over: Partial<Incident> = {}) => ({ id, title: id, severity: 'CRITICAL', status: 'OPEN', acknowledged: false, ...over }) as Incident;
@@ -17,6 +18,7 @@ test('only new, open, unacknowledged CRITICAL / EMERGENCY incidents alert, once 
     inc('E', { acknowledged: true }), inc('F', { status: 'RESOLVED' }),
   ], seen);
   assert.deepEqual(fresh.map(i => i.id), ['B', 'C']);
+  assert.deepEqual(takeNewCriticalAlerts([inc('T', { fingerprint: MOCK_INCIDENT_FINGERPRINT })], seen), [], 'a TEST incident is not announced as a production outage');
   assert.deepEqual(takeNewCriticalAlerts([inc('B'), inc('C', { severity: 'EMERGENCY' })], seen), [], 'not twice');
 
   // D was HIGH (no alert); escalated to CRITICAL → alert now

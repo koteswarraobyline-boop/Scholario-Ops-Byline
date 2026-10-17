@@ -1,8 +1,7 @@
 import { Response } from 'express';
 import crypto from 'crypto';
 import { AuditLog } from '../src/types/index.ts';
-import { db, persist } from './store.ts';
-import { config } from './config.ts';
+import { db, persist, applyAuditRetention } from './store.ts';
 
 /** Open SSE streams with the user and session version they were opened with */
 const clients = new Map<Response, { userId: string; ver: number }>();
@@ -84,7 +83,7 @@ export function audit(
     details,
   };
   db.auditLogs.unshift(entry);
-  if (db.auditLogs.length > config.auditRetention) db.auditLogs.length = config.auditRetention;
+  applyAuditRetention();
   persist();
   broadcast('audit', entry);
   return entry;

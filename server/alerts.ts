@@ -19,6 +19,7 @@ import { Incident, IncidentSeverity } from '../src/types/index.ts';
 import { db, persist } from './store.ts';
 import { broadcast, audit } from './events.ts';
 import { notifyIncident, CHANNEL_FAILING_AFTER } from './notify.ts';
+import { MOCK_INCIDENT_MONITOR_ID } from '../src/lib/mockIncident.ts';
 import { nextIncidentId } from './engine.ts';
 import { agentState, backupStatus, databaseHealth } from './health.ts';
 import { readiness } from './readiness.ts';
@@ -262,6 +263,39 @@ export function evaluateAlerts() {
         severity: ob.status === 'DEGRADED' ? 'WARNING' : 'HIGH', detail: ob.problems.join(' · '), source: 'Ops Backup',
       });
     } else if (ob.status === 'HEALTHY') resolveAlert('ops-backup', 'Ops Backup', `Backup ${ob.backup?.file ?? ''} OK`);
+
+    // A check that is slow or weak (WARNING) but not down. A down check already emails as CRITICAL.
+    // SSL has its own expiry warning. The development test monitor is never a real warning.
+    for (const m of db.monitors) {
+      if (!m.enabled || m.type === 'SSL' || m.flapping || m.id === MOCK_INCIDENT_MONITOR_ID) continue;
+      const fp = `monitor-warn:${m.id}`;
+      const down = db.incidents.some(i => i.fingerprint === `monitor:${m.id}` && i.status !== 'RESOLVED' && i.status !== 'CLOSED');
+      if (m.status === 'CRITICAL' || down) {
+        const open = db.incidents.find(i => i.fingerprint === fp && i.status !== 'RESOLVED' && i.status !== 'CLOSED');
+        if (open) {
+          open.status = 'CLOSED';
+          open.resolvedAt = new Date().toISOString();
+          open.recoveryStatus = 'Superseded by a down incident';
+          open.timeline.push(ev('Monitor Engine', 'INFO', 'Closed this warning because the same check is now down. The down incident carries the email.'));
+          persist();
+          broadcast('incident_update', open);
+        }
+        continue;
+      }
+      if (m.status === 'WARNING') {
+        const { incident, created } = openAlert({
+          fingerprint: fp, title: `${m.name} needs attention`, severity: 'WARNING',
+          detail: m.history[0]?.detail || 'This check is slower or weaker than its warning threshold',
+          applicationId: m.applicationId || undefined, environment: m.environment, source: 'Monitor Engine', affected: [m.name],
+        });
+        if (created) {
+          incident.affectedMonitors = [m.id];
+          persist();
+        }
+      } else if (m.status === 'HEALTHY') {
+        resolveAlert(fp, 'Monitor Engine', `${m.name} is healthy again`);
+      }
+    }
 
     // SSL certificates expiring soon (expired / invalid certificates are monitor incidents already)
     for (const m of db.monitors.filter(x => x.type === 'SSL' && x.enabled)) {
