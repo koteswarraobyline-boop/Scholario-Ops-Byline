@@ -15,6 +15,8 @@ import { recordDelivery, recentIncidentSends, recentDeliveredFiringMessages } fr
 import { isSealed } from './secrets.ts';
 import { isQuietTime, quietUntil } from '../src/lib/quietHours.ts';
 import { isNotificationWorker } from './leader.ts';
+import { incidentNotification, groupedNotification, IncidentNames } from './incidentMail.ts';
+import { mailSubject } from '../src/lib/incidentMail.ts';
 
 export interface NotificationMessage {
   title: string;
@@ -23,6 +25,8 @@ export interface NotificationMessage {
   status: 'FIRING' | 'RESOLVED' | 'ESCALATED' | 'INFO' | 'TEST';
   incidentId?: string;
   link?: string;
+  /** Full HTML page. When set, mail clients show this instead of the plain lines. */
+  html?: string;
 }
 
 const wellKnown = createRequire(import.meta.url)('nodemailer/lib/well-known') as (name: string) => { host?: string; port?: number; secure?: boolean } | false;
@@ -163,17 +167,49 @@ export async function verifySmtp(): Promise<{ ok: boolean; error?: string; serve
 
 const htmlEscape = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
-/** Email body: plain text plus a simple HTML version (most clients show the HTML) */
+/** Email body: plain text plus HTML. Incident alerts pass a full page; other messages stay a short note. */
 export function emailContent(msg: NotificationMessage): { subject: string; text: string; html: string } {
+  if (msg.html) return { subject: mailSubject(msg), text: msg.text, html: msg.html };
   const color = `#${COLORS[msg.status]}`;
   const lines = msg.text.split('\n').filter(Boolean).map(l => `<p style="margin:0 0 6px">${htmlEscape(l)}</p>`).join('');
   const link = msg.link ? `<p style="margin:14px 0 0"><a href="${htmlEscape(msg.link)}" style="color:#0b5cad">Open in Scholario Ops</a></p>` : '';
   return {
-    subject: `[${msg.status}] ${msg.title}`,
+    subject: mailSubject(msg),
     text: `${msg.text}${msg.link ? `\n\n${msg.link}` : ''}`,
     html: `<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1f2933">`
       + `<div style="border-left:4px solid ${color};padding:4px 12px;margin-bottom:12px"><strong style="font-size:15px">[${msg.status}] ${htmlEscape(msg.title)}</strong></div>`
       + `${lines}${link}<p style="margin:16px 0 0;font-size:11px;color:#7b8794">Sent by Scholario Ops</p></div>`,
+  };
+}
+
+const MONITOR_FINGERPRINTS = ['monitor-warn:', 'ssl-expiry:', 'flapping:', 'monitor:'];
+
+/** Application, server, and database for the incident email, from the live register. */
+function incidentNames(incident: Incident): IncidentNames {
+  const app = incident.applicationId ? db.applications.find(a => a.id === incident.applicationId) : undefined;
+  const fp = incident.fingerprint ?? '';
+  const monId = MONITOR_FINGERPRINTS.find(p => fp.startsWith(p));
+  const mon = monId ? db.monitors.find(m => m.id === fp.slice(monId.length)) : undefined;
+  const serverId = fp.startsWith('agent-offline:') ? fp.slice('agent-offline:'.length)
+    : fp.startsWith('telemetry:') ? fp.split(':')[1]
+    : fp.startsWith('capacity-disk:') ? fp.slice('capacity-disk:'.length)
+    : mon?.serverId
+    || (incident.environment === 'DR' ? app?.drServerId : app?.prdServerId);
+  const srv = serverId ? db.servers.find(s => s.id === serverId) : undefined;
+  const env = incident.environment === 'DR' ? 'DR' : 'PRD';
+  const inv = app?.environments?.[env];
+  const dbProblem = fp.startsWith('db-down:') || fp.startsWith('db-replication:') || mon?.type === 'DB_CONN' || mon?.type === 'DB_REPLICATION';
+  const database = dbProblem && inv?.dbEngine
+    ? [inv.dbEngine, inv.dbName, inv.dbPort ? `port ${inv.dbPort}` : ''].filter(Boolean).join(' ')
+    : undefined;
+  return {
+    application: app?.name,
+    server: srv?.hostname,
+    ip: srv?.ip,
+    database,
+    monitor: mon?.name,
+    monitorType: mon?.type ?? null,
+    target: mon?.target,
   };
 }
 
@@ -402,7 +438,7 @@ async function deliver(channel: CommunicationChannel, msg: NotificationMessage) 
       return;
     case 'WEBHOOK':
       // `text` makes this compatible with Slack / Google Chat / Mattermost incoming webhooks
-      await postJson(target, { ...msg, details: msg.text, text: `*[${msg.status}] ${msg.title}*\n${msg.text}${msg.link ? `\n${msg.link}` : ''}` }, true);
+      { const { html: _page, ...rest } = msg; void _page; await postJson(target, { ...rest, details: msg.text, text: `*[${msg.status}] ${msg.title}*\n${msg.text}${msg.link ? `\n${msg.link}` : ''}` }, true); }
       return;
     case 'PAGERDUTY':
       await postJson('https://events.pagerduty.com/v2/enqueue', pagerdutyPayload(target, msg));
@@ -465,7 +501,7 @@ export async function sendToChannel(channel: CommunicationChannel, msg: Notifica
   }
 }
 
-function channelsForSeverity(severity: string): CommunicationChannel[] {
+export function channelsForSeverity(severity: string): CommunicationChannel[] {
   const policy = db.escalationPolicies.find(p => p.severity === severity);
   const enabled = db.channels.filter(c => c.enabled);
   if (!policy || policy.channels.length === 0) return enabled;
@@ -513,16 +549,8 @@ async function dispatchGroupSummary(applicationId: string, items: Incident[]): P
   const top = live.reduce((a, b) => ((SEV_RANK[b.severity] ?? 0) > (SEV_RANK[a.severity] ?? 0) ? b : a));
   const appName = db.applications.find(a => a.id === applicationId)?.name ?? 'the same application';
   const msg: NotificationMessage = live.length === 1
-    ? {
-      title: `${live[0].id} ${live[0].title}`,
-      text: [`Severity: ${live[0].severity} | Environment: ${live[0].environment} | Status: ${live[0].status}`, live[0].rootCause ? `Detail: ${live[0].rootCause}` : ''].filter(Boolean).join('\n'),
-      severity: live[0].severity, status: 'FIRING', incidentId: live[0].id, link: incidentLink(live[0].id),
-    }
-    : {
-      title: `${live.length} more alerts for ${appName}`,
-      text: [`Grouped: ${live.length} further alerts for ${appName} within ${config.notifyGroupWindowSec} s of the first one.`, ...live.map(i => `• ${i.id} [${i.severity}] ${i.title}`)].join('\n'),
-      severity: top.severity, status: 'FIRING', incidentId: top.id, link: incidentLink(top.id),
-    };
+    ? incidentNotification(live[0], 'FIRING', incidentNames(live[0]), undefined, incidentLink(live[0].id))
+    : groupedNotification(live, config.notifyGroupWindowSec, incidentNames, incidentLink(top.id));
   await Promise.all(channelsForSeverity(top.severity).map(ch => sendToChannel(ch, msg)));
   for (const i of live) i.notifyGroupPending = undefined;
   persist();
@@ -682,18 +710,7 @@ export function notifyIncident(incident: Incident, status: 'FIRING' | 'RESOLVED'
   else firingSent.delete(incident.id);
   // Bounded: forget cooldown keys older than a day
   if (lastSent.size > 5000) for (const [k, t] of lastSent) if (now - t > 86_400_000) lastSent.delete(k);
-  const msg: NotificationMessage = {
-    title: `${incident.id} ${incident.title}`,
-    text: [
-      `Severity: ${incident.severity} | Environment: ${incident.environment} | Status: ${incident.status}`,
-      incident.rootCause ? `Detail: ${incident.rootCause}` : '',
-      extra ?? '',
-    ].filter(Boolean).join('\n'),
-    severity: incident.severity,
-    status,
-    incidentId: incident.id,
-    link: incidentLink(incident.id),
-  };
+  const msg = incidentNotification(incident, status, incidentNames(incident), extra, incidentLink(incident.id));
   for (const ch of channels) void sendToChannel(ch, msg);
   return true;
 }
@@ -734,18 +751,11 @@ export function escalateStep(incident: Incident, steps: EscalationStep[], index:
   const minutes = Math.max(0, Math.round((Date.now() - Date.parse(incident.startedAt)) / 60000));
   const team = step.label.trim();
   const stepText = steps.length > 1 ? ` (step ${index + 1} of ${steps.length})` : '';
-  const msg: NotificationMessage = {
-    title: `${incident.id} ${incident.title}`,
-    text: [
-      `Not acknowledged after ${minutes} min — escalated${team ? ` to ${team}` : ''}${stepText}.`,
-      `Severity: ${incident.severity} | Environment: ${incident.environment} | Owner: ${incident.owner || 'Unassigned'}`,
-      incident.rootCause ? `Detail: ${incident.rootCause}` : '',
-    ].filter(Boolean).join('\n'),
-    severity: incident.severity,
-    status: 'ESCALATED',
-    incidentId: incident.id,
-    link: incidentLink(incident.id),
-  };
+  const msg = incidentNotification(
+    incident, 'ESCALATED', incidentNames(incident),
+    `Not acknowledged after ${minutes} min — escalated${team ? ` to ${team}` : ''}${stepText}.`,
+    incidentLink(incident.id),
+  );
   for (const ch of chosen) void sendToChannel(ch, msg);
   const emailOnCall = onCall.length > 0 && !smtpConfigProblem();
   if (emailOnCall) {

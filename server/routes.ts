@@ -36,6 +36,8 @@ import { infraHeartbeat } from './heartbeat.ts';
 import { lbState, syncLoadBalancers, PERMISSION_HINT } from './loadbalancer.ts';
 import { syncAppUrlMonitors, DEFAULT_HEALTH_CHECK } from './appMonitors.ts';
 import { readiness, failoverPreflight, applicationAvailability } from './readiness.ts';
+import { isMockIncident, MOCK_INCIDENT_MONITOR_ID } from '../src/lib/mockIncident.ts';
+import { allowMockIncidentTest, runMockIncidentAlert, closeMockIncident, mockIncidentStatus } from './mockIncident.ts';
 import { readChecks } from './history.ts';
 import { backupStatus, databaseHealth, agentState } from './health.ts';
 import { reliabilityInsights } from './insights.ts';
@@ -129,7 +131,7 @@ function integrationStatus(req: Request): IntegrationStatus {
 }
 
 function summary() {
-  const open = db.incidents.filter(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED');
+  const open = db.incidents.filter(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED' && !isMockIncident(i));
   const critical = open.filter(i => i.severity === 'CRITICAL' || i.severity === 'EMERGENCY');
   // Cloudflare: never "HEALTHY" without data. LB origin health counts when an app is LB-mapped.
   const lbOriginsUnhealthy = lbState.pools.some(p => p.found && (p.healthy === false || p.origins.some(o => o.healthy === false || o.health.some(x => x.healthy === false))));
@@ -997,6 +999,7 @@ export function buildRouter(): Router {
   r.patch('/v1/monitors/:id', requireRole('it_administrator'), h((req, res) => {
     const idx = db.monitors.findIndex(x => x.id === req.params.id);
     if (idx === -1) return fail(res, 404, 'Monitor not found');
+    if (db.monitors[idx].id === MOCK_INCIDENT_MONITOR_ID) return fail(res, 400, 'The automatic-alert test monitor stays disabled and is never aimed at a real host.');
     const before = db.monitors[idx];
     const m = buildMonitor(req, before);
     if (m.type !== before.type || m.target !== before.target) {
@@ -1014,6 +1017,7 @@ export function buildRouter(): Router {
   r.post('/v1/monitors/:id/toggle', requireRole('it_administrator'), (req, res) => {
     const m = db.monitors.find(x => x.id === req.params.id);
     if (!m) return fail(res, 404, 'Monitor not found');
+    if (m.id === MOCK_INCIDENT_MONITOR_ID) return fail(res, 400, 'The automatic-alert test monitor stays disabled and is never aimed at a real host.');
     m.enabled = !m.enabled;
     if (!m.enabled) { closeMonitorIncident(m, operatorName(req), 'monitor paused'); m.status = 'UNKNOWN'; m.consecutiveFailures = 0; m.consecutiveRecoveries = 0; }
     persist();
@@ -1040,6 +1044,7 @@ export function buildRouter(): Router {
   r.post('/v1/monitors/:id/probe', requireRole('operator'), h(async (req, res) => {
     const m = db.monitors.find(x => x.id === req.params.id);
     if (!m) return fail(res, 404, 'Monitor not found');
+    if (m.id === MOCK_INCIDENT_MONITOR_ID) return fail(res, 400, 'The automatic-alert test monitor is not probed. Use Test Automatic Incident Alert on Notifications.');
     const updated = await runMonitorNow(m);
     audit(operatorName(req), 'MONITOR_TRIGGERED', 'MONITOR', m.id, `${m.name}: ${updated.lastProbeStatus ?? updated.status} — ${updated.history[0]?.detail ?? ''}`);
     ok(res, monitorView(req, updated));
@@ -1111,6 +1116,20 @@ export function buildRouter(): Router {
   r.post('/v1/tools/ssl', requireRole('operator'), h(async (req, res) => {
     ok(res, await sslProbe(reqStr(body(req), 'host', 'Host', 260), 8000));
   }));
+
+  // Development-only: simulated HTTP 503 through the real incident and email pipeline.
+  r.get('/v1/tools/mock-incident', requireRole('operator'), (_req, res) => {
+    ok(res, mockIncidentStatus());
+  });
+  r.post('/v1/tools/mock-incident', requireRole('operator'), h(async (req, res) => {
+    if (!allowMockIncidentTest()) return fail(res, 404, 'Test Automatic Incident Alert is only available in local development.');
+    if (body(req).confirm !== true) return fail(res, 400, 'Confirm the test before a real email is sent.');
+    ok(res, await runMockIncidentAlert(operatorName(req)));
+  }));
+  r.post('/v1/tools/mock-incident/close', requireRole('operator'), (req, res) => {
+    if (!allowMockIncidentTest()) return fail(res, 404, 'Test Automatic Incident Alert is only available in local development.');
+    ok(res, closeMockIncident(operatorName(req)));
+  });
 
   // ── Incidents ──────────────────────────────────────────────────────────────
   const findIncident = (req: Request, res: Response): Incident | undefined => {

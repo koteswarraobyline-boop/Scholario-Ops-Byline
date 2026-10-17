@@ -18,6 +18,7 @@ import { applyExtendedReport, ExtendedAgentReport } from './telemetry.ts';
 import { infraHeartbeat } from './heartbeat.ts';
 import { agentHealth, serverHealth } from './telemetryHealth.ts';
 import { detectFlapping } from '../src/lib/insights.ts';
+import { isMockIncident } from '../src/lib/mockIncident.ts';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Monitor classification
@@ -1010,6 +1011,8 @@ export function updateIncidentDurations() {
       }
       continue;
     }
+    // The automatic-alert test sends only its first notification. It is not escalated or reminded.
+    if (isMockIncident(inc)) continue;
     if (inc.acknowledged) { if (inc.escalation?.nextAt) stopEscalation(inc, 'acknowledged'); continue; }
     if (!policy || !worker) continue;
     // Quiet hours (non-critical): escalation steps and reminders wait until they are over

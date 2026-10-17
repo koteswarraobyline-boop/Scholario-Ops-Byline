@@ -142,6 +142,13 @@ export async function markAllRead(userId: string): Promise<void> {
   });
 }
 
+/** Every delivery row for one incident, oldest first. */
+export async function deliveriesForIncident(incidentId: string): Promise<NotificationDelivery[]> {
+  await flushDeliveries();
+  const rows = (await query(`SELECT * FROM ${T('notification_deliveries')} WHERE incident_id = $1 ORDER BY t ASC, id ASC`, [incidentId])).rows;
+  return rows.map(fromRow);
+}
+
 export async function getDelivery(id: string): Promise<NotificationDelivery | null> {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
   await flushDeliveries();
