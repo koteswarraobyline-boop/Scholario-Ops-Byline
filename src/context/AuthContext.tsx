@@ -3,7 +3,7 @@ import React, {
   useCallback, ReactNode
 } from 'react';
 import { AuthService } from '../services/auth';
-import { SafeUser, setLogoutHandler, tokenStore } from '../services/api';
+import { ApiError, SafeUser, setLogoutHandler, tokenStore } from '../services/api';
 
 interface AuthContextType {
   user: SafeUser | null;
@@ -40,9 +40,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       try {
         const me = await AuthService.getMe();
         setUser(me);
-      } catch {
-        tokenStore.clear();
-        setUser(null);
+      } catch (err) {
+        // Only a rejected session signs the user out. A network error or a 5xx (backend restarting,
+        // database blip) keeps the stored session; requests retry once the server is back.
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+          tokenStore.clear();
+          setUser(null);
+        } else {
+          setUser(tokenStore.getUser());
+        }
       } finally {
         setIsLoading(false);
       }
@@ -95,7 +101,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     if (superAdminActions.includes(action)) return level >= 4;
     if (adminActions.includes(action)) return level >= 3;
     if (operatorActions.includes(action)) return level >= 2;
-    return level >= 1; // viewer can do anything else (read)
+    if (action === 'view' || action === 'read') return level >= 1;
+    return false; // unknown action: deny (a typo must never grant access)
   }, [user]);
 
   return (

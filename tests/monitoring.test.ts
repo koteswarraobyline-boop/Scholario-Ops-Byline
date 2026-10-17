@@ -14,13 +14,17 @@ import https from 'node:https';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import dotenv from 'dotenv';
+import { pinTestDatabaseUrl, assertConnectedToTestDatabase, dropVerifiedTestSchema } from './helpers/test-db-guard.ts';
 
+pinTestDatabaseUrl();
 dotenv.config({ quiet: true });
 process.env.DB_SCHEMA = `ops_montest_${process.pid}`;
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'scholario-montest-'));
 process.env.HOSTINGER_API_TOKEN = 'montest-fake-hostinger-token';
 process.env.HOSTINGER_TIMEOUT_MS = '800';
 process.env.CLOUDFLARE_API_TOKEN = 'montest-fake-cloudflare-token';
+// Local test webhook receiver on 127.0.0.1: allowed explicitly (the SSRF guard blocks loopback otherwise)
+process.env.NOTIFY_ALLOWED_PRIVATE_TARGETS = '127.0.0.1';
 process.env.ALERT_COOLDOWN_MIN = '10';
 process.env.TELEMETRY_STALE_THRESHOLD_SEC = '10';
 process.env.BACKUP_MAX_AGE_HOURS = '24';
@@ -71,7 +75,8 @@ const { ingestAgentReport, recomputeDerived, runMonitorNow } = await import('../
 const { databaseHealth, backupStatus, agentState, appHealth } = await import('../server/health.ts');
 const { readiness } = await import('../server/readiness.ts');
 const { openAlert, resolveAlert, evaluateAlerts, notificationStatus } = await import('../server/alerts.ts');
-const { httpProbe, sslProbe } = await import('../server/probes.ts');
+const { httpProbe, sslProbe, dnsProbe, normalizeUrl } = await import('../server/probes.ts');
+const { flushChecks, readChecks } = await import('../server/history.ts');
 type ServerRecord = import('../server/store.ts').ServerRecord;
 type Monitor = import('../src/types/index.ts').Monitor;
 
@@ -96,7 +101,10 @@ function mkMonitor(appId: string, env: 'PRD' | 'DR', type: Monitor['type'], targ
 }
 const agentReport = (extra: Record<string, unknown> = {}) => ({ observedAt: new Date().toISOString(), cpuPercent: 10, ramPercent: 30, diskPercent: 40, load: [0.1, 0.1, 0.1], ...extra });
 
+let verified = false;
 before(async () => {
+  await assertConnectedToTestDatabase({ query: sql => query(sql) });
+  verified = true;
   await initStore();
   local = http.createServer((req, res) => { res.statusCode = req.url === '/down' ? 500 : 200; res.end('ok'); });
   await new Promise<void>(r => local.listen(0, '127.0.0.1', () => r()));
@@ -108,7 +116,7 @@ before(async () => {
 
 after(async () => {
   local?.close(); hook?.close();
-  await query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+  await dropVerifiedTestSchema(verified, () => query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}));
   await closePool();
   fs.rmSync(process.env.DATA_DIR!, { recursive: true, force: true });
   setTimeout(() => process.exit(0), 100).unref();
@@ -203,6 +211,143 @@ test('SSL: untrusted (self-signed) certificate and hostname mismatch are failure
   }
 });
 
+test('probe types record UP, DEGRADED, DOWN, TIMEOUT, DNS_ERROR, TLS_ERROR and CONNECTION_ERROR with HTTP code, latency and reason', async (t) => {
+  const appId = db.applications[0]?.id ?? crypto.randomUUID();
+  const check = async (type: Monitor['type'], target: string, extra: Partial<Monitor> = {}) => {
+    const m = { ...mkMonitor(appId, 'PRD', type, target), retries: 1, failureConfirmationThreshold: 5, ...extra };
+    db.monitors.push(m);
+    await runMonitorNow(m);
+    const row = m.history[0];
+    assert.ok(row, `${type} ${target} produced no result`);
+    assert.equal(typeof row.responseTimeMs, 'number');
+    assert.ok(row.responseTimeMs >= 0, `${type} latency`);
+    assert.equal(typeof row.detail, 'string');
+    assert.ok(row.detail.length > 0, `${type} reason`);
+    assert.equal(row.probeStatus, m.lastProbeStatus);
+    assert.equal(m.lastStatusCode ?? null, row.statusCode ?? null);
+    return m;
+  };
+
+  const up = await check('HTTP', `${localUrl}/ok`);
+  assert.equal(up.lastProbeStatus, 'UP');
+  assert.equal(up.lastStatusCode, 200);
+  assert.match(up.history[0].detail, /HTTP 200/);
+
+  const down = await check('HTTPS', `${localUrl}/down`);
+  assert.equal(down.lastProbeStatus, 'DOWN');
+  assert.equal(down.lastStatusCode, 500);
+  assert.match(down.history[0].detail, /HTTP 500/);
+
+  const slowSrv = http.createServer((_q, res) => { setTimeout(() => { res.statusCode = 200; res.end('slow'); }, 40); });
+  await new Promise<void>(r => slowSrv.listen(0, '127.0.0.1', () => r()));
+  const slowUrl = `http://127.0.0.1:${(slowSrv.address() as { port: number }).port}/`;
+  let degraded: Monitor;
+  try {
+    degraded = await check('HTTP', slowUrl, { warningThresholdMs: 1, criticalThresholdMs: 5000 });
+    assert.equal(degraded.lastProbeStatus, 'DEGRADED');
+    assert.equal(degraded.lastStatusCode, 200);
+    assert.match(degraded.history[0].detail, /slow/);
+  } finally { slowSrv.close(); }
+
+  const hang = http.createServer(() => { /* never answers */ });
+  await new Promise<void>(r => hang.listen(0, '127.0.0.1', () => r()));
+  const hangPort = (hang.address() as { port: number }).port;
+  let timedOut: Monitor;
+  try {
+    timedOut = await check('HTTP', `http://127.0.0.1:${hangPort}/`, { timeoutSec: 1 });
+    assert.equal(timedOut.lastProbeStatus, 'TIMEOUT');
+    assert.equal(timedOut.lastStatusCode, null);
+    assert.match(timedOut.history[0].detail, /TIMEOUT/);
+  } finally { hang.closeAllConnections(); hang.close(); }
+
+  const refused = await check('HTTP', 'http://127.0.0.1:59991/', { timeoutSec: 2 });
+  assert.equal(refused.lastProbeStatus, 'CONNECTION_ERROR');
+  assert.equal(refused.lastStatusCode, null);
+  assert.match(refused.history[0].detail, /CONNECTION ERROR/);
+
+  const dns = await check('DNS', 'localhost', { timeoutSec: 3 });
+  assert.equal(dns.lastProbeStatus, 'UP');
+  assert.match(dns.history[0].detail, /Resolved localhost/);
+  const dnsFail = await check('DNS', 'does-not-exist.invalid', { timeoutSec: 3 });
+  assert.equal(dnsFail.lastProbeStatus, 'DNS_ERROR');
+  assert.match(dnsFail.history[0].detail, /DNS/);
+  const dnsTimeout = await dnsProbe('example.com', 1000, ['192.0.2.1']);
+  assert.equal(dnsTimeout.probeStatus, 'TIMEOUT');
+  assert.ok(dnsTimeout.latencyMs >= 0);
+  assert.match(dnsTimeout.detail, /DNS/);
+
+  const tcpSrv = http.createServer((_q, res) => res.end('tcp'));
+  await new Promise<void>(r => tcpSrv.listen(0, '127.0.0.1', () => r()));
+  const port = (tcpSrv.address() as { port: number }).port;
+  let tcpUp: Monitor;
+  try {
+    tcpUp = await check('TCP', `127.0.0.1:${port}`);
+    assert.equal(tcpUp.lastProbeStatus, 'UP');
+    assert.match(tcpUp.history[0].detail, /open/);
+  } finally { tcpSrv.close(); }
+  const tcpRefused = await check('TCP', '127.0.0.1:1', { timeoutSec: 2 });
+  assert.equal(tcpRefused.lastProbeStatus, 'CONNECTION_ERROR');
+  const tcpDns = await check('TCP', 'does-not-exist.invalid:9', { timeoutSec: 2 });
+  assert.equal(tcpDns.lastProbeStatus, 'DNS_ERROR');
+  const tcpTimeout = await check('TCP', '192.0.2.1:81', { timeoutSec: 1 });
+  assert.equal(tcpTimeout.lastProbeStatus, 'TIMEOUT');
+
+  const fresh = await check('CRON_HEARTBEAT', 'nightly-job', { intervalSec: 60, timeoutSec: 10, lastPingAt: new Date().toISOString() });
+  assert.equal(fresh.lastProbeStatus, 'UP');
+  assert.match(fresh.history[0].detail, /Last ping/);
+  const late = await check('CRON_HEARTBEAT', 'nightly-job', { intervalSec: 10, timeoutSec: 30, lastPingAt: new Date(Date.now() - 12_000).toISOString() });
+  assert.equal(late.lastProbeStatus, 'DEGRADED');
+  assert.match(late.history[0].detail, /late/);
+  const missed = await check('CRON_HEARTBEAT', 'nightly-job', { intervalSec: 10, timeoutSec: 5, lastPingAt: new Date(Date.now() - 30_000).toISOString() });
+  assert.equal(missed.lastProbeStatus, 'DOWN');
+  assert.match(missed.history[0].detail, /Last ping/);
+
+  const samples: Monitor[] = [up, down, degraded!, timedOut!, refused, dns, dnsFail, tcpUp!, tcpRefused, tcpDns, tcpTimeout, fresh, late, missed];
+  let openssl = 'openssl';
+  let opensslOk = true;
+  try { execFileSync(openssl, ['version'], { stdio: 'ignore' }); } catch {
+    const gitOpenssl = 'C:/Program Files/Git/usr/bin/openssl.exe';
+    if (fs.existsSync(gitOpenssl)) openssl = gitOpenssl; else { opensslOk = false; t.diagnostic('openssl not available; TLS_ERROR sample skipped'); }
+  }
+  if (opensslOk) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scholario-tls-'));
+    execFileSync(openssl, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', path.join(dir, 'k.pem'), '-out', path.join(dir, 'c.pem'), '-days', '2', '-subj', '/CN=other.example'], { stdio: 'ignore' });
+    const tlsSrv = https.createServer({ key: fs.readFileSync(path.join(dir, 'k.pem')), cert: fs.readFileSync(path.join(dir, 'c.pem')) }, (_q, r) => r.end('tls'));
+    await new Promise<void>(r => tlsSrv.listen(0, '127.0.0.1', () => r()));
+    const tlsPort = (tlsSrv.address() as { port: number }).port;
+    try {
+      const tls = await check('SSL', `127.0.0.1:${tlsPort}`, { timeoutSec: 3 });
+      assert.equal(tls.lastProbeStatus, 'TLS_ERROR');
+      assert.match(tls.history[0].detail, /NOT trusted|Certificate/);
+      const httpsFail = await check('HTTPS', `https://127.0.0.1:${tlsPort}/`, { timeoutSec: 3 });
+      assert.equal(httpsFail.lastProbeStatus, 'TLS_ERROR');
+      assert.equal(normalizeUrl(`127.0.0.1:${tlsPort}/`, 'https'), `https://127.0.0.1:${tlsPort}/`);
+      const httpsBare = await check('HTTPS', `127.0.0.1:${tlsPort}/`, { timeoutSec: 3 });
+      assert.equal(httpsBare.lastProbeStatus, 'TLS_ERROR');
+      samples.push(tls, httpsFail, httpsBare);
+    } finally {
+      tlsSrv.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const worker = await check('WORKER_HEARTBEAT', 'queue-worker', { intervalSec: 60, timeoutSec: 10, lastPingAt: new Date().toISOString() });
+  assert.equal(worker.lastProbeStatus, 'UP');
+  samples.push(worker);
+
+  await flushChecks();
+  const stored = await readChecks(Date.now() - 120_000, samples.map(m => m.id));
+  for (const m of samples) {
+    const row = stored.find(r => r.monitorId === m.id);
+    assert.ok(row, `stored result for ${m.type} ${m.target}`);
+    assert.equal(row!.probeStatus, m.lastProbeStatus);
+    assert.equal(row!.statusCode, m.lastStatusCode ?? null);
+    assert.equal(typeof row!.latencyMs, 'number');
+    assert.ok(row!.latencyMs >= 0);
+    assert.equal(row!.reason, m.history[0].detail);
+    assert.ok(row!.reason.length > 0);
+  }
+});
+
 test('probe classification: DNS failure and timeout are not "down/up" guesses', async () => {
   const dnsFail = await httpProbe('https://does-not-exist.invalid/', { timeoutMs: 3000 });
   assert.equal(dnsFail.probeStatus, 'DNS_ERROR');
@@ -276,7 +421,7 @@ test('DR readiness: UNKNOWN without evidence; never counts UNKNOWN / NOT_CONFIGU
   db.applications.push(app);
   db.monitors.push(mkMonitor(app.id, 'DR', 'HTTPS', 'https://dr.example.invalid/', 'app-url'));
   const r = readiness(app);
-  assert.equal(r.total, 13);
+  assert.equal(r.total, 11, 'no load balancer: the 2 Cloudflare pool / origin checks do not apply');
   assert.equal(r.passed, 0);
   assert.equal(r.overall, 'UNKNOWN');
   assert.ok(r.checks.filter(c => c.group === 'core').every(c => c.status === 'UNKNOWN' || c.status === 'NOT_CONFIGURED'));

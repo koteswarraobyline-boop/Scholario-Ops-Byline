@@ -11,7 +11,9 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import dotenv from 'dotenv';
+import { pinTestDatabaseUrl, assertConnectedToTestDatabase, dropVerifiedTestSchema } from './helpers/test-db-guard.ts';
 
+pinTestDatabaseUrl();
 dotenv.config({ quiet: true });
 process.env.DB_SCHEMA = `ops_lbtest_${process.pid}`;
 process.env.CLOUDFLARE_API_TOKEN = 'lb-test-fake-token';
@@ -53,7 +55,10 @@ const { readiness } = await import('../server/readiness.ts');
 const { startEngine } = await import('../server/engine.ts');
 
 let appId = '';
+let verified = false;
 before(async () => {
+  await assertConnectedToTestDatabase({ query: sql => query(sql) });
+  verified = true;
   await initStore();
   startEngine();
   const mk = (env: 'PRD' | 'DR', ip: string) => ({
@@ -76,7 +81,7 @@ before(async () => {
 });
 
 after(async () => {
-  await query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+  await dropVerifiedTestSchema(verified, () => query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}));
   await closePool();
   fs.rmSync(process.env.DATA_DIR!, { recursive: true, force: true });
   setTimeout(() => process.exit(0), 100).unref();

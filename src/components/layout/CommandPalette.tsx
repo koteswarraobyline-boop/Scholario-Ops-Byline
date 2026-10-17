@@ -30,6 +30,7 @@ import {
   Settings,
   Network,
   Loader2,
+  Gauge,
 } from 'lucide-react';
 
 export type PaletteCategory =
@@ -69,15 +70,16 @@ const ROUTES: Array<{ tab: string; title: string; subtitle: string; icon: Comman
   { tab: 'infrastructure', title: 'Infrastructure', subtitle: 'Registered VPS servers and agent telemetry', icon: Server, keywords: 'infrastructure servers vps nodes cpu ram disk telemetry' },
   { tab: 'monitors', title: 'Monitors', subtitle: 'HTTP/TCP/DNS/SSL and heartbeat monitors', icon: Radio, keywords: 'monitors probes checks uptime' },
   { tab: 'incidents', title: 'Incidents', subtitle: 'Open and resolved incidents', icon: AlertTriangle, keywords: 'incidents tickets triage acknowledge resolve' },
-  { tab: 'resilience', title: 'DR Readiness', subtitle: 'Disaster recovery readiness and failover', icon: ShieldCheck, keywords: 'resilience dr disaster recovery readiness failover' },
+  { tab: 'resilience', title: 'PRD / DR Readiness', subtitle: 'Disaster recovery readiness and traffic failover', icon: ShieldCheck, keywords: 'resilience dr disaster recovery readiness failover' },
   { tab: 'backups', title: 'Backups', subtitle: 'Backup records and freshness', icon: Database, keywords: 'backups restore snapshots' },
   { tab: 'dependencies', title: 'Dependencies', subtitle: 'Application dependency map', icon: Network, keywords: 'dependencies map topology' },
-  { tab: 'hostinger', title: 'Hostinger', subtitle: 'Hostinger VPS inventory from the provider API', icon: Cpu, keywords: 'hostinger provider vps vms' },
+  { tab: 'hostinger', title: 'Hostinger', subtitle: 'VPS inventory by provider account', icon: Cpu, keywords: 'hostinger provider vps vms account connection' },
   { tab: 'cloudflare', title: 'Cloudflare', subtitle: 'Zones, DNS records and DNS failover', icon: Cloud, keywords: 'cloudflare dns zones ssl edge' },
   { tab: 'deployments', title: 'Deployments', subtitle: 'Deployment history', icon: GitBranch, keywords: 'deployments releases versions' },
   { tab: 'runbooks', title: 'Runbooks', subtitle: 'Operational procedures', icon: Terminal, keywords: 'runbooks procedures sop' },
   { tab: 'maintenance', title: 'Maintenance', subtitle: 'Maintenance windows', icon: Calendar, keywords: 'maintenance windows schedule' },
-  { tab: 'communications', title: 'Communications', subtitle: 'Notification channels and escalation policies', icon: Send, keywords: 'communications notifications channels escalation teams email webhook' },
+  { tab: 'communications', title: 'Notifications', subtitle: 'Notification channels, delivery log and escalation policies', icon: Send, keywords: 'communications notifications channels escalation teams email webhook' },
+  { tab: 'reliability', title: 'Reliability & SLOs', subtitle: 'Error budgets, capacity forecast, flapping checks', icon: Gauge, keywords: 'slo sla error budget burn rate capacity forecast disk full flapping reliability' },
   { tab: 'reports', title: 'Reports', subtitle: 'Daily operations report', icon: FileText, keywords: 'reports daily summary' },
   { tab: 'audit', title: 'Audit Logs', subtitle: 'Record of operator actions', icon: Shield, keywords: 'audit logs history' },
   { tab: 'users', title: 'Users', subtitle: 'Operator accounts and roles', icon: Users, keywords: 'users accounts roles password' },
@@ -212,8 +214,23 @@ export const CommandPalette: React.FC = () => {
         },
       });
 
-      // Failover / failback (super_admin, requires DNS failover configuration)
-      if (canFailover && app.dnsRecordName && app.prdServerId && app.drServerId && app.failoverState !== 'FAILING_OVER') {
+      // Load-Balancer apps: traffic is switched in Cloudflare after the pre-flight review — open that console
+      if (canFailover && app.loadBalancer) {
+        items.push({
+          id: `action-lb-failover-${app.id}`,
+          category: 'ACTIONS',
+          categoryLabel: 'Failover',
+          title: `Review failover for ${app.name} (Cloudflare Load Balancer)`,
+          subtitle: `Pre-flight checks and decision for ${app.loadBalancer.hostname} — the switch itself is made in Cloudflare`,
+          badge: 'PRE-FLIGHT',
+          badgeType: 'action',
+          icon: Cloud,
+          keywords: `failover failback load balancer cloudflare pool ${app.name} ${app.codeName} dr primary prd`,
+          action: () => { setSelectedAppId(app.id); go('resilience'); },
+        });
+      }
+      // DNS failover / failback (super_admin, requires DNS failover configuration; never for Load-Balancer apps)
+      if (canFailover && !app.loadBalancer && app.dnsRecordName && app.prdServerId && app.drServerId && app.failoverState !== 'FAILING_OVER') {
         const target: 'DR' | 'PRIMARY' = isDr ? 'PRIMARY' : 'DR';
         const targetServer = isDr ? prd : dr;
         items.push({

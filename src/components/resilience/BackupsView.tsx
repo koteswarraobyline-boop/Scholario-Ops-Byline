@@ -4,6 +4,7 @@ import { BackupRecord, BackupStatus } from '../../types';
 import { api } from '../../services/api';
 import { Ago, verdictColor } from '../ui/Freshness';
 import { Archive } from 'lucide-react';
+import { OpsBackupPanel } from './OpsBackupPanel';
 
 const validDate = (s?: string | null) => Boolean(s) && !Number.isNaN(Date.parse(s as string));
 const fmtDateTime = (s?: string | null, fallback = '—') => (validDate(s) ? new Date(s as string).toLocaleString() : fallback);
@@ -104,6 +105,7 @@ curl -fsS -X POST "${baseUrl}/api/v1/backups/report" \\
         </div>
       </div>
 
+      <OpsBackupPanel />
       {statusPanel}
 
       {backups.length === 0 ? (

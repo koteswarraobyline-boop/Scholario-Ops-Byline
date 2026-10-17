@@ -10,7 +10,7 @@ interface CfEnvelope<T> {
   success: boolean;
   errors: Array<{ code: number; message: string }>;
   result: T;
-  result_info?: { page: number; total_pages: number };
+  result_info?: { page: number; total_pages: number; total_count?: number };
 }
 
 export class CloudflareError extends Error {
@@ -56,6 +56,7 @@ async function cfAll<T>(path: string, perPage: number, maxPages: number): Promis
     const res = await cf<T[]>(`${path}${sep}per_page=${perPage}&page=${page}`);
     out.push(...res.result);
     if (!res.result_info || page >= res.result_info.total_pages) break;
+    if (page === maxPages) log.warn('cloudflare', `${path}: only the first ${maxPages * perPage} of ${res.result_info.total_count ?? '?'} items were read (page limit)`);
   }
   return out;
 }
@@ -85,6 +86,7 @@ async function wafEvents24h(zoneId: string): Promise<number | null> {
   }`;
   const resp = await fetch(`${API}/graphql`, {
     method: 'POST',
+    signal: AbortSignal.timeout(15_000),
     headers: { Authorization: `Bearer ${config.cloudflareApiToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, variables: { zone: zoneId, since: since.toISOString(), until: now.toISOString() } }),
   });
@@ -153,14 +155,17 @@ function buildZone(raw: RawZone, records: RawRecord[], ssl: { mode: string | nul
   };
 }
 
+let syncAgain = false;
 export async function syncCloudflare(): Promise<void> {
-  if (!isCloudflareConfigured() || cfState.syncing) return;
+  if (!isCloudflareConfigured()) return;
+  // A sync requested while one runs (e.g. right after a DNS switch) runs again afterwards — never dropped
+  if (cfState.syncing) { syncAgain = true; return; }
   cfState.syncing = true;
   try {
-    const zones = await cfAll<RawZone>('/zones', 50, 10);
+    const zones = await cfAll<RawZone>('/zones', 50, 20);
     const built: CloudflareZone[] = [];
     for (const z of zones) {
-      const records = await cfAll<RawRecord>(`/zones/${z.id}/dns_records`, 100, 5);
+      const records = await cfAll<RawRecord>(`/zones/${z.id}/dns_records`, 100, 50);
       cfState.rawRecords.set(z.id, records);
       const [sslSetting, tlsSetting, packs, waf] = await Promise.all([
         optional(() => cf<{ value: string }>(`/zones/${z.id}/settings/ssl`)),
@@ -187,6 +192,7 @@ export async function syncCloudflare(): Promise<void> {
     throw err;
   } finally {
     cfState.syncing = false;
+    if (syncAgain) { syncAgain = false; void syncCloudflare().catch(() => {}); }
   }
 }
 
@@ -216,13 +222,32 @@ async function findZoneId(domain: string): Promise<string> {
 export async function switchDnsRecord(zoneDomain: string, recordName: string, targetIp: string): Promise<Array<{ id: string; from: string; to: string }>> {
   const zoneId = await findZoneId(zoneDomain);
   const type = targetIp.includes(':') ? 'AAAA' : 'A';
+  const other = type === 'A' ? 'AAAA' : 'A';
   const res = await cf<RawRecord[]>(`/zones/${zoneId}/dns_records?type=${type}&name=${encodeURIComponent(recordName)}`);
   if (res.result.length === 0) throw new CloudflareError(`DNS ${type} record ${recordName} not found in zone ${zoneDomain}`);
+  // Dual-stack: switching only one family would leave the other half of the clients on the old server
+  const otherFamily = await cf<RawRecord[]>(`/zones/${zoneId}/dns_records?type=${other}&name=${encodeURIComponent(recordName)}`);
+  if (otherFamily.result.length) {
+    throw new CloudflareError(`${recordName} also has ${other} record(s) (${otherFamily.result.map(r => r.content).join(', ')}) — Scholario Ops can only switch the ${type} record to ${targetIp}; remove or switch the ${other} record in Cloudflare first`);
+  }
   const changed: Array<{ id: string; from: string; to: string }> = [];
-  for (const rec of res.result) {
-    if (rec.content === targetIp) continue;
-    await cf<RawRecord>(`/zones/${zoneId}/dns_records/${rec.id}`, { method: 'PATCH', body: JSON.stringify({ content: targetIp }) });
-    changed.push({ id: rec.id, from: rec.content, to: targetIp });
+  try {
+    for (const rec of res.result) {
+      if (rec.content === targetIp) continue;
+      await cf<RawRecord>(`/zones/${zoneId}/dns_records/${rec.id}`, { method: 'PATCH', body: JSON.stringify({ content: targetIp }) });
+      changed.push({ id: rec.id, from: rec.content, to: targetIp });
+    }
+  } catch (err) {
+    // Partial switch: put back what was already changed, so DNS and the reported state agree
+    const restoreFailed: string[] = [];
+    for (const c of changed) {
+      try { await cf<RawRecord>(`/zones/${zoneId}/dns_records/${c.id}`, { method: 'PATCH', body: JSON.stringify({ content: c.from }) }); }
+      catch { restoreFailed.push(`${c.id} (still ${c.to})`); }
+    }
+    void syncCloudflare().catch(() => {});
+    throw new CloudflareError(`${(err as Error).message}${changed.length ? (restoreFailed.length
+      ? ` — DNS IS INCONSISTENT: could not restore ${restoreFailed.join(', ')}; check ${recordName} in Cloudflare now`
+      : ` — the ${changed.length} record(s) already switched were restored to the previous address`) : ''}`);
   }
   void syncCloudflare().catch(() => {});
   return changed;

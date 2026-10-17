@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
+import { IncidentMinutes } from '../ui/IncidentMinutes';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
+import { deadManDot, deadManLabel } from '../ui/deadman';
 import { useAuth } from '../../context/AuthContext';
 import { WsStatusBadge } from '../ui/WsStatusBadge';
 import { Toaster } from '../ui/Toaster';
@@ -30,9 +32,13 @@ import {
   Sun,
   Moon,
   LogOut,
-  Settings
+  Settings,
+  Users,
+  Gauge
 } from 'lucide-react';
 import { CommandPalette } from './CommandPalette';
+import { CriticalAlerts } from './CriticalAlerts';
+import { useUnreadNotifications } from '../communications/notificationHooks';
 import { CreateMonitorModal } from '../monitors/CreateMonitorModal';
 
 interface ShellProps {
@@ -58,12 +64,10 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     activeTab, 
     setActiveTab, 
     systemSummary, 
-    lastUpdatedSecondsAgo, 
     setIsCommandPaletteOpen,
     incidents,
     setSelectedIncidentId,
     deadMan,
-    runAllProbes,
     apiHealth,
     triggerHealthCheck,
     theme,
@@ -77,7 +81,9 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  const { user, logout } = useAuth();
+  const { user, logout, hasRole } = useAuth();
+  // Unread notification deliveries (operators+, same permission as the delivery log)
+  const unreadNotifications = useUnreadNotifications(hasRole('operator'));
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -90,14 +96,14 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  const activeCriticalIncident = incidents.find(i => (i.severity === 'CRITICAL' || i.severity === 'EMERGENCY') && (i.status === 'OPEN' || i.status === 'INVESTIGATING' || i.status === 'MITIGATING' || i.status === 'ACKNOWLEDGED'));
+  const activeCriticalIncident = incidents.find(i => (i.severity === 'CRITICAL' || i.severity === 'EMERGENCY') && i.status !== 'RESOLVED' && i.status !== 'CLOSED');
 
   const handleManualRefresh = async () => {
     if (isRefreshing) return;
     setIsRefreshing(true);
     try {
-      await Promise.all([runAllProbes(), triggerHealthCheck()]);
-      await refreshAll();
+      // Reload data and API health only — running every probe is "Probe all" (operators) on the monitoring pages
+      await Promise.all([refreshAll(), triggerHealthCheck()]);
     } finally {
       setIsRefreshing(false);
     }
@@ -137,13 +143,13 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       title: 'Resilience',
       items: [
         { id: 'resilience', label: 'PRD / DR Readiness', icon: Cloud, badge: `${systemSummary.drReadinessCount}/${systemSummary.totalApps}` },
-        { id: 'backups', label: 'Backups', icon: Database, badge: systemSummary.backupsCurrentCount > 0 ? `${systemSummary.backupsCurrentCount}` : undefined }
+        { id: 'backups', label: 'Backups', icon: Database, badge: systemSummary.backupApps?.total ? `${systemSummary.backupApps.healthy}/${systemSummary.backupApps.total}` : systemSummary.backupsCurrentCount > 0 ? `${systemSummary.backupsCurrentCount}` : undefined }
       ]
     },
     {
       title: 'Providers',
       items: [
-        { id: 'hostinger', label: 'Hostinger VPS', icon: Server },
+        { id: 'hostinger', label: 'Provider VPS', icon: Server },
         { id: 'cloudflare', label: 'Cloudflare Edge', icon: ShieldCheck, badge: !integrations?.cloudflare.configured ? 'Off' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'Degraded' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'Active' : 'Unknown', badgeColor: !integrations?.cloudflare.configured ? 'text-slate-500' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'text-amber-400' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'text-emerald-400' : 'text-slate-400' }
       ]
     },
@@ -156,14 +162,15 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       ]
     },
     {
-      title: 'Communications',
+      title: 'Alerting',
       items: [
-        { id: 'communications', label: 'Notifications', icon: Bell }
+        { id: 'communications', label: 'Notifications', icon: Bell, badge: unreadNotifications?.unread ? `${unreadNotifications.unread > 99 ? '99+' : unreadNotifications.unread}` : undefined, badgeColor: unreadNotifications?.unreadFailed ? 'text-rose-400 font-semibold' : 'text-blue-400 font-semibold' }
       ]
     },
     {
       title: 'Analytics & Compliance',
       items: [
+        { id: 'reliability', label: 'Reliability & SLOs', icon: Gauge },
         { id: 'reports', label: 'Reports', icon: FileText },
         { id: 'audit', label: 'Audit Logs', icon: Shield }
       ]
@@ -171,7 +178,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     {
       title: 'Admin',
       items: [
-        { id: 'users', label: 'Users & Account', icon: Activity }
+        { id: 'users', label: 'Users & Account', icon: Users }
       ]
     }
   ];
@@ -273,17 +280,17 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
             <div className="space-y-1.5 font-mono">
               <div className="flex items-center justify-between text-slate-300">
                 <span className="text-[9px] uppercase tracking-wider">Dead-Man Heartbeat</span>
-                <span className={`w-1.5 h-1.5 rounded-full ${deadMan.status === 'HEALTHY' ? 'bg-emerald-400 animate-pulse' : deadMan.status === 'NOT_CONFIGURED' ? 'bg-slate-500' : 'bg-rose-400 animate-ping'}`} />
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${deadManDot(deadMan.status)} ${deadMan.status === 'HEALTHY' ? 'animate-pulse' : deadMan.status === 'FAILING' ? 'animate-ping' : ''}`} aria-label={deadManLabel(deadMan.status)} />
               </div>
-              <div className="text-slate-400 text-[10px] truncate" title={deadMan.targetControlPlane || 'Set DEADMAN_HEARTBEAT_URL to enable'}>
-                {deadMan.status === 'NOT_CONFIGURED'
-                  ? 'Not configured'
-                  : `${deadMan.nodeLocation} · every ${deadMan.intervalSec}s${deadMan.status === 'CRITICAL_SILENCE' ? ' · FAILING' : ''}`}
+              <div className="text-slate-400 text-[10px] truncate" title={deadMan.servers.map(s => `${s.environment} ${s.hostname}: ${s.state}`).join(' · ') || 'No servers registered'}>
+                {deadMan.servers.length === 0
+                  ? 'No servers registered'
+                  : `${deadManLabel(deadMan.status)} · ${deadMan.servers.map(s => s.environment).join(' + ')}`}
               </div>
             </div>
           ) : (
             <div className="flex justify-center">
-              <span className={`w-1.5 h-1.5 rounded-full ${deadMan.status === 'HEALTHY' ? 'bg-emerald-400' : deadMan.status === 'NOT_CONFIGURED' ? 'bg-slate-500' : 'bg-rose-400'}`} />
+              <span className={`w-1.5 h-1.5 rounded-full ${deadManDot(deadMan.status)}`} aria-label={`Dead-man heartbeat: ${deadManLabel(deadMan.status)}`} />
             </div>
           )}
         </div>
@@ -295,26 +302,27 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       }`}>
         
         {/* TOP BAR */}
-        <header className={`h-12 px-5 flex items-center justify-between shrink-0 z-20 border-b ${
+        <header className={`h-12 px-4 lg:px-5 flex items-center justify-between gap-3 min-w-0 shrink-0 z-20 border-b ${
           isDark 
             ? 'bg-[#0B0F17] border-[#1B2436] text-slate-100' 
             : 'bg-white border-[#E2E8F0] text-slate-900 shadow-xs'
         }`}>
           
           {/* Left Zone: Environment Tag & Context */}
-          <div className="flex items-center gap-3">
-            <span className="text-xs font-bold tracking-tight font-mono">
+          <div className="flex items-center gap-3 min-w-0 shrink-0">
+            <span className="text-xs font-bold tracking-tight font-mono whitespace-nowrap">
               SCHOLARIO IT OPS
             </span>
-            <span className={`hidden sm:inline ${isDark ? 'text-slate-600' : 'text-slate-400'}`}>/</span>
-            <div className={`flex items-center gap-1.5 text-[11px] font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            {/* Counts only where there is room (they are also on the Overview); never wrap out of the bar */}
+            <span className={`hidden 2xl:inline ${isDark ? 'text-slate-600' : 'text-slate-400'}`}>/</span>
+            <div className={`hidden 2xl:flex items-center gap-1.5 text-[11px] font-mono whitespace-nowrap ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
               <span className={`w-1.5 h-1.5 rounded-full ${systemSummary.totalServers === 0 ? 'bg-slate-500' : systemSummary.healthyServers === systemSummary.totalServers ? 'bg-emerald-500' : 'bg-amber-500'}`} />
               <span>{systemSummary.totalServers} SERVERS · {systemSummary.totalApps} APPS · {systemSummary.totalMonitors} MONITORS</span>
             </div>
           </div>
 
           {/* Center Zone: Search bar */}
-          <div className="flex-1 max-w-sm mx-4">
+          <div className="flex-1 min-w-0 max-w-sm">
             <button
               onClick={() => setIsCommandPaletteOpen(true)}
               className={`w-full flex items-center justify-between px-2.5 py-1 rounded text-xs transition-colors group cursor-pointer border ${
@@ -323,11 +331,11 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                   : 'bg-[#F1F5F9] hover:bg-[#E2E8F0] border-[#CBD5E1] text-slate-600'
               }`}
             >
-              <div className="flex items-center gap-2">
-                <Search className="w-3.5 h-3.5 text-slate-400 group-hover:text-blue-500" />
+              <div className="flex items-center gap-2 min-w-0">
+                <Search className="w-3.5 h-3.5 shrink-0 text-slate-400 group-hover:text-blue-500" />
                 <span className="truncate text-[11px]">Search routes, apps, VPS, incidents, actions...</span>
               </div>
-              <div className="hidden sm:flex items-center gap-1 font-mono text-[9px]">
+              <div className="hidden xl:flex items-center gap-1 font-mono text-[9px] shrink-0 ml-2">
                 <kbd className={`px-1 py-0.5 border rounded ${
                   isDark ? 'bg-[#0B0F17] border-slate-700 text-slate-400' : 'bg-white border-slate-300 text-slate-500 shadow-2xs'
                 }`}>Ctrl</kbd>
@@ -340,7 +348,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
           </div>
 
           {/* Right Zone: Setup, Theme Toggle, Health & Profile */}
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2 lg:gap-2.5 shrink-0">
             {/* Setup quick action */}
             <button
               onClick={() => navigate('/setup')}
@@ -356,6 +364,9 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
               <Zap className="w-3.5 h-3.5 text-emerald-400" />
               <span className="hidden md:inline">SETUP</span>
             </button>
+
+            {/* Sound + browser notification for new critical incidents (per browser) */}
+            <CriticalAlerts isDark={isDark} />
 
             {/* Theme Toggle Button (Light / Dark) */}
             <button
@@ -398,7 +409,11 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                 systemSummary.overallHealth === 'CRITICAL' ? 'bg-rose-500 animate-pulse' :
                 systemSummary.overallHealth === 'WARNING' ? 'bg-amber-500' : systemSummary.overallHealth === 'UNKNOWN' ? 'bg-slate-500' : 'bg-emerald-500'
               }`} />
-              <span className="text-[11px] font-semibold">
+              <span className="text-[11px] font-semibold whitespace-nowrap xl:hidden">
+                {systemSummary.criticalIncidents > 0 ? `${systemSummary.criticalIncidents} CRITICAL` : systemSummary.openIncidents > 0 ? `${systemSummary.openIncidents} OPEN`
+                  : systemSummary.overallHealth === 'OPERATIONAL' ? 'OK' : systemSummary.overallHealth === 'WARNING' ? 'DEGRADED' : systemSummary.overallHealth === 'CRITICAL' ? 'CRITICAL' : 'UNKNOWN'}
+              </span>
+              <span className="text-[11px] font-semibold whitespace-nowrap hidden xl:inline">
                 {systemSummary.criticalIncidents > 0 
                   ? `${systemSummary.criticalIncidents} CRITICAL INCIDENT` 
                   : systemSummary.openIncidents > 0 
@@ -410,7 +425,6 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
             </button>
 
 
-            {/* Poll Probes */}
             <button
               onClick={handleManualRefresh}
               disabled={isRefreshing}
@@ -419,9 +433,10 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                   ? 'text-slate-400 hover:text-slate-100 hover:bg-[#162033]' 
                   : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
               } ${isRefreshing ? 'animate-spin text-blue-500' : ''}`}
-              title="Poll telemetry & probe all monitors"
+              title="Reload dashboard data and API status (does not run monitor checks — use Probe all on Monitors)"
+              aria-label={isRefreshing ? 'Reloading dashboard data' : 'Reload dashboard data'}
             >
-              <RefreshCw className="w-3.5 h-3.5" />
+              <RefreshCw className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
 
             {/* WebSocket status */}
@@ -429,7 +444,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
             {/* Operator avatar + logout */}
             <div className={`flex items-center gap-2 pl-2 border-l ${isDark ? 'border-slate-800' : 'border-slate-300'}`}>
-              <span className={`font-mono text-[11px] font-medium ${isDark ? 'text-slate-300' : 'text-slate-800'}`}>
+              <span className={`hidden lg:inline font-mono text-[11px] font-medium whitespace-nowrap truncate max-w-[9rem] xl:max-w-[12rem] ${isDark ? 'text-slate-300' : 'text-slate-800'}`} title={displayName}>
                 {displayName}
               </span>
               {user?.isOnCall && (
@@ -467,23 +482,23 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
         {/* ACTIVE CRITICAL INCIDENT BANNER - Crisp Industrial Severity Strip */}
         {activeCriticalIncident && (
-          <div className={`px-5 py-2 flex items-center justify-between text-xs shrink-0 font-mono animate-in fade-in border-b ${
+          <div className={`px-5 py-2 flex items-center justify-between gap-3 text-xs shrink-0 font-mono animate-in fade-in border-b ${
             isDark 
               ? 'bg-[#170B0E] border-rose-900/60 text-slate-200' 
               : 'bg-rose-50 border-rose-200 text-rose-950'
           }`}>
-            <div className="flex items-center gap-3">
-              <span className={`flex items-center gap-1.5 font-bold text-[11px] ${
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <span className={`flex items-center gap-1.5 font-bold text-[11px] whitespace-nowrap shrink-0 ${
                 isDark ? 'text-rose-400' : 'text-rose-700'
               }`}>
                 <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
                 CRITICAL [{activeCriticalIncident.id}]
               </span>
-              <span className={`text-[11px] font-sans ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+              <span title={activeCriticalIncident.title} className={`text-[11px] font-sans min-w-0 truncate ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
                 {activeCriticalIncident.title}
               </span>
-              <span className={`text-[10px] hidden md:inline ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
-                Opened {activeCriticalIncident.durationMinutes}m ago · Owner: {(activeCriticalIncident.owner ?? 'Unassigned').split('(')[0]}
+              <span className={`text-[10px] hidden md:inline whitespace-nowrap shrink-0 ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
+                Opened <IncidentMinutes incident={activeCriticalIncident} />m ago · Owner: {(activeCriticalIncident.owner ?? 'Unassigned').split('(')[0]}
               </span>
             </div>
             <button
@@ -491,7 +506,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                 setSelectedIncidentId(activeCriticalIncident.id);
                 navigate('/incidents');
               }}
-              className={`flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-mono transition-colors border cursor-pointer ${
+              className={`flex items-center gap-1 shrink-0 px-2.5 py-0.5 rounded text-[11px] font-mono transition-colors border cursor-pointer ${
                 isDark 
                   ? 'bg-rose-950 hover:bg-rose-900 border-rose-800 text-rose-200' 
                   : 'bg-rose-600 hover:bg-rose-700 border-rose-700 text-white shadow-xs'
@@ -504,10 +519,12 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
         )}
 
         {/* SCROLLABLE MAIN CONTENT AREA */}
-        <main className={`flex-1 overflow-y-auto p-5 transition-colors ${
+        {/* Content container: clear gutter to the sidebar and the window edge; children can never widen the page */}
+        <main className={`flex-1 min-w-0 overflow-y-auto overflow-x-hidden px-4 py-4 sm:px-5 lg:px-6 xl:px-7 transition-colors ${
           isDark ? 'bg-[#0E131F] text-slate-100' : 'bg-[#F6F8FC] text-slate-900'
         }`}>
-          <div className="max-w-7xl mx-auto space-y-5">
+          {/* Full width of the content area (no centred max-width column, so no large empty side margins) */}
+          <div className="w-full min-w-0 space-y-5">
             {isLoading ? (
               <div className={`rounded-lg border p-10 text-center text-xs font-mono animate-pulse ${isDark ? 'border-[#1E293B] text-slate-400' : 'border-slate-200 text-slate-500'}`}>
                 Loading live data from the Scholario Ops API…

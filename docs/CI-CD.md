@@ -86,7 +86,7 @@ The release manager runs as root because the `scholario-ops` PM2 process belongs
 3. Extract into `/var/www/scholario-ops-releases/<UTC timestamp>-<sha7>/`. Verify `REVISION` equals `<sha>` and that the required files exist.
 4. `npm ci --omit=dev --ignore-scripts` and `node --check dist-server/server.js`.
 5. Report any **new database migrations** compared with the live release.
-6. Pre-deploy database backup: `deploy/backup-db.sh` writes to `/var/www/scholario-ops/backups/`. A failed backup stops the deploy.
+6. Pre-deploy database backup: `deploy/backup-db.sh` writes to `/var/www/scholario-ops/backups/` (encrypted and copied off the server when configured, see DEPLOYMENT.md §13). A failed backup stops the deploy; a failed off-server copy is reported on the Backups page but does not. After updating `deploy/backup-db.sh`, re-install the root-owned copy: `sudo install -m 0755 -o root -g root deploy/backup-db.sh /usr/local/sbin/scholario-ops-backup-db`.
 7. *Up to this point the live release is untouched. Any failure exits with production unchanged.*
 8. Atomically switch `current` to the new release, then run `pm2 restart scholario-ops --update-env` and check that the PID changed.
 9. Health checks (§7). On success: mark the release OK, run `pm2 save`, prune old releases, write the audit log.

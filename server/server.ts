@@ -17,14 +17,17 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { config, isCloudflareConfigured, isHostingerConfigured, DATA_DIR } from './config.ts';
-import { initStore, flush, flushMetrics } from './store.ts';
-import { closePool, query, SCHEMA } from './db.ts';
+import { initStore, flush, flushMetrics, StoreDataError } from './store.ts';
+import { closePool, query, SCHEMA, MigrationError } from './db.ts';
 import { startHistory, flushChecks } from './history.ts';
+import { startDeliveryLog, flushDeliveries } from './deliveries.ts';
+import { startLeaderElection, releaseLeadership } from './leader.ts';
+import { restoreNotificationMemory, flushNotificationGroups, replayPendingGroupSummaries } from './notify.ts';
 import { bootstrapAdmin } from './auth.ts';
 import { buildRouter } from './routes.ts';
-import { startEngine } from './engine.ts';
+import { startEngine, stopEngine, engineLiveness } from './engine.ts';
 import { syncCloudflare } from './cloudflare.ts';
-import { syncHostinger } from './hostinger.ts';
+import { syncEnabledConnections } from './providers/sync.ts';
 import { syncLoadBalancers } from './loadbalancer.ts';
 import { closeAllSseClients } from './events.ts';
 import { log } from './logger.ts';
@@ -47,12 +50,11 @@ function checkProductionConfig() {
   const errors: string[] = [];
   const warnings: string[] = [];
   if (!config.databaseUrl) errors.push('DATABASE_URL is not set');
-  if (!config.publicUrl) warnings.push('PUBLIC_URL is not set — agent install commands and notification links will use the request host');
-  else if (!config.publicUrl.startsWith('https://')) warnings.push(`PUBLIC_URL (${config.publicUrl}) is not https:// — agents would send telemetry unencrypted`);
+  if (!config.publicUrl) warnings.push('PUBLIC_URL is not set — notification links use the request host, and the agent installer is withheld unless that host is https and not this computer');
+  else if (!config.publicUrl.startsWith('https://')) warnings.push('PUBLIC_URL is not https:// — the agent installer will refuse it');
   if ((process.env.JWT_SECRET ?? '').trim().length < 32) warnings.push('JWT_SECRET is not set (or < 32 chars) — using a generated secret stored in DATA_DIR; set one in .env so sessions survive a DATA_DIR loss');
   if (config.host === '0.0.0.0' || config.host === '::') warnings.push(`HOST=${config.host} exposes Node directly — behind nginx use HOST=127.0.0.1`);
   if (!process.env.CLOUDFLARE_API_TOKEN) warnings.push('CLOUDFLARE_API_TOKEN is not set — Cloudflare pages will show "Not configured"');
-  if (!config.deadManHeartbeatUrl) warnings.push('DEADMAN_HEARTBEAT_URL is not set — nobody is alerted if this Ops server itself goes down');
   for (const w of warnings) log.warn('config', w);
   if (errors.length) {
     for (const e of errors) log.error('config', e);
@@ -91,7 +93,7 @@ function rateLimit(req: express.Request, res: express.Response, next: express.Ne
   next();
 }
 
-async function waitForStore() {
+async function waitForStore(): Promise<boolean> {
   let delay = 2000;
   for (let attempt = 1; !shuttingDown; attempt++) {
     try {
@@ -99,18 +101,37 @@ async function waitForStore() {
       if (migrations.length) log.info('db', `applied migrations: ${migrations.join(', ')}`);
       if (imported) log.info('db', `imported previous JSON data into PostgreSQL: ${imported}`);
       lastStartupError = null;
-      return;
+      return true;
     } catch (err) {
       lastStartupError = (err as Error).message;
+      // The database answered and the transaction was rolled back. Retrying would fail the same way.
+      if (err instanceof MigrationError || err instanceof StoreDataError) {
+        log.error('db', lastStartupError);
+        return false;
+      }
       log.error('db', `PostgreSQL not ready (attempt ${attempt}) — retrying in ${Math.round(delay / 1000)}s`, { error: err as Error });
       await new Promise(r => setTimeout(r, delay));
       delay = Math.min(30_000, delay * 2);
     }
   }
+  return false;
 }
+
+const localUiSafeMode = process.env.LOCAL_UI_SAFE_MODE === 'true';
 
 function startBackgroundWork() {
   startHistory();
+  startDeliveryLog();
+  // One process sends escalations / reminders (advisory lock); duplicate protection survives restarts
+  startLeaderElection(30_000, () => {
+    // Grouped alerts whose summary was still in memory when the process stopped
+    void restoreNotificationMemory()
+      .then(() => replayPendingGroupSummaries())
+      .then(n => { if (n) log.info('notify', `sent ${n} grouped alert summary(ies) still pending after a restart`); })
+      .catch(err => log.error('notify', 'could not send pending grouped alerts', { error: err as Error }));
+  });
+  void restoreNotificationMemory().then(n => { if (n) log.info('notify', `restored duplicate protection for ${n} recent alert(s) from the delivery log`); })
+    .catch(err => log.error('notify', 'could not restore duplicate protection', { error: err as Error }));
   bootstrapAdmin();
   startEngine();
   // Cloudflare Load Balancer pools + pool health (read-only). Runs even without a token so the
@@ -121,16 +142,18 @@ function startBackgroundWork() {
     void syncCloudflare().catch(() => {});
     every('cloudflare', config.cloudflareSyncIntervalSec * 1000, () => syncCloudflare().catch(() => {}));
   }
-  if (isHostingerConfigured()) {
-    void syncHostinger().catch(() => {});
-    every('hostinger', config.hostingerSyncIntervalSec * 1000, () => syncHostinger().catch(() => {}));
-  }
+  void syncEnabledConnections();
+  every('hostinger', config.hostingerSyncIntervalSec * 1000, () => { void syncEnabledConnections(); });
   // Alerts derived from state (agent offline, DB down, replication, backups, DR readiness, SSL expiry)
   every('alerts', 60_000, evaluateAlerts);
 }
 
 async function main() {
   checkProductionConfig();
+  // Names only — the values (which may contain tokens) are never read into logs or used
+  if (config.deprecatedDeadManVars.length) {
+    log.warn('config', `${config.deprecatedDeadManVars.join(', ')} ${config.deprecatedDeadManVars.length === 1 ? 'is' : 'are'} deprecated and ignored — no external watchdog is used; the dead-man heartbeat now covers the monitored servers, applications, services and databases. Remove from .env.`);
+  }
 
   const app = express();
   app.disable('x-powered-by');
@@ -170,11 +193,13 @@ async function main() {
   // Request log: errors, slow requests and changes (query strings are never logged — they can carry tickets)
   app.use((req, res, next) => {
     const start = Date.now();
+    // Read before routing: the /api router strips its mount path from req.path
+    const reqPath = req.path;
     res.on('finish', () => {
       const ms = Date.now() - start;
-      const isApi = req.path.startsWith('/api/');
-      if (!isApi || req.path === '/api/v1/realtime/stream') return;
-      const fields = { method: req.method, path: req.path, status: res.statusCode, ms, ip: req.ip, user: req.user?.email };
+      const isApi = reqPath.startsWith('/api/');
+      if (!isApi || reqPath === '/api/v1/realtime/stream') return;
+      const fields = { method: req.method, path: reqPath, status: res.statusCode, ms, ip: req.ip, user: req.user?.email };
       if (res.statusCode >= 500) log.error('http', 'request failed', fields);
       else if (res.statusCode >= 400 && res.statusCode !== 401) log.warn('http', 'request rejected', fields);
       else if (ms > 3000) log.warn('http', 'slow request', fields);
@@ -200,6 +225,15 @@ async function main() {
       ok = false;
       checks.database = `unavailable: ${(err as Error).message}`;
     }
+    // Process and database up is not enough: the monitor scheduler (1 s) and recompute loop (5 s) must be ticking
+    const eng = engineLiveness();
+    if (storeReady && eng.started) {
+      const stalled = (age: number | null, limitMs: number) => age !== null && age > limitMs;
+      if (stalled(eng.schedulerAgeMs, 30_000) || stalled(eng.recomputeAgeMs, 60_000)) {
+        ok = false;
+        checks.scheduler = `stalled: scheduler ${Math.round((eng.schedulerAgeMs ?? 0) / 1000)}s, recompute ${Math.round((eng.recomputeAgeMs ?? 0) / 1000)}s since last run`;
+      } else checks.scheduler = 'ok';
+    }
     if (shuttingDown) checks.process = 'shutting down';
     res.status(ok ? 200 : 503).json({ status: ok ? 'ready' : 'not_ready', checks, ...(lastStartupError && !storeReady ? { startupError: lastStartupError } : {}), timestamp: new Date().toISOString() });
   });
@@ -212,6 +246,8 @@ async function main() {
   });
 
   app.use('/api', rateLimit);
+  // Agent reports have their own, smaller limit (enforced while reading, not after); everything else 1 MB
+  app.use('/api/v1/agent/ingest', express.json({ limit: '512kb' }));
   app.use(express.json({ limit: '1mb' }));
   app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
     const type = (err as { type?: string }).type;
@@ -248,7 +284,7 @@ async function main() {
 
   // Last-resort error handler: never leak stack traces
   app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    log.error('http', 'unhandled error', { path: req.path, error: err as Error });
+    log.error('http', 'unhandled error', { path: req.originalUrl.split('?')[0], error: err as Error });
     if (!res.headersSent) res.status(500).json({ success: false, message: 'Internal server error' });
   });
 
@@ -276,10 +312,13 @@ async function main() {
     shuttingDown = true;
     log.info('server', `${signal} received — finishing requests, saving data, closing connections`);
     closeAllSseClients();
+    stopEngine();
     server.close();
     server.closeIdleConnections?.();
-    void Promise.allSettled([flush(), flushMetrics(), flushChecks()])
-      .then(() => closePool())
+    const shutdownWork = flushNotificationGroups().then(() => localUiSafeMode
+      ? closePool()
+      : Promise.allSettled([flush(), flushMetrics(), flushChecks(), flushDeliveries(), releaseLeadership()]).then(() => closePool()));
+    void shutdownWork
       .then(() => log.info('server', 'shutdown complete'))
       .finally(() => process.exit(0));
     setTimeout(() => { log.warn('server', 'shutdown timed out — exiting'); process.exit(0); }, 8000).unref();
@@ -289,11 +328,15 @@ async function main() {
   // PM2 sends a "shutdown" message instead of a signal when shutdown_with_message is set (needed on Windows)
   process.on('message', msg => { if (msg === 'shutdown') shutdown('PM2 shutdown message'); });
 
-  await waitForStore();
-  if (shuttingDown) return;
+  const started = await waitForStore();
+  if (shuttingDown || !started) return;
   storeReady = true;
-  startBackgroundWork();
-  log.info('server', 'ready — database loaded, monitoring started');
+  if (localUiSafeMode) {
+    log.info('server', 'ready — UI-safe mode; background monitoring disabled');
+  } else {
+    startBackgroundWork();
+    log.info('server', 'ready — database loaded, monitoring started');
+  }
 }
 
 // A bug in one async path must not take monitoring down silently

@@ -5,9 +5,12 @@ import {
   Copy, RefreshCw, KeyRound, Activity, Layers, Bell, Wrench, X, AlertTriangle,
 } from 'lucide-react';
 import { useOps } from '../../context/OpsContext';
+import { deadManLabel } from '../ui/deadman';
 import { useAuth } from '../../context/AuthContext';
 import { api, AgentInstallInfo, CloudflarePoolOption } from '../../services/api';
 import { Application, VpsServer } from '../../types';
+import { resolveAgentBaseUrl } from '../../lib/agentEndpoint';
+import { DependencyRegisterSection } from './DependencyRegister';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Small shared UI helpers (match the rest of the dashboard's look)
@@ -27,7 +30,7 @@ const useStyles = () => {
     primary: 'bg-blue-600 hover:bg-blue-700 text-white',
     ghost: isDark ? 'bg-[#162033] hover:bg-[#1D2B44] text-slate-200 border border-[#23334E]' : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300',
     danger: isDark ? 'bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-900' : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300',
-    code: `px-1 rounded ${isDark ? 'bg-[#1A2436] text-emerald-300' : 'bg-slate-100 text-emerald-700'}`,
+    code: `px-1 rounded break-all ${isDark ? 'bg-[#1A2436] text-emerald-300' : 'bg-slate-100 text-emerald-700'}`,
   };
 };
 
@@ -92,7 +95,7 @@ const IntegrationsPanel: React.FC = () => {
     try { await fn(); } finally { setBusy(null); }
   };
 
-  const publicUrlMissing = integrations.publicUrl.includes('localhost') || integrations.publicUrl.includes('127.0.0.1');
+  const agentBase = resolveAgentBaseUrl(integrations.publicUrlConfigured ? integrations.publicUrl : '', integrations.publicUrl);
 
   const items = [
     {
@@ -109,7 +112,7 @@ const IntegrationsPanel: React.FC = () => {
       key: 'hostinger', icon: Server, title: 'Hostinger API', ok: integrations.hostinger.configured && !integrations.hostinger.lastError,
       configured: integrations.hostinger.configured,
       detail: !integrations.hostinger.configured
-        ? <>Optional. Set <code className={st.code}>HOSTINGER_API_TOKEN</code> to import plan / CPU / RAM / state.</>
+        ? <>Optional. Set <code className={st.code}>HOSTINGER_API_TOKEN</code> in .env and restart. Extra accounts use <code className={st.code}>HOSTINGER_&lt;LABEL&gt;_API_TOKEN</code> on the Hostinger page.</>
         : integrations.hostinger.lastError
           ? <span className="text-rose-500">{integrations.hostinger.lastError}</span>
           : <>{integrations.hostinger.vmCount} VM(s) · synced {timeAgo(integrations.hostinger.lastSyncAt)}</>,
@@ -117,19 +120,28 @@ const IntegrationsPanel: React.FC = () => {
     },
     {
       key: 'smtp', icon: Mail, title: 'Email (SMTP)', ok: integrations.smtp.configured, configured: integrations.smtp.configured,
-      detail: integrations.smtp.configured ? <>Email channels can deliver.</> : <>Optional. Set <code className={st.code}>SMTP_HOST</code>, <code className={st.code}>SMTP_FROM</code> (+ user/pass) for email alerts.</>,
+      detail: integrations.smtp.configured
+        ? <>Email channels can deliver via {integrations.smtp.server ?? 'the mail server'}. Use <b>Check SMTP</b> on Notifications to test the login.</>
+        : <>Optional. Set <code className={st.code}>SMTP_FROM</code> and <code className={st.code}>SMTP_SERVICE</code> (Gmail, Outlook365, SendGrid…), <code className={st.code}>SMTP_URL</code> or <code className={st.code}>SMTP_HOST</code>, plus user/pass, for email alerts.</>,
     },
     {
-      key: 'deadman', icon: HeartPulse, title: 'Dead-man heartbeat', ok: deadMan.status === 'HEALTHY', configured: integrations.deadMan.configured,
-      detail: !integrations.deadMan.configured
-        ? <>Recommended. Set <code className={st.code}>DEADMAN_HEARTBEAT_URL</code> (e.g. healthchecks.io ping URL) so you are alerted if this Ops server itself dies.</>
-        : <>{deadMan.status} · last ping {timeAgo(deadMan.lastHeartbeatReceivedAt)}</>,
+      // Built in: derived from the agents' reports — nothing to configure, no external watchdog
+      key: 'deadman', icon: HeartPulse, title: 'Dead-man heartbeat', ok: deadMan.status === 'HEALTHY', configured: deadMan.servers.length > 0,
+      detail: (
+        <span className="block space-y-1 break-words">
+          <span className="block">
+            Status: <b>{deadManLabel(deadMan.status)}</b>
+            {deadMan.servers.length > 0 && <> · {deadMan.servers.map(s => `${s.environment} VPS ${deadManLabel(s.state).toLowerCase()}`).join(' · ')}</>}
+          </span>
+          <span className="block">Built in — no setup needed. Heartbeats of the monitored PRD / DR servers, their applications, services and databases come from the telemetry agent's reports; a heartbeat that goes stale or fails opens an incident.</span>
+        </span>
+      ),
     },
     {
-      key: 'url', icon: Link2, title: 'Public URL', ok: !publicUrlMissing, configured: !publicUrlMissing,
-      detail: publicUrlMissing
-        ? <>Agents use <code className={st.code}>{integrations.publicUrl}</code> — set <code className={st.code}>PUBLIC_URL</code> to the address your VPS can reach (e.g. https://ops.example.com).</>
-        : <><code className={st.code}>{integrations.publicUrl}</code></>,
+      key: 'url', icon: Link2, title: 'Public URL', ok: agentBase.ok, configured: agentBase.ok,
+      detail: agentBase.ok
+        ? <><code className={st.code}>{agentBase.base}</code></>
+        : <>{agentBase.reason}</>,
     },
   ];
 
@@ -138,7 +150,7 @@ const IntegrationsPanel: React.FC = () => {
       {items.map(it => {
         const Icon = it.icon;
         return (
-          <div key={it.key} className={st.card}>
+          <div key={it.key} className={`${st.card} min-w-0`}>
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-xs font-bold font-mono">
                 <Icon className="w-4 h-4 text-blue-500" />
@@ -148,7 +160,7 @@ const IntegrationsPanel: React.FC = () => {
                 {it.ok ? 'CONNECTED' : it.configured ? 'ERROR' : 'NOT SET'}
               </span>
             </div>
-            <p className={`text-[11px] mt-2 leading-relaxed ${st.muted}`}>{it.detail}</p>
+            <p className={`text-[11px] mt-2 leading-relaxed break-words ${st.muted}`}>{it.detail}</p>
             {it.action && (
               <button onClick={it.action} disabled={busy === it.key} className={`${st.btn} ${st.ghost} mt-3`}>
                 <RefreshCw className={`w-3 h-3 ${busy === it.key ? 'animate-spin' : ''}`} /> Sync now
@@ -310,23 +322,32 @@ const AgentPanel: React.FC<{ server: VpsServer; onClose: () => void }> = ({ serv
       {error && <div className="text-xs text-rose-500">{error}</div>}
       {info && (
         <>
-          {!info.publicUrlConfigured && (
+          {info.problem ? (
             <div className="flex items-start gap-2 text-[11px] text-amber-500">
               <AlertTriangle className="w-4 h-4 shrink-0" />
-              PUBLIC_URL is not set on the Ops server, so this command uses the address in your browser. Make sure the VPS can reach it, or set PUBLIC_URL in .env.
+              <span>{info.problem} The install command is hidden so it cannot point the VPS at this computer.</span>
             </div>
+          ) : (
+            <>
+              {!info.publicUrlConfigured && (
+                <div className="flex items-start gap-2 text-[11px] text-amber-500">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  PUBLIC_URL is not set on the Ops server, so this command uses the address in your browser. Make sure the VPS can reach it, or set PUBLIC_URL in .env.
+                </div>
+              )}
+              <p className={`text-[11px] ${st.muted}`}>1. SSH into <b>{server.ip}</b> as root (or a sudo user) and run:</p>
+              <CopyBox value={info.installCommand} />
+              <p className={`text-[11px] ${st.muted}`}>
+                It installs a small Python 3 agent as the <code className={st.code}>scholario-agent</code> systemd service. It reports CPU, RAM, disk, load, network, top processes,
+                service states (nginx, mysql, …) and warning/error logs every 10 seconds. Check it with <code className={st.code}>journalctl -u scholario-agent -f</code>.
+              </p>
+              <p className={`text-[11px] ${st.muted}`}>2. Status here switches to <b className="text-emerald-500">CONNECTED</b> within ~15 seconds. Current: <b className={statusColor(server.agentStatus)}>{server.agentStatus}</b> (last report {timeAgo(server.lastSeen)}).</p>
+              <details className={`text-[11px] ${st.muted}`}>
+                <summary className="cursor-pointer">Uninstall</summary>
+                <div className="mt-2"><CopyBox value={info.uninstallCommand} /></div>
+              </details>
+            </>
           )}
-          <p className={`text-[11px] ${st.muted}`}>1. SSH into <b>{server.ip}</b> as root (or a sudo user) and run:</p>
-          <CopyBox value={info.installCommand} />
-          <p className={`text-[11px] ${st.muted}`}>
-            It installs a small Python 3 agent as the <code className={st.code}>scholario-agent</code> systemd service. It reports CPU, RAM, disk, load, network, top processes,
-            service states (nginx, mysql, …) and warning/error logs every 10 seconds. Check it with <code className={st.code}>journalctl -u scholario-agent -f</code>.
-          </p>
-          <p className={`text-[11px] ${st.muted}`}>2. Status here switches to <b className="text-emerald-500">CONNECTED</b> within ~15 seconds. Current: <b className={statusColor(server.agentStatus)}>{server.agentStatus}</b> (last report {timeAgo(server.lastSeen)}).</p>
-          <details className={`text-[11px] ${st.muted}`}>
-            <summary className="cursor-pointer">Uninstall</summary>
-            <div className="mt-2"><CopyBox value={info.uninstallCommand} /></div>
-          </details>
           <button onClick={rotate} disabled={rotating} className={`${st.btn} ${st.danger}`}><KeyRound className="w-3 h-3" /> {rotating ? 'Rotating…' : 'Rotate agent token'}</button>
         </>
       )}
@@ -754,20 +775,20 @@ const ApplicationsSection: React.FC = () => {
             const record = zone?.dnsRecords.find(r => r.name === a.dnsRecordName && (r.type === 'A' || r.type === 'AAAA'));
             const appMonitors = monitors.filter(m => m.applicationId === a.id);
             return (
-              <div key={a.id} className={`${st.card} space-y-2`}>
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <div className="text-sm font-bold">{a.name} <span className={`text-[10px] font-mono ${st.faint}`}>{a.codeName}</span></div>
+              <div key={a.id} className={`${st.card} space-y-2 min-w-0`}>
+                <div className="flex items-start justify-between gap-2 min-w-0">
+                  <div className="min-w-0">
+                    <div className="text-sm font-bold break-words">{a.name} <span className={`text-[10px] font-mono ${st.faint}`}>{a.codeName}</span></div>
                     <div className={`text-[11px] font-mono font-bold ${statusColor(a.status)}`}>{a.status} · {a.failoverState.replace('_', ' ')}</div>
                   </div>
                   {isAdmin && (
-                    <div className="flex gap-1.5">
+                    <div className="flex gap-1.5 shrink-0">
                       <button onClick={() => setEditing(a)} className={`${st.btn} ${st.ghost} !px-2`}><Pencil className="w-3.5 h-3.5" /></button>
                       <button onClick={() => remove(a)} className={`${st.btn} ${st.danger} !px-2`}><Trash2 className="w-3.5 h-3.5" /></button>
                     </div>
                   )}
                 </div>
-                <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono [&>*]:min-w-0 [&>*]:break-words">
                   <div><span className={st.faint}>PRD:</span> {prd ? `${prd.hostname} (${prd.ip})` : <span className="text-amber-500">not set</span>}</div>
                   <div><span className={st.faint}>DR:</span> {dr ? `${dr.hostname} (${dr.ip})` : <span className="text-amber-500">not set</span>}</div>
                   <div className="col-span-2 break-all"><span className={st.faint}>PRD URL:</span> {a.prdUrl || <span className={st.faint}>not set</span>}</div>
@@ -893,6 +914,7 @@ export const SetupView: React.FC = () => {
 
       <ServersSection />
       <ApplicationsSection />
+      <DependencyRegisterSection />
       {canDo('run_probe') && <ToolsSection />}
 
       {showChannelsHint && (

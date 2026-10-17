@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
-import { CommunicationChannel, EscalationPolicy, IncidentSeverity } from '../../types';
+import { CommunicationChannel, EscalationPolicy, EscalationStep, IncidentSeverity, SmtpCheckResult } from '../../types';
+import type { QuietHours } from '../../lib/quietHours';
 import {
   Send,
   Bell,
@@ -17,6 +18,10 @@ import {
   Radio,
 } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
+import { DeliveryLog, useDeliveryStats } from './DeliveryLog';
+import { MockIncidentPanel } from './MockIncidentPanel';
+import { NotificationHealthCard } from './NotificationHealthCard';
+import { api } from '../../services/api';
 
 type ChannelType = CommunicationChannel['type'];
 
@@ -24,9 +29,9 @@ const SEVERITIES: IncidentSeverity[] = ['INFO', 'WARNING', 'HIGH', 'CRITICAL', '
 
 const CHANNEL_TYPES: { value: ChannelType; label: string; targetLabel: string; placeholder: string; help: string }[] = [
   {
-    value: 'TEAMS', label: 'Microsoft Teams', targetLabel: 'Incoming webhook URL',
-    placeholder: 'https://…webhook.office.com/…',
-    help: 'Create an Incoming Webhook (or Workflows webhook) on the Teams channel and paste its https URL.',
+    value: 'TEAMS', label: 'Microsoft Teams', targetLabel: 'Workflows webhook URL',
+    placeholder: 'https://…logic.azure.com/workflows/… or …powerplatform.com/…',
+    help: 'In Teams: open the channel → ⋯ → Workflows → "Post to a channel when a webhook request is received", then paste the URL it gives you. Not the channel link (teams.microsoft.com/l/…) — that cannot receive messages. Older Incoming Webhook (webhook.office.com) URLs also work while Microsoft still supports them.',
   },
   {
     value: 'WEBHOOK', label: 'Webhook / Slack', targetLabel: 'Webhook URL',
@@ -36,7 +41,7 @@ const CHANNEL_TYPES: { value: ChannelType; label: string; targetLabel: string; p
   {
     value: 'EMAIL', label: 'Email', targetLabel: 'Recipient addresses',
     placeholder: 'oncall@yourdomain.com, admin@yourdomain.com',
-    help: 'Comma separated addresses. Requires SMTP settings in the Ops server environment.',
+    help: 'Comma separated addresses. Works with any mail provider (Gmail, Microsoft 365, SendGrid, Mailgun, Amazon SES, Zoho, Brevo, your own relay) through the SMTP settings in the Ops server .env.',
   },
   {
     value: 'PAGERDUTY', label: 'PagerDuty', targetLabel: 'Events v2 routing key',
@@ -71,17 +76,39 @@ interface ChannelDraft {
 interface PolicyDraft {
   id?: string;
   channels: string[];
+  initialDelayMin: number;
   repeatIntervalMin: number;
+  /** Ordered escalation steps (multi-level) */
+  steps: EscalationStep[];
+  quietHours: QuietHours;
   base?: EscalationPolicy;
 }
+
+/** Severities whose notifications are never held by quiet hours (the server refuses it too) */
+const NEVER_QUIET: IncidentSeverity[] = ['CRITICAL', 'EMERGENCY'];
+const browserTimeZone = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; } };
+const defaultQuiet = (): QuietHours => ({ enabled: false, start: '22:00', end: '07:00', timezone: browserTimeZone(), days: [] });
+const TIME_ZONES: string[] = (() => { try { return (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.('timeZone') ?? []; } catch { return []; } })();
+const WEEKDAYS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
+type PolicyNumber = 'initialDelayMin' | 'repeatIntervalMin';
+const MAX_STEPS = 5;
+const EMPTY_POLICY: Omit<PolicyDraft, 'id' | 'base' | 'quietHours'> = { channels: [], initialDelayMin: 0, repeatIntervalMin: 0, steps: [] };
+const policyHasSettings = (d: PolicyDraft) =>
+  d.channels.length > 0 || d.initialDelayMin > 0 || d.repeatIntervalMin > 0 || d.steps.length > 0 || d.quietHours.enabled;
+/** Steps of a saved policy; an older single "escalate after" setting becomes step 1 */
+const stepsOf = (p: EscalationPolicy): EscalationStep[] =>
+  p.steps?.length ? p.steps.map(s => ({ ...s, channels: [...s.channels] }))
+    : p.autoEscalateAfterMin > 0 ? [{ afterMin: p.autoEscalateAfterMin, channels: [...(p.escalationChannels ?? [])], notifyOnCall: true, label: p.escalateToTeam ?? '' }] : [];
 
 const policiesToDraft = (policies: EscalationPolicy[]): Record<IncidentSeverity, PolicyDraft> => {
   const out = {} as Record<IncidentSeverity, PolicyDraft>;
   for (const sev of SEVERITIES) {
     const p = policies.find(x => x.severity === sev);
     out[sev] = p
-      ? { id: p.id, channels: [...p.channels], repeatIntervalMin: p.repeatIntervalMin ?? 0, base: p }
-      : { channels: [], repeatIntervalMin: 0 };
+      ? { id: p.id, channels: [...p.channels], initialDelayMin: p.initialDelayMin ?? 0, repeatIntervalMin: p.repeatIntervalMin ?? 0, steps: stepsOf(p),
+          quietHours: p.quietHours ? { ...p.quietHours, days: [...(p.quietHours.days ?? [])] } : defaultQuiet(), base: p }
+      : { ...EMPTY_POLICY, channels: [], steps: [], quietHours: defaultQuiet() };
   }
   return out;
 };
@@ -104,6 +131,8 @@ export const CommunicationsView: React.FC = () => {
   const isDark = theme === 'dark';
   const isAdmin = hasRole('it_administrator');
   const isOperator = hasRole('operator');
+  const stats = useDeliveryStats(isOperator);
+  const enabledChannels = communicationChannels.filter(c => c.enabled).length;
 
   const [busy, setBusy] = useState<string | null>(null);
   const [isProbingHealth, setIsProbingHealth] = useState(false);
@@ -123,6 +152,11 @@ export const CommunicationsView: React.FC = () => {
     setBusy(key);
     try { await fn(); } finally { setBusy(null); }
   };
+
+  const [smtpCheck, setSmtpCheck] = useState<SmtpCheckResult | null>(null);
+  const checkSmtp = () => withBusy('smtp', async () => {
+    try { setSmtpCheck(await api.verifySmtp()); } catch (e) { setSmtpCheck({ ok: false, server: '', error: (e as Error).message }); }
+  });
 
   const handleManualHealthProbe = async () => {
     setIsProbingHealth(true);
@@ -153,28 +187,76 @@ export const CommunicationsView: React.FC = () => {
     setPolicyDirty(true);
     setPolicyDraft(prev => {
       const cur = prev[sev];
-      const channels = cur.channels.includes(channelId) ? cur.channels.filter(c => c !== channelId) : [...cur.channels, channelId];
-      return { ...prev, [sev]: { ...cur, channels } };
+      const ids = cur.channels.includes(channelId) ? cur.channels.filter(c => c !== channelId) : [...cur.channels, channelId];
+      return { ...prev, [sev]: { ...cur, channels: ids } };
     });
   };
 
-  const setPolicyRepeat = (sev: IncidentSeverity, value: string) => {
+  const minutesInput = (sev: IncidentSeverity, field: PolicyNumber, label: string) => (
+    <div className="flex items-center gap-1.5">
+      <input
+        type="number"
+        min={0}
+        max={1440}
+        value={policyDraft[sev][field]}
+        onChange={e => setPolicyMinutes(sev, field, e.target.value)}
+        disabled={savingPolicies}
+        aria-label={label}
+        className={`${inputCls} w-20 py-1`}
+      />
+      <span>min</span>
+    </div>
+  );
+
+  const editSteps = (sev: IncidentSeverity, fn: (steps: EscalationStep[]) => EscalationStep[]) => {
+    setPolicyDirty(true);
+    setPolicyDraft(prev => ({ ...prev, [sev]: { ...prev[sev], steps: fn(prev[sev].steps.map(s => ({ ...s, channels: [...s.channels] }))) } }));
+  };
+  const updateStep = (sev: IncidentSeverity, i: number, patch: Partial<EscalationStep>) =>
+    editSteps(sev, steps => steps.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+  const toggleStepChannel = (sev: IncidentSeverity, i: number, channelId: string) =>
+    editSteps(sev, steps => steps.map((s, j) => (j !== i ? s : { ...s, channels: s.channels.includes(channelId) ? s.channels.filter(c => c !== channelId) : [...s.channels, channelId] })));
+  const addStep = (sev: IncidentSeverity) => editSteps(sev, steps => {
+    const last = steps[steps.length - 1];
+    return [...steps, { afterMin: Math.min(1440, last ? last.afterMin + 15 : 15), channels: [], notifyOnCall: true, label: '' }];
+  });
+  const removeStep = (sev: IncidentSeverity, i: number) => editSteps(sev, steps => steps.filter((_, j) => j !== i));
+
+  const updateQuiet = (sev: IncidentSeverity, patch: Partial<QuietHours>) => {
+    setPolicyDirty(true);
+    setPolicyDraft(prev => ({ ...prev, [sev]: { ...prev[sev], quietHours: { ...prev[sev].quietHours, ...patch } } }));
+  };
+  const toggleQuietDay = (sev: IncidentSeverity, day: number) => {
+    const days = policyDraft[sev].quietHours.days ?? [];
+    updateQuiet(sev, { days: days.includes(day) ? days.filter(d => d !== day) : [...days, day].sort() });
+  };
+
+  const setPolicyMinutes = (sev: IncidentSeverity, field: PolicyNumber, value: string) => {
     setPolicyDirty(true);
     const n = Math.max(0, Math.min(1440, Math.floor(Number(value) || 0)));
-    setPolicyDraft(prev => ({ ...prev, [sev]: { ...prev[sev], repeatIntervalMin: n } }));
+    setPolicyDraft(prev => ({ ...prev, [sev]: { ...prev[sev], [field]: n } }));
   };
 
   const savePolicies = async () => {
+    const known = (ids: string[]) => ids.filter(id => communicationChannels.some(c => c.id === id));
     const list: Partial<EscalationPolicy>[] = SEVERITIES
-      .filter(sev => policyDraft[sev].channels.length > 0 || policyDraft[sev].repeatIntervalMin > 0)
+      .filter(sev => policyHasSettings(policyDraft[sev]))
       .map(sev => {
         const d = policyDraft[sev];
+        const steps = d.steps.map(s => ({ ...s, channels: known(s.channels), label: s.label.trim() }));
         return {
           ...(d.base ?? {}),
           ...(d.id ? { id: d.id } : {}),
           severity: sev,
-          channels: d.channels.filter(id => communicationChannels.some(c => c.id === id)),
+          channels: known(d.channels),
+          initialDelayMin: d.initialDelayMin,
           repeatIntervalMin: d.repeatIntervalMin,
+          steps,
+          ...(d.quietHours.enabled || d.base?.quietHours ? { quietHours: { ...d.quietHours, timezone: d.quietHours.timezone.trim() } } : {}),
+          // Mirror step 1 in the single-step fields (older readers of the policy still escalate)
+          autoEscalateAfterMin: steps[0]?.afterMin ?? 0,
+          escalateToTeam: steps[0]?.label ?? '',
+          escalationChannels: steps[0]?.channels ?? [],
         };
       });
     setSavingPolicies(true);
@@ -218,7 +300,7 @@ export const CommunicationsView: React.FC = () => {
       }`}>
         <div>
           <h1 className="text-lg font-bold font-mono tracking-tight">
-            COMMUNICATIONS &amp; ESCALATION
+            NOTIFICATIONS &amp; ESCALATION
           </h1>
           <p className={`text-xs font-mono ${muted}`}>
             Notification channels for incident alerts and which channels each severity pages
@@ -237,9 +319,10 @@ export const CommunicationsView: React.FC = () => {
         </div>
         <div className={`flex items-center gap-2 px-2.5 py-1 rounded text-xs font-mono border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200'}`}
           title="Alerts (application down/recovered, database, backup, DR readiness, Cloudflare origin, agent offline, SSL expiry) are sent to enabled channels, deduplicated with a cooldown">
-          <span className={`w-2 h-2 rounded-full ${integrations?.notifications.status === 'CONFIGURED' ? 'bg-emerald-500' : 'bg-slate-500'}`} />
-          <span className={integrations?.notifications.status === 'CONFIGURED' ? 'text-emerald-500' : 'text-slate-400'}>
-            NOTIFICATIONS: {integrations?.notifications.status === 'CONFIGURED' ? `${integrations.notifications.enabledChannels} channel(s)` : 'NOT CONFIGURED'}
+          {/* From the live channel list (the integrations snapshot is only loaded once) */}
+          <span className={`w-2 h-2 rounded-full ${enabledChannels > 0 ? 'bg-emerald-500' : 'bg-slate-500'}`} />
+          <span className={enabledChannels > 0 ? 'text-emerald-500' : 'text-slate-400'}>
+            NOTIFICATIONS: {enabledChannels > 0 ? `${enabledChannels} channel${enabledChannels === 1 ? '' : 's'} enabled` : 'NOT CONFIGURED'}
           </span>
         </div>
       </div>
@@ -336,10 +419,44 @@ export const CommunicationsView: React.FC = () => {
         }`}>
           <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
           <span>
-            SMTP is not configured on the Ops server, so EMAIL channels cannot deliver. Set the SMTP environment variables on the server and restart it.
+            {integrations?.smtp.problem ? <><strong>{integrations.smtp.problem}.</strong>{' '}</> : null}
+            EMAIL channels cannot deliver until this is fixed. In the server <code>.env</code> set <code>SMTP_FROM</code> plus either <code>SMTP_SERVICE</code> (e.g. Gmail, Outlook365, SendGrid), <code>SMTP_URL</code>, or <code>SMTP_HOST</code>/<code>SMTP_PORT</code>, with <code>SMTP_USER</code>/<code>SMTP_PASS</code>, then restart it.
           </span>
         </div>
       )}
+
+      {/* SMTP connection check (admins): logs in to the mail server without sending */}
+      {isAdmin && integrations && (integrations.smtp.configured || hasEmailChannel) && (
+        <div className={`p-3 rounded border text-xs font-mono flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${cardCls}`}>
+          <div className="min-w-0 break-words">
+            <span className="font-bold">Email (SMTP):</span> {integrations.smtp.server ?? '—'} · from {integrations.smtp.from ?? '—'}
+            {smtpCheck && (
+              <div role="status" className={`mt-1 font-sans ${smtpCheck.ok ? 'text-emerald-500' : 'text-rose-500'}`}>
+                {smtpCheck.ok ? 'Connected and logged in — email channels can deliver.' : smtpCheck.error}
+              </div>
+            )}
+            {smtpCheck && !smtpCheck.ok && smtpCheck.settings && (
+              <div className="mt-1 font-sans opacity-80">
+                Read at startup from <code>{smtpCheck.settings.envFile}</code>{smtpCheck.settings.envFileFound ? '' : ' (file not found)'}.{' '}
+                Empty or missing: {smtpCheck.settings.variables.filter(v => !v.present).map(v => v.name).join(', ') || 'none'}.
+                {smtpCheck.settings.variables.some(v => v.source === 'environment') && (
+                  <> Set in the environment before <code>.env</code> was read, so they win over it: {smtpCheck.settings.variables.filter(v => v.source === 'environment').map(v => v.name).join(', ')}.</>
+                )}
+                {smtpCheck.settings.envFileChangedSinceStart && <> <strong>.env was saved after the server started — restart it.</strong></>}
+              </div>
+            )}
+          </div>
+          <button onClick={checkSmtp} disabled={busy !== null} className={`${secondaryBtn} shrink-0`}>
+            <RefreshCw className={`w-3 h-3 ${busy === 'smtp' ? 'animate-spin' : ''}`} />
+            <span>{busy === 'smtp' ? 'Checking…' : 'Check SMTP'}</span>
+          </button>
+        </div>
+      )}
+
+      {isOperator && <MockIncidentPanel isDark={isDark} cardCls={cardCls} muted={muted} />}
+
+      {/* Delivery health (operators+): success rate, retries, latency, waiting, failing channels */}
+      {isOperator && <NotificationHealthCard />}
 
       {/* Channels */}
       <div className="space-y-3">
@@ -467,7 +584,23 @@ export const CommunicationsView: React.FC = () => {
                         <span>Failures:</span>
                         <span className={ch.failureCount > 0 ? 'text-rose-500 font-semibold' : ''}>{ch.failureCount ?? 0}</span>
                       </div>
+                      {stats && (
+                        <div className="flex justify-between gap-2" title={stats.channels[ch.id]?.lastError ? `Last failure: ${stats.channels[ch.id]!.lastError}` : undefined}>
+                          <span>Last 24 h:</span>
+                          <span className="text-right">
+                            <span className="text-emerald-500">{stats.channels[ch.id]?.delivered ?? 0} delivered</span>
+                            {' · '}
+                            <span className={(stats.channels[ch.id]?.failed ?? 0) > 0 ? 'text-rose-500 font-semibold' : ''}>{stats.channels[ch.id]?.failed ?? 0} failed</span>
+                          </span>
+                        </div>
+                      )}
                     </div>
+                    {ch.targetEndpoint.startsWith('enc:v1:') && (
+                      <div role="alert" className="mt-2 text-[10px] text-rose-500">The stored target cannot be decrypted (the secrets key changed or was lost). Edit the channel and enter it again.</div>
+                    )}
+                    {ch.type === 'TEAMS' && /^https:\/\/teams\.(microsoft\.com|cloud\.microsoft|live\.com)\//i.test(ch.targetEndpoint) && (
+                      <div role="alert" className="mt-2 text-[10px] text-rose-500">This is a Teams channel link, not a webhook — it cannot receive messages. Edit the channel and paste a Workflows webhook URL.</div>
+                    )}
                     {ch.type === 'EMAIL' && smtpMissing && (
                       <div className="mt-2 text-[10px] text-amber-500">SMTP not configured — this channel cannot deliver.</div>
                     )}
@@ -554,20 +687,27 @@ export const CommunicationsView: React.FC = () => {
           <Bell className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
           <div className="leading-relaxed font-sans">
             When an incident opens or resolves, the channels selected for its severity are notified. <strong>If no channels are selected for a severity, ALL enabled channels are notified.</strong>{' '}
-            The repeat interval re-sends the alert every N minutes while the incident stays unacknowledged (0 = no repeats).
+            <strong>First page after</strong> holds the first notification for N minutes: an incident that recovers or is acknowledged within it pages nobody.{' '}
+            <strong>Repeat</strong> re-sends the alert every N minutes while it stays unacknowledged.{' '}
+            <strong>Escalation steps</strong> run in order while the incident stays unacknowledged: each step sends one ESCALATED message after its minutes to its channels (all enabled channels if none) and can email every user marked On-Call in Users. Acknowledging or resolving stops the escalation.
+            0 turns a setting off.
           </div>
         </div>
 
         <div className={`overflow-hidden ${cardCls}`}>
           <div className="w-full min-w-0 overflow-x-auto">
-            <table className="w-full text-left text-xs font-mono min-w-[600px]">
+            <datalist id="scholario-time-zones">{TIME_ZONES.map(z => <option key={z} value={z} />)}</datalist>
+            <table className="w-full text-left text-xs font-mono min-w-[1080px]">
               <thead className={`font-medium border-b ${
                 isDark ? 'bg-[#0B0F17] text-slate-400 border-[#1A2332]' : 'bg-slate-50 text-slate-600 border-slate-200'
               }`}>
                 <tr>
                   <th className="py-2.5 px-3.5">Severity</th>
                   <th className="py-2.5 px-3.5">Channels notified</th>
-                  <th className="py-2.5 px-3.5 w-48">Repeat while unacknowledged</th>
+                  <th className="py-2.5 px-3.5 w-32">First page after</th>
+                  <th className="py-2.5 px-3.5 w-32">Repeat every</th>
+                  <th className="py-2.5 px-3.5 w-72">Escalate if unacknowledged</th>
+                  <th className="py-2.5 px-3.5 w-56">Quiet hours</th>
                 </tr>
               </thead>
               <tbody className={`divide-y ${isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
@@ -610,20 +750,102 @@ export const CommunicationsView: React.FC = () => {
                         )}
                       </td>
                       <td className={`py-2.5 px-3.5 align-top ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                        {isAdmin ? minutesInput(sev, 'initialDelayMin', `${sev} first notification delay in minutes`)
+                          : d.initialDelayMin > 0 ? `${d.initialDelayMin} min` : 'Immediately'}
+                      </td>
+                      <td className={`py-2.5 px-3.5 align-top ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                        {isAdmin ? minutesInput(sev, 'repeatIntervalMin', `${sev} repeat interval in minutes`)
+                          : d.repeatIntervalMin > 0 ? `Every ${d.repeatIntervalMin} min` : 'No repeats'}
+                      </td>
+                      <td className={`py-2.5 px-3.5 align-top ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                         {isAdmin ? (
-                          <div className="flex items-center gap-1.5">
-                            <input
-                              type="number"
-                              min={0}
-                              max={1440}
-                              value={d.repeatIntervalMin}
-                              onChange={e => setPolicyRepeat(sev, e.target.value)}
-                              disabled={savingPolicies}
-                              className={`${inputCls} w-20 py-1`}
-                            />
-                            <span>min</span>
+                          <div className="space-y-2">
+                            {d.steps.length === 0 && <div className="text-[10px] text-slate-500">Never — add a step to escalate unacknowledged incidents</div>}
+                            {d.steps.map((st, i) => (
+                              <fieldset key={i} className={`p-2 rounded border space-y-1.5 ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+                                <legend className="px-1 text-[10px] font-bold">Step {i + 1}</legend>
+                                <div className="flex items-center gap-1.5">
+                                  <span>after</span>
+                                  <input
+                                    type="number" min={1} max={1440} value={st.afterMin}
+                                    onChange={e => updateStep(sev, i, { afterMin: Math.max(1, Math.min(1440, Math.floor(Number(e.target.value) || 1))) })}
+                                    disabled={savingPolicies} aria-label={`${sev} step ${i + 1} minutes`} className={`${inputCls} w-20 py-1`}
+                                  />
+                                  <span>min</span>
+                                  <button onClick={() => removeStep(sev, i)} disabled={savingPolicies} aria-label={`Remove ${sev} step ${i + 1}`}
+                                    className="ml-auto text-[10px] text-rose-500 hover:underline cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded">
+                                    Remove
+                                  </button>
+                                </div>
+                                <input
+                                  type="text" value={st.label} onChange={e => updateStep(sev, i, { label: e.target.value.slice(0, 120) })}
+                                  disabled={savingPolicies} placeholder="Escalate to (team, optional)" aria-label={`${sev} step ${i + 1} team`} className={`${inputCls} py-1`}
+                                />
+                                {communicationChannels.length > 0 && (
+                                  <div className="flex flex-wrap gap-x-3 gap-y-1">
+                                    {communicationChannels.map(ch => (
+                                      <label key={ch.id} className={`flex items-center gap-1.5 cursor-pointer ${ch.enabled ? '' : 'opacity-60'}`}>
+                                        <input type="checkbox" checked={st.channels.includes(ch.id)} onChange={() => toggleStepChannel(sev, i, ch.id)} disabled={savingPolicies} />
+                                        <span>{ch.name}</span>
+                                      </label>
+                                    ))}
+                                  </div>
+                                )}
+                                <label className="flex items-center gap-1.5 cursor-pointer">
+                                  <input type="checkbox" checked={st.notifyOnCall} onChange={() => updateStep(sev, i, { notifyOnCall: !st.notifyOnCall })} disabled={savingPolicies} />
+                                  <span>Email on-call users</span>
+                                </label>
+                                <div className="text-[10px] text-slate-500">
+                                  {st.channels.length === 0 ? 'All enabled channels' : `${st.channels.length} channel(s)`}{st.notifyOnCall ? ' + on-call users by email' : ''}
+                                </div>
+                                {i > 0 && st.afterMin <= d.steps[i - 1].afterMin && (
+                                  <div role="alert" className="text-[10px] text-rose-500">Must come later than step {i} ({d.steps[i - 1].afterMin} min)</div>
+                                )}
+                              </fieldset>
+                            ))}
+                            {d.steps.length < MAX_STEPS && (
+                              <button onClick={() => addStep(sev)} disabled={savingPolicies}
+                                className="text-[11px] text-blue-500 hover:underline cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded">
+                                + Add step
+                              </button>
+                            )}
                           </div>
-                        ) : d.repeatIntervalMin > 0 ? `Every ${d.repeatIntervalMin} min` : 'No repeats'}
+                        ) : d.steps.length
+                          ? d.steps.map((st, i) => `Step ${i + 1}: after ${st.afterMin} min${st.label ? ` → ${st.label}` : ''}`).join(' · ')
+                          : 'Never'}
+                      </td>
+                      <td className={`py-2.5 px-3.5 align-top ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                        {NEVER_QUIET.includes(sev) ? (
+                          <span className="text-[10px] text-slate-500" title="Critical alerts are always delivered immediately">Never held</span>
+                        ) : isAdmin ? (
+                          <div className="space-y-1.5">
+                            <label className="flex items-center gap-1.5 cursor-pointer">
+                              <input type="checkbox" checked={d.quietHours.enabled} onChange={() => updateQuiet(sev, { enabled: !d.quietHours.enabled })} disabled={savingPolicies} aria-label={`${sev} quiet hours`} />
+                              <span>Hold notifications</span>
+                            </label>
+                            {d.quietHours.enabled && (
+                              <>
+                                <div className="flex items-center gap-1">
+                                  <input type="time" value={d.quietHours.start} onChange={e => updateQuiet(sev, { start: e.target.value })} disabled={savingPolicies} aria-label={`${sev} quiet hours start`} className={`${inputCls} w-24 py-1`} />
+                                  <span>–</span>
+                                  <input type="time" value={d.quietHours.end} onChange={e => updateQuiet(sev, { end: e.target.value })} disabled={savingPolicies} aria-label={`${sev} quiet hours end`} className={`${inputCls} w-24 py-1`} />
+                                </div>
+                                <input type="text" list="scholario-time-zones" value={d.quietHours.timezone} onChange={e => updateQuiet(sev, { timezone: e.target.value })}
+                                  disabled={savingPolicies} aria-label={`${sev} quiet hours time zone`} placeholder="Time zone, e.g. Asia/Kolkata" className={`${inputCls} py-1`} />
+                                <div className="flex gap-1" role="group" aria-label={`${sev} quiet hours days`}>
+                                  {WEEKDAYS.map((w, day) => (
+                                    <label key={day} title={['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][day]}
+                                      className={`w-5 h-5 flex items-center justify-center rounded border text-[10px] cursor-pointer ${(d.quietHours.days ?? []).includes(day) ? 'bg-blue-600 border-blue-600 text-white' : isDark ? 'border-[#1E293B]' : 'border-slate-300'}`}>
+                                      <input type="checkbox" className="sr-only" checked={(d.quietHours.days ?? []).includes(day)} onChange={() => toggleQuietDay(sev, day)} disabled={savingPolicies} />
+                                      {w}
+                                    </label>
+                                  ))}
+                                </div>
+                                <div className="text-[10px] text-slate-500">{(d.quietHours.days ?? []).length ? 'Selected days' : 'Every day'} · overnight windows allowed · held pages are sent when quiet hours end</div>
+                              </>
+                            )}
+                          </div>
+                        ) : d.quietHours.enabled ? `${d.quietHours.start}–${d.quietHours.end} ${d.quietHours.timezone}` : 'Off'}
                       </td>
                     </tr>
                   );
@@ -634,6 +856,10 @@ export const CommunicationsView: React.FC = () => {
         </div>
       </div>
 
+      {/* Delivery log: every notification sent, with result, reason and resend */}
+      {isOperator ? <DeliveryLog /> : (
+        <p className={`text-xs font-mono ${muted}`}>The notification delivery log is visible to operators and administrators.</p>
+      )}
     </div>
   );
 };

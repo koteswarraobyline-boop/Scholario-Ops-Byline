@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useOps } from '../../context/OpsContext';
 import { Shield, RefreshCw, Filter, Search, X } from 'lucide-react';
 import { api } from '../../services/api';
@@ -10,7 +10,7 @@ import { Pagination } from '../ui/Pagination';
 
 const CATEGORIES: Array<AuditLog['category'] | ''> = [
   '', 'INCIDENT', 'FAILOVER', 'MAINTENANCE', 'MONITOR', 'CLOUDFLARE', 'INFRASTRUCTURE', 'RUNBOOK',
-  'APPLICATION', 'AUTH', 'USER', 'NOTIFICATION', 'DEPLOYMENT', 'BACKUP',
+  'APPLICATION', 'AUTH', 'USER', 'NOTIFICATION', 'DEPLOYMENT', 'BACKUP', 'REGISTRY',
 ];
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -18,7 +18,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   MAINTENANCE: 'text-purple-400', MONITOR: 'text-cyan-400', CLOUDFLARE: 'text-orange-400',
   INFRASTRUCTURE: 'text-emerald-400', RUNBOOK: 'text-yellow-400', USER: 'text-sky-400',
   NOTIFICATION: 'text-pink-400', APPLICATION: 'text-indigo-400', DEPLOYMENT: 'text-teal-400',
-  BACKUP: 'text-lime-400',
+  BACKUP: 'text-lime-400', REGISTRY: 'text-violet-400',
 };
 
 const fmtDateTime = (iso: string) => {
@@ -51,18 +51,22 @@ export const AuditLogsView: React.FC = () => {
     return () => clearTimeout(t);
   }, [searchInput]);
 
+  // Typing or paging fast fires several requests: only the latest one may update the list
+  const requestId = useRef(0);
   const load = useCallback(async () => {
+    const id = ++requestId.current;
     setLoading(true);
     setError(null);
     try {
       const res = await api.getAuditLogs({ page, pageSize, category: category || undefined, q: q || undefined });
+      if (id !== requestId.current) return;
       setLogs(res.data ?? []);
       setTotal(res.pagination?.total ?? 0);
       setTotalPages(Math.max(1, res.pagination?.totalPages ?? 1));
     } catch (e) {
-      setError(e);
+      if (id === requestId.current) setError(e);
     } finally {
-      setLoading(false);
+      if (id === requestId.current) setLoading(false);
     }
   }, [page, category, q]);
 
