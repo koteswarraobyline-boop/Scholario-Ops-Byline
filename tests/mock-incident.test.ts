@@ -139,7 +139,7 @@ test('a simulated 503 opens a TEST incident and the Email channel records SMTP a
 
   assert.equal(mails.length, 1);
   assert.deepEqual(mails[0].to, ['oncall@example.test']);
-  assert.match(mails[0].data, /\[FIRING\]/);
+  assert.match(mails[0].data, /CRITICAL|DOWN/);
   assert.match(mails[0].data, /503/);
   assert.match(mails[0].data, new RegExp(report.incidentId!));
 

@@ -31,10 +31,8 @@ export function recordDelivery(entry: Omit<NotificationDelivery, 'id' | 't'> & {
   return row;
 }
 
-export async function flushDeliveries(): Promise<void> {
-  if (writing) { await writing; }
-  if (queue.length === 0) return;
-  const batch = queue.splice(0, queue.length);
+async function writeBatch(batch: NotificationDelivery[]): Promise<boolean> {
+  let ok = true;
   writing = (async () => {
     try {
       for (const r of batch) {
@@ -46,6 +44,7 @@ export async function flushDeliveries(): Promise<void> {
         );
       }
     } catch (err) {
+      ok = false;
       queue = batch.concat(queue).slice(-MAX_QUEUED);
       log.error('deliveries', `could not write the notification log: ${(err as Error).message}`);
     } finally {
@@ -53,6 +52,17 @@ export async function flushDeliveries(): Promise<void> {
     }
   })();
   await writing;
+  return ok;
+}
+
+/** Writes every queued row, including rows recorded while an earlier batch was still being inserted. */
+export async function flushDeliveries(): Promise<void> {
+  for (;;) {
+    if (writing) { await writing; continue; }
+    if (queue.length === 0) return;
+    const batch = queue.splice(0, queue.length);
+    if (!await writeBatch(batch)) return;
+  }
 }
 
 type Row = Record<string, unknown>;

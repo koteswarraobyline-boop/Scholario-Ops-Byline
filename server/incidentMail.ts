@@ -26,9 +26,10 @@ export function formatWhen(iso?: string): string {
   if (!iso) return 'Not recorded';
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return iso;
-  return `${new Date(t).toLocaleString('en-GB', {
-    timeZone: 'UTC', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
-  })} UTC`;
+  const d = new Date(t);
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getUTCDate())} ${months[d.getUTCMonth()]} ${d.getUTCFullYear()}, ${p(d.getUTCHours())}:${p(d.getUTCMinutes())} UTC`;
 }
 
 function toInput(incident: Incident, status: NotificationMessage['status'], names: IncidentNames, extra?: string, link?: string, also?: IncidentMailInput['also']): IncidentMailInput {
@@ -40,7 +41,7 @@ function toInput(incident: Incident, status: NotificationMessage['status'], name
     incidentId: incident.id,
     title: incident.title,
     environment: incident.environment,
-    application: named(names.application) ?? named(ctx?.application) ?? named(incident.affectedServices.filter(Boolean)[0]) ,
+    application: named(names.application) ?? named(ctx?.application) ?? named(incident.affectedServices?.filter(Boolean)[0]),
     server: named(ctx?.vps) ?? named(names.server),
     ip: named(ctx?.ip) ?? named(names.ip),
     database: named(names.database),
@@ -83,9 +84,12 @@ export function groupedNotification(items: Incident[], windowSec: number, namesF
   const page = top
     ? renderIncidentMail(toInput(top, 'FIRING', names, `${ordered.length} alerts opened within ${windowSec}s for the same application.`, link, also))
     : { text: '', html: '' };
+  const appName = names.application || 'the same application';
+  // Every id is in the plain text as "• INC-1 [HIGH] …" so a restart can see the summary was already sent.
+  const bullets = ordered.map(i => `• ${i.id} [${i.severity}] ${i.title}`).join('\n');
   return {
-    title: `${ordered.length} alerts · ${names.application || top?.title || 'Scholario Ops'}`,
-    text: page.text,
+    title: `${ordered.length} more alerts for ${appName}`,
+    text: `${page.text}\n\n${bullets}`,
     html: page.html,
     severity: top?.severity ?? 'WARNING',
     status: 'FIRING',
