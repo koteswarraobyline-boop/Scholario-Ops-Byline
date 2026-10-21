@@ -30,6 +30,8 @@ const POOLS = [
 ];
 const health = (id: string, ip: string, rtt: string) => ({ pool_id: id, pop_health: { SAS: { healthy: true, origins: [{ [ip]: { healthy: true, rtt, failure_reason: 'No failures', response_code: 200 } }] } } });
 let mode: 'ok' | 'down' | 'perm' = 'ok';
+let zonesVisible = true;
+let accountLb = false;
 let lbPayload: Record<string, unknown> = {
   id: 'lb1', name: 'app.example.com', enabled: true, proxied: true,
   steering_policy: 'off', default_pools: [PRD_POOL, DR_POOL], fallback_pool: DR_POOL,
@@ -46,7 +48,8 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
     return env(h);
   }
   if (u.includes(`/accounts/${ACC}/load_balancers/pools`)) return env(POOLS);
-  if (u.includes('/zones?name=')) return env([{ id: 'zone1', name: 'example.com' }]);
+  if (u.includes(`/accounts/${ACC}/load_balancers`)) return accountLb ? env([lbPayload]) : env(null, 403, [{ code: 10000, message: 'Authentication error' }]);
+  if (u.includes('/zones?name=')) return env(zonesVisible ? [{ id: 'zone1', name: 'example.com' }] : []);
   if (u.includes('/zones/zone1/load_balancers')) return env([lbPayload]);
   return env(null, 404, [{ code: 7003, message: 'not found' }]);
 }) as typeof fetch;
@@ -165,6 +168,20 @@ test('random weights split traffic across healthy pools; one healthy pool takes 
     mode = 'ok';
     lbPayload = saved;
     await syncLoadBalancers();
+  }
+});
+
+test('routing is read from the account when the zone is not visible', async () => {
+  zonesVisible = false;
+  accountLb = true;
+  try {
+    const s = await syncLoadBalancers();
+    assert.equal(s.routing[0].found, true, s.routing[0].error ?? '');
+    assert.equal(s.routing[0].activePoolId, PRD_POOL);
+    assert.deepEqual(s.routing[0].traffic, [{ poolId: PRD_POOL, percent: 100 }]);
+  } finally {
+    zonesVisible = true;
+    accountLb = false;
   }
 });
 

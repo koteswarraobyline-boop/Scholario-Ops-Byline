@@ -50,6 +50,7 @@ All status values come from live sources:
 - **Cloudflare Load Balancing** reads pools, pool health, origin RTT and response codes every 60 s, read-only (account `3d3255caf03b25ccf9e2d7abd0d26d15`). If the token or a permission is missing, the dashboard says "Not configured" or "Cloudflare permission required".
 - **Agent** sends CPU, memory, disk, load, network, services and processes. Install it on each ICT VPS from Infrastructure/Setup. It only makes outbound HTTPS calls to `PUBLIC_URL`, so no ports are opened on the VPS.
 - **Incidents** are raised when a monitor is confirmed DOWN (with Cloudflare origin correlation) or when Cloudflare marks an origin unhealthy. Recovery is recorded automatically.
+- **Capacity** (`/resources`) stores a limit separately from usage for CPU, memory, disk, storage, seats, active users, database size, database connections and API quotas. A server plan creates the CPU, memory and disk rows. Usage stays empty until the agent or an operator records a measurement. Warning and critical are per resource, then an infrastructure-monitor override, then the global percentages. Missing usage is not treated as zero. Accepted measurements are kept for the check-history retention window.
 - **DR readiness** runs 13 checks (PASS, FAIL, WARNING or UNKNOWN) and gives an overall READY, NOT READY, DEGRADED or UNKNOWN.
 - **Failover**: Scholario Ops never changes Cloudflare for ICT. The failover console runs pre-flight checks, shows the manual steps for Cloudflare, and records an approve or reject decision in the audit log.
 

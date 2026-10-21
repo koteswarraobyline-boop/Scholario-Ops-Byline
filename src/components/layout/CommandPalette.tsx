@@ -68,6 +68,7 @@ const ROUTES: Array<{ tab: string; title: string; subtitle: string; icon: Comman
   { tab: 'overview', title: 'Overview', subtitle: 'Overall health of applications, servers, monitors and incidents', icon: Activity, keywords: 'overview dashboard home status health' },
   { tab: 'applications', title: 'Applications', subtitle: 'Applications with PRD/DR mapping and failover state', icon: Layers, keywords: 'applications apps catalog' },
   { tab: 'infrastructure', title: 'Infrastructure', subtitle: 'Registered VPS servers and agent telemetry', icon: Server, keywords: 'infrastructure servers vps nodes cpu ram disk telemetry' },
+  { tab: 'resources', title: 'Capacity', subtitle: 'Resource limits, usage and thresholds', icon: Gauge, keywords: 'capacity limits seats storage quota database disk cpu memory warning critical' },
   { tab: 'monitors', title: 'Monitors', subtitle: 'HTTP/TCP/DNS/SSL and heartbeat monitors', icon: Radio, keywords: 'monitors probes checks uptime' },
   { tab: 'incidents', title: 'Incidents', subtitle: 'Open and resolved incidents', icon: AlertTriangle, keywords: 'incidents tickets triage acknowledge resolve' },
   { tab: 'resilience', title: 'PRD / DR Readiness', subtitle: 'Disaster recovery readiness and traffic failover', icon: ShieldCheck, keywords: 'resilience dr disaster recovery readiness failover' },

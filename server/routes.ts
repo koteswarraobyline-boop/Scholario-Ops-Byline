@@ -47,8 +47,10 @@ import { secretsKeyStatus, SecretsKeyMissingError, isSealed, keyFingerprintMisma
 import { quietHoursProblem, type QuietHours } from '../src/lib/quietHours.ts';
 import { listDeliveries, getDelivery, getDeliveryForUser, deliveryChain, deliveryStats, unreadCounts, setRead, markAllRead, deliveryHealth, pendingLogWrites } from './deliveries.ts';
 import { workerState } from './leader.ts';
-import { notificationStatus } from './alerts.ts';
+import { notificationStatus, evaluateResourceAlerts } from './alerts.ts';
 import { buildComponent, buildLink, removeComponent, forgetRegistryReferences, registryImpact, RegistryConflict, kindLabel } from './registry.ts';
+import { applyMeasurement, applyServerTelemetry, buildResource, detachServerResources, MeasurementConflict, presentResource, syncServerPlan, unlinkApplicationResources } from './resources.ts';
+import { readResourceMeasurements, recordResourceMeasurement } from './resourceHistory.ts';
 import { log } from './logger.ts';
 
 const VERSION = '3.0.0';
@@ -602,6 +604,10 @@ export function buildRouter(): Router {
       if (v !== undefined && v !== null && (typeof v !== 'object' || Array.isArray(v))) return fail(res, 400, `${k} must be an object or null`);
     }
     ingestAgentReport(srv, b, { sourceIp: req.ip });
+    const telemetry = applyServerTelemetry(srv);
+    if (telemetry.changed) persist();
+    evaluateResourceAlerts();
+    for (const row of telemetry.sampled) recordResourceMeasurement(row);
     // appChecks: local application health checks the agent should run on this host (agent >= 3.3)
     ok(res, { accepted: true, serverId: srv.id, appChecks: appChecksFor(srv) });
   }));
@@ -792,6 +798,88 @@ export function buildRouter(): Router {
   // ── Servers ────────────────────────────────────────────────────────────────
   // Capacity forecasts, SLO error budgets and flapping monitors (computed from stored data only)
   r.get('/v1/insights', (_req, res) => { ok(res, reliabilityInsights()); });
+
+  // ── Resource capacity ──────────────────────────────────────────────────────
+  const resourceQuery = (req: Request) => {
+    const kind = String(req.query.kind ?? '');
+    const owner = String(req.query.owner ?? '').toLowerCase();
+    const serverId = String(req.query.serverId ?? '');
+    const applicationId = String(req.query.applicationId ?? '');
+    const status = String(req.query.status ?? '');
+    const q = String(req.query.q ?? '').toLowerCase();
+    return db.resources.filter(r => {
+      const view = presentResource(r);
+      if (kind && r.kind !== kind) return false;
+      if (owner && !r.owner.toLowerCase().includes(owner)) return false;
+      if (serverId && r.serverId !== serverId) return false;
+      if (applicationId && r.applicationId !== applicationId) return false;
+      if (status && view.evaluation.state !== status && r.alertState !== status) return false;
+      if (q && !`${r.name} ${r.resourceKey} ${r.owner} ${r.kind}`.toLowerCase().includes(q)) return false;
+      return true;
+    }).map(r => presentResource(r));
+  };
+  r.get('/v1/resources', (req, res) => { res.json(paginate(req, resourceQuery(req), 50)); });
+  r.get('/v1/resources/:id', h(async (req, res) => {
+    const row = db.resources.find(x => x.id === req.params.id);
+    if (!row) return fail(res, 404, 'Resource not found');
+    const alerts = db.incidents.filter(i => i.fingerprint === `resource-limit:${row.id}`).slice(0, 20);
+    const measurements = await readResourceMeasurements(row.id, 100);
+    ok(res, { resource: presentResource(row), alerts, measurements });
+  }));
+  r.post('/v1/resources', requireRole('operator'), h((req, res) => {
+    const row = buildResource(req.body);
+    db.resources.push(row);
+    persist();
+    audit(operatorName(req), 'RESOURCE_CREATED', 'CAPACITY', row.id, `${row.kind} ${row.name} · ${row.capacity ?? 'unknown'} ${row.unit} · owner ${row.owner}`);
+    evaluateResourceAlerts();
+    ok(res, presentResource(row), 201);
+  }));
+  r.patch('/v1/resources/:id', requireRole('operator'), h((req, res) => {
+    const idx = db.resources.findIndex(x => x.id === req.params.id);
+    if (idx === -1) return fail(res, 404, 'Resource not found');
+    const prev = db.resources[idx];
+    const row = buildResource(req.body, prev);
+    row.id = prev.id;
+    row.createdAt = prev.createdAt;
+    row.usage = row.usage;
+    row.measuredAt = prev.measuredAt;
+    row.lastMeasurementId = prev.lastMeasurementId;
+    row.freshness = prev.freshness;
+    row.alertState = prev.alertState;
+    row.alertSince = prev.alertSince;
+    row.managedBy = prev.managedBy;
+    db.resources[idx] = row;
+    persist();
+    audit(operatorName(req), 'RESOURCE_UPDATED', 'CAPACITY', row.id, `${row.name}: owner ${row.owner}, capacity ${row.capacity ?? 'unknown'} ${row.unit}, warning ${row.warningValue ?? 'default'}, critical ${row.criticalValue ?? 'default'}`);
+    evaluateResourceAlerts();
+    ok(res, presentResource(row));
+  }));
+  r.delete('/v1/resources/:id', requireRole('it_administrator'), h((req, res) => {
+    const row = db.resources.find(x => x.id === req.params.id);
+    if (!row) return fail(res, 404, 'Resource not found');
+    db.resources = db.resources.filter(x => x.id !== row.id);
+    closeIncidentsReferencing([row.id], operatorName(req), `resource ${row.name} was deleted`);
+    persist();
+    audit(operatorName(req), 'RESOURCE_DELETED', 'CAPACITY', row.id, row.name);
+    ok(res, { deleted: true });
+  }));
+  r.post('/v1/resources/:id/measure', requireRole('operator'), h((req, res) => {
+    const row = db.resources.find(x => x.id === req.params.id);
+    if (!row) return fail(res, 404, 'Resource not found');
+    const result = applyMeasurement(row, req.body);
+    if (!result.idempotent) {
+      persist();
+      audit(operatorName(req), 'RESOURCE_MEASURED', 'CAPACITY', row.id, `${row.name}: ${row.usage} ${row.unit}`);
+    }
+    evaluateResourceAlerts();
+    if (!result.idempotent) recordResourceMeasurement(row);
+    ok(res, { ...presentResource(row), idempotent: result.idempotent });
+  }));
+  r.post('/v1/resources/evaluate', requireRole('operator'), h((_req, res) => {
+    evaluateResourceAlerts();
+    ok(res, db.resources.map(r => presentResource(r)));
+  }));
+
   r.get('/v1/servers', (_req, res) => { ok(res, db.servers.map(publicServer)); });
   r.get('/v1/servers/:id', (req, res) => {
     const s = db.servers.find(x => x.id === req.params.id);
@@ -806,6 +894,7 @@ export function buildRouter(): Router {
   r.post('/v1/servers', requireRole('it_administrator'), h((req, res) => {
     const srv = buildServer(req);
     db.servers.push(srv);
+    syncServerPlan(srv);
     persist();
     audit(operatorName(req), 'SERVER_REGISTERED', 'INFRASTRUCTURE', srv.id, `${srv.hostname} (${srv.ip}) ${srv.environment} · ${srv.provider} ${srv.region}`);
     broadcast('servers_changed', null);
@@ -818,6 +907,7 @@ export function buildRouter(): Router {
     const prev = db.servers[idx];
     const updated = buildServer(req, prev);
     db.servers[idx] = updated;
+    syncServerPlan(updated);
     persist();
     const sdiff = (['hostname', 'ip', 'environment', 'provider', 'region', 'plan', 'notes'] as const)
       .filter(k => String(prev[k] ?? '') !== String(updated[k] ?? '')).map(k => `${k}: ${prev[k] || '—'} → ${updated[k] || '—'}`);
@@ -838,10 +928,11 @@ export function buildRouter(): Router {
     db.monitors = db.monitors.filter(m => m.serverId !== srv.id);
     for (const m of removedMonitors) { delete db.monitorBuckets[m.id]; forgetMonitor(m.id); }
     db.servers = db.servers.filter(x => x.id !== srv.id);
+    const removedResources = detachServerResources(srv.id);
     void deleteServerMetrics(srv.id);
     forgetServer(srv.id);
     forgetRegistryReferences({ serverId: srv.id });
-    closeIncidentsReferencing([srv.id, ...removedMonitors.map(m => m.id)], operatorName(req), `server ${srv.hostname} was removed`);
+    closeIncidentsReferencing([srv.id, ...removedMonitors.map(m => m.id), ...removedResources], operatorName(req), `server ${srv.hostname} was removed`);
     persist();
     audit(operatorName(req), 'SERVER_REMOVED', 'INFRASTRUCTURE', srv.id, `${srv.hostname} (${srv.ip}) removed with ${removedMonitors.length} monitor(s)`);
     broadcast('servers_changed', null);
@@ -950,6 +1041,7 @@ export function buildRouter(): Router {
     db.applications = db.applications.filter(a => a.id !== app.id);
     closeIncidentsReferencing([app.id, ...removed.map(m => m.id)], operatorName(req), `application ${app.name} was deleted`);
     for (const s of db.servers) if (s.applicationId === app.id) s.applicationId = '';
+    unlinkApplicationResources(app.id);
     forgetRegistryReferences({ applicationId: app.id });
     persist();
     audit(operatorName(req), 'APPLICATION_DELETED', 'APPLICATION', app.id, `${app.name} deleted with ${removed.length} monitor(s)`);
@@ -2056,7 +2148,7 @@ export function buildRouter(): Router {
   r.use((_req, res) => { fail(res, 404, 'API endpoint not found'); });
   r.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof ValidationError) return fail(res, 400, err.message);
-    if (err instanceof RegistryConflict) return fail(res, 409, err.message);
+    if (err instanceof RegistryConflict || err instanceof MeasurementConflict) return fail(res, 409, err.message);
     if (err instanceof SecretsKeyMissingError) return fail(res, 503, err.message);
     if ((err as { type?: string }).type === 'entity.parse.failed') return fail(res, 400, 'Request body is not valid JSON');
     log.error('api', 'unhandled error', { error: err as Error });

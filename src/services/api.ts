@@ -5,7 +5,8 @@ import {
   LoadBalancerState, FailoverPreflight, DrOverall, CheckRecord, BackupStatus, DatabaseHealth, DatabaseReport, HostingerInfo,
   ProviderConnectionView, ProviderInstanceView,
   ReliabilityInsights, OpsBackupHealth, NotificationDelivery, NotificationDeliveryStats, NotificationDeliveryDetail, NotificationHealth,
-  SmtpCheckResult, RegistryComponent, DependencyLink, RegistryImpact,
+  SmtpCheckResult,   RegistryComponent, DependencyLink, RegistryImpact,
+  ResourceMeasurement, ResourceView, QuotaWindow,
 } from '../types';
 
 export interface HealthCheckResponse {
@@ -368,6 +369,15 @@ export const api = {
   createRegistryComponent: (data: Partial<RegistryComponent>) => unwrap(api.post<ApiResponse<RegistryComponent>>('/api/v1/registry', data)),
   updateRegistryComponent: (id: string, data: Partial<RegistryComponent>) => unwrap(api.patch<ApiResponse<RegistryComponent>>(`/api/v1/registry/${encodeURIComponent(id)}`, data)),
   deleteRegistryComponent: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean; linksRemoved: number }>>(`/api/v1/registry/${encodeURIComponent(id)}`)),
+
+  getResources: (query = '') => api.get<PaginatedApiResponse<ResourceView>>(`/api/v1/resources${query}`),
+  getResource: (id: string) => unwrap(api.get<ApiResponse<{ resource: ResourceView; alerts: Incident[]; measurements: ResourceMeasurement[] }>>(`/api/v1/resources/${encodeURIComponent(id)}`)),
+  createResource: (data: Partial<ResourceView>) => unwrap(api.post<ApiResponse<ResourceView>>('/api/v1/resources', data)),
+  updateResource: (id: string, data: Partial<ResourceView>) => unwrap(api.patch<ApiResponse<ResourceView>>(`/api/v1/resources/${encodeURIComponent(id)}`, data)),
+  deleteResource: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/resources/${encodeURIComponent(id)}`)),
+  measureResource: (id: string, data: { usage: number; measuredAt?: string; measurementId?: string; window?: QuotaWindow }) =>
+    unwrap(api.post<ApiResponse<ResourceView & { idempotent: boolean }>>(`/api/v1/resources/${encodeURIComponent(id)}/measure`, data)),
+  evaluateResources: () => unwrap(api.post<ApiResponse<ResourceView[]>>('/api/v1/resources/evaluate', {})),
   createDependencyLink: (data: Partial<DependencyLink>) => unwrap(api.post<ApiResponse<DependencyLink>>('/api/v1/dependency-links', data)),
   updateDependencyLink: (id: string, data: Partial<DependencyLink>) => unwrap(api.patch<ApiResponse<DependencyLink>>(`/api/v1/dependency-links/${encodeURIComponent(id)}`, data)),
   deleteDependencyLink: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/dependency-links/${encodeURIComponent(id)}`)),

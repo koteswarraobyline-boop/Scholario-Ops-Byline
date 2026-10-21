@@ -5,7 +5,8 @@
  * module reads, from the Cloudflare API:
  *   GET /accounts/:acc/load_balancers/pools               pool + origin config / health
  *   GET /accounts/:acc/load_balancers/pools/:id/health    per-PoP origin health, RTT, response code
- *   GET /zones?name=… + GET /zones/:zone/load_balancers   routing (default pool order), optional
+ *   GET /accounts/:acc/load_balancers                     routing, same account permission as the pools
+ *   GET /zones/:zone/load_balancers                       routing fallback when the account list is not allowed
  *
  * Nothing here modifies Cloudflare. When a call fails the affected values become null
  * (unknown) — previous "healthy" values are never carried forward as if they were live.
@@ -203,15 +204,49 @@ function decideTraffic(lb: RawLb, pools: LbPool[]): { activePoolId: string | nul
   return { activePoolId: null, traffic: live.map(j => ({ poolId: j.pid, percent: null })) };
 }
 
+/** Account list first (no Zone permission required). Zone list is the fallback. */
+async function loadBalancerFor(app: Application): Promise<RawLb> {
+  const hostname = app.loadBalancer!.hostname;
+  const accountId = app.loadBalancer!.accountId;
+  const problems: string[] = [];
+  if (accountId) {
+    try {
+      const found: RawLb[] = [];
+      for (let page = 1; page <= 20; page++) {
+        const res = await cf<RawLb[]>(`/accounts/${accountId}/load_balancers?per_page=50&page=${page}`);
+        found.push(...(res.result ?? []));
+        if (!res.result_info?.total_pages || page >= res.result_info.total_pages) break;
+      }
+      const lb = found.find(l => l.name === hostname);
+      if (lb) return lb;
+      problems.push(`No load balancer named ${hostname} on the Cloudflare account`);
+    } catch (err) {
+      problems.push(describe(err));
+    }
+  }
+  try {
+    const zoneId = await zoneIdFor(hostname);
+    const res = await cf<RawLb[]>(`/zones/${zoneId}/load_balancers`);
+    const lb = (res.result ?? []).find(l => l.name === hostname);
+    if (lb) return lb;
+    problems.push(`No load balancer named ${hostname} in the zone`);
+  } catch (err) {
+    problems.push(describe(err));
+  }
+  const zoneHidden = problems.some(p => /zone found/i.test(p));
+  const denied = problems.some(p => /permission required/i.test(p));
+  if (zoneHidden && denied) {
+    throw new CloudflareError('API token cannot read which pool is serving. Add Account › Load Balancing: Load Balancers › Read, or Zone › Zone › Read and Zone › Load Balancers › Read for this zone.');
+  }
+  throw new CloudflareError(problems.join(' · ') || `Load balancer ${hostname} was not found`);
+}
+
 async function readRouting(app: Application, pools: LbPool[], now: string): Promise<LbRouting> {
   const hostname = app.loadBalancer!.hostname;
   const base: LbRouting = { hostname, found: false, enabled: null, proxied: null, steeringPolicy: null, defaultPools: [], fallbackPool: null, activePoolId: null, traffic: [], fetchedAt: null, error: null };
   if (!hostname) return { ...base, error: 'No load balancer hostname configured' };
   try {
-    const zoneId = await zoneIdFor(hostname);
-    const res = await cf<RawLb[]>(`/zones/${zoneId}/load_balancers`);
-    const lb = res.result.find(l => l.name === hostname);
-    if (!lb) return { ...base, fetchedAt: now, error: `No load balancer named ${hostname} in the zone` };
+    const lb = await loadBalancerFor(app);
     const defaultPools = lb.default_pools ?? [];
     const decided = decideTraffic(lb, pools);
     return {

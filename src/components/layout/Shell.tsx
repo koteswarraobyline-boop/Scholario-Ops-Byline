@@ -136,6 +136,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
         { id: 'applications', label: 'Applications', icon: Layers, count: `${systemSummary.healthyApps}/${systemSummary.totalApps}` },
         { id: 'monitors', label: 'Monitors', icon: Radio, count: `${systemSummary.healthyMonitors}/${systemSummary.totalMonitors}` },
         { id: 'infrastructure', label: 'Infrastructure', icon: Server, count: `${systemSummary.healthyServers}/${systemSummary.totalServers}` },
+        { id: 'resources', label: 'Capacity', icon: Gauge, },
         { id: 'dependencies', label: 'Dependencies', icon: Cpu }
       ]
     },

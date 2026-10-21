@@ -945,7 +945,7 @@ export interface AuditLog {
   operator: string;
   action: string;
   category: 'INCIDENT' | 'FAILOVER' | 'MAINTENANCE' | 'MONITOR' | 'CLOUDFLARE' | 'INFRASTRUCTURE' | 'RUNBOOK'
-    | 'APPLICATION' | 'AUTH' | 'USER' | 'NOTIFICATION' | 'DEPLOYMENT' | 'BACKUP' | 'REGISTRY';
+    | 'APPLICATION' | 'AUTH' | 'USER' | 'NOTIFICATION' | 'DEPLOYMENT' | 'BACKUP' | 'REGISTRY' | 'CAPACITY';
   targetId: string;
   details: string;
 }
@@ -1342,4 +1342,85 @@ export interface SyntheticTransactionResult {
   responseSnippet: string;
   headers?: Record<string, string>;
   testedAt: string;
+}
+
+/** First-class capacity record. A user headcount is not a seat limit: those are different kinds. */
+export type ResourceKind =
+  | 'CPU' | 'MEMORY' | 'SERVER_DISK' | 'STORAGE'
+  | 'SEATS' | 'ACTIVE_USERS'
+  | 'DATABASE_SIZE' | 'DATABASE_CONNECTIONS'
+  | 'API_QUOTA';
+
+export type ResourceUnit =
+  | 'cores' | 'millicores' | 'percent'
+  | 'bytes' | 'GiB' | 'GB'
+  | 'seats' | 'users' | 'connections' | 'requests';
+
+export type ResourceSource = 'manual' | 'config' | 'provider' | 'discovered';
+export type ThresholdMode = 'percent' | 'absolute';
+export type QuotaWindow = 'minute' | 'hour' | 'day';
+export type ResourceFreshness = 'FRESH' | 'STALE' | 'MISSING' | 'ERROR' | 'UNKNOWN';
+export type ResourceAlertState = 'NORMAL' | 'WARNING' | 'CRITICAL' | 'EXCEEDED' | 'STALE' | 'UNKNOWN';
+
+export interface ResourceLimit {
+  id: string;
+  resourceKey: string;
+  kind: ResourceKind;
+  name: string;
+  description: string;
+  owner: string;
+  serverId: string | null;
+  applicationId: string | null;
+  /** Null when the limit is unknown. Never use 0 to mean unknown or unlimited. */
+  capacity: number | null;
+  unlimited: boolean;
+  /** Null when nothing has been measured. Never treat that as zero. */
+  usage: number | null;
+  unit: ResourceUnit;
+  source: ResourceSource;
+  thresholdMode: ThresholdMode;
+  /** Null together with criticalValue means "use the server override, then the global default". */
+  warningValue: number | null;
+  criticalValue: number | null;
+  hardLimit: number | null;
+  /** Percent points, or the same unit as an absolute threshold. Recovery requires a drop of this size. */
+  recoveryMargin: number;
+  /** Set only for API_QUOTA. Usage is requests inside this window and is never converted to another window. */
+  quotaWindow: QuotaWindow | null;
+  measuredAt: string | null;
+  lastSyncAt: string | null;
+  freshness: ResourceFreshness;
+  syncError: string;
+  enabled: boolean;
+  alertState: ResourceAlertState;
+  alertSince: string | null;
+  /** server-plan rows follow the server plan. agent-db rows follow a database the agent reported. */
+  managedBy: 'server-plan' | 'agent-db' | null;
+  lastMeasurementId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResourceEvaluation {
+  state: ResourceAlertState;
+  freshness: ResourceFreshness;
+  utilizationPercent: number | null;
+  thresholdFrom: 'resource' | 'monitor' | 'default' | 'none';
+  mode: ThresholdMode;
+  warning: number | null;
+  critical: number | null;
+}
+
+export interface ResourceView extends ResourceLimit {
+  evaluation: ResourceEvaluation;
+}
+
+/** One accepted usage sample. Missing samples are not filled in. */
+export interface ResourceMeasurement {
+  measuredAt: string;
+  usage: number;
+  capacity: number | null;
+  unit: string;
+  source: string;
+  alertState: ResourceAlertState;
 }

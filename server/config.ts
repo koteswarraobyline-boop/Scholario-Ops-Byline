@@ -136,6 +136,8 @@ export const config = {
   sslExpiryWarnDays: int('SSL_EXPIRY_WARN_DAYS', 21, 1),
   /** Minimum minutes between notifications for the same alert (prevents notification storms) */
   alertCooldownMin: int('ALERT_COOLDOWN_MIN', 15, 0),
+  /** A resource measurement older than this is STALE. It is not treated as healthy and it is not replaced with zero. */
+  resourceStaleSec: int('RESOURCE_STALE_SEC', 900, 1),
   /** Optional: signs outgoing WEBHOOK notifications (X-Scholario-Signature, HMAC-SHA256) so receivers can verify them */
   notifyWebhookSecret: str('NOTIFY_WEBHOOK_SECRET'),
   /** Hostnames / IPs / CIDRs that notification webhooks may reach although they are private or loopback (never link-local) */
