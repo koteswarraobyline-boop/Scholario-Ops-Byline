@@ -11,6 +11,7 @@
 import { HostingerInfo, ProviderStatus } from '../src/types/index.ts';
 import { config, isHostingerConfigured } from './config.ts';
 import { db } from './store.ts';
+import { syncServerPlan } from './resources.ts';
 
 const API = 'https://developers.hostinger.com/api/vps/v1';
 
@@ -148,6 +149,7 @@ export function attachLegacyServers(vms: HostingerVm[], infos: HostingerInfo[]):
     if (info.plan) srv.plan = info.plan;
     if (info.cpus && info.ramGb && info.diskGb) {
       srv.planSpec = { name: info.plan || srv.planSpec?.name || '', cpuCores: info.cpus, ramGb: info.ramGb, diskGb: info.diskGb, source: 'hostinger' };
+      syncServerPlan(srv);
     }
     if (!srv.os && info.os) srv.os = info.os;
     if (info.region && (!srv.region || srv.region === 'Unknown' || srv.region === 'Not available')) srv.region = info.region;

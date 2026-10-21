@@ -339,7 +339,7 @@ export const TrafficFlowChart: React.FC = () => {
               }`}>
                 {!integrations?.cloudflare.configured
                   ? 'Cloudflare not configured'
-                  : zone ? `Zone ${zone.status}${zone.sslMode ? ` · SSL ${zone.sslMode}` : ''}` : 'Zone not found in account'}
+                  : zone ? `Zone ${zone.status}${zone.sslMode ? ` · SSL ${zone.sslMode}` : ''}` : 'Token cannot see this zone'}
               </span>
             </div>
 
@@ -355,9 +355,9 @@ export const TrafficFlowChart: React.FC = () => {
                 <Network className="w-4 h-4" />
               </div>
               <span className="font-semibold text-xs font-mono">{app.loadBalancer ? 'Load Balancer' : 'DNS Record'}</span>
-              <span className={`text-[10px] font-mono mt-0.5 ${muted}`}>
+              <span className={`text-[10px] font-mono mt-0.5 break-words ${muted}`}>
                 {app.loadBalancer
-                  ? (lbRouting?.found ? `order ${lbRouting.defaultPools.map(lbPoolName).join(' → ')}` : lbRouting?.error ? 'Routing not readable' : `Cloudflare LB: ${(loadBalancer?.status ?? 'PENDING').replace('_', ' ')}`)
+                  ? (lbRouting?.found ? `order ${lbRouting.defaultPools.map(lbPoolName).join(' → ')}` : lbRouting?.error ? lbRouting.error : `Cloudflare LB: ${(loadBalancer?.status ?? 'PENDING').replace('_', ' ')}`)
                   : dnsRecord ? `${dnsRecord.type} → ${dnsRecord.target}` : 'Record not synced'}
               </span>
               <span className={`text-[9px] font-mono mt-1 px-1.5 py-0.5 rounded font-semibold ${

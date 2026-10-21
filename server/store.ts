@@ -13,7 +13,7 @@ import type pg from 'pg';
 import {
   Application, VpsServer, Monitor, Incident, AuditLog, CommunicationChannel,
   EscalationPolicy, MaintenanceWindow, Runbook, Deployment, BackupRecord, OpsUser, ServerMetricPoint, CheckRecord,
-  RegistryComponent, DependencyLink, ProviderConnectionRecord, ProviderInstanceRecord,
+  RegistryComponent, DependencyLink, ProviderConnectionRecord, ProviderInstanceRecord, ResourceLimit,
 } from '../src/types/index.ts';
 import { DATA_DIR, config } from './config.ts';
 import { query, withTransaction, migrate, T } from './db.ts';
@@ -74,6 +74,7 @@ export interface StoreData {
   dependencyLinks: DependencyLink[];
   providerConnections: ProviderConnectionRecord[];
   providerInstances: ProviderInstanceRecord[];
+  resources: ResourceLimit[];
 }
 
 function emptyStore(): StoreData {
@@ -81,7 +82,7 @@ function emptyStore(): StoreData {
     version: 1, servers: [], applications: [], monitors: [], monitorBuckets: {}, incidents: [], incidentSeq: 1000,
     auditLogs: [], users: [], refreshTokens: [], channels: [], escalationPolicies: [], maintenanceWindows: [],
     runbooks: [], deployments: [], backups: [], registry: [], dependencyLinks: [],
-    providerConnections: [], providerInstances: [],
+    providerConnections: [], providerInstances: [], resources: [],
   };
 }
 
@@ -377,6 +378,52 @@ const TABLES: TableDef<unknown>[] = [
         region: (r.region as string) ?? null, plan: (r.plan as string) ?? null, cpu: num(r.cpu), ramGb: num(r.ram_gb), diskGb: num(r.disk_gb),
         powerState: (r.power_state as string) ?? null, status: r.status as ProviderInstanceRecord['status'],
         fetchedAt: r.fetched_at ? iso(r.fetched_at) : null, lastSeenAt: r.last_seen_at ? iso(r.last_seen_at) : null, absent: r.absent as boolean,
+      }));
+    },
+  },
+  {
+    table: 'resource_limits', key: ['id'],
+    columns: ['id', 'resource_key', 'kind', 'name', 'description', 'owner', 'server_id', 'application_id', 'capacity', 'unlimited', 'usage', 'unit', 'source',
+      'threshold_mode', 'warning_value', 'critical_value', 'hard_limit', 'recovery_margin', 'quota_window', 'measured_at', 'last_sync_at', 'freshness', 'sync_error',
+      'enabled', 'alert_state', 'alert_since', 'managed_by', 'last_measurement_id', 'created_at', 'updated_at'],
+    rows: d => d.resources.map(r => ({
+      k: r.id,
+      values: [r.id, r.resourceKey, r.kind, r.name, r.description, r.owner, uuidOrNull(r.serverId), uuidOrNull(r.applicationId), r.capacity, r.unlimited, r.usage, r.unit, r.source,
+        r.thresholdMode, r.warningValue, r.criticalValue, r.hardLimit, r.recoveryMargin, r.quotaWindow, isoOrNull(r.measuredAt), isoOrNull(r.lastSyncAt), r.freshness, r.syncError,
+        r.enabled, r.alertState, isoOrNull(r.alertSince), r.managedBy, r.lastMeasurementId, r.createdAt, r.updatedAt],
+    })),
+    load: (rows, d) => {
+      d.resources = rows.map(r => ({
+        id: r.id as string,
+        resourceKey: r.resource_key as string,
+        kind: r.kind as ResourceLimit['kind'],
+        name: r.name as string,
+        description: (r.description as string) ?? '',
+        owner: r.owner as string,
+        serverId: (r.server_id as string) ?? null,
+        applicationId: (r.application_id as string) ?? null,
+        capacity: num(r.capacity),
+        unlimited: Boolean(r.unlimited),
+        usage: num(r.usage),
+        unit: r.unit as ResourceLimit['unit'],
+        source: r.source as ResourceLimit['source'],
+        thresholdMode: r.threshold_mode as ResourceLimit['thresholdMode'],
+        warningValue: num(r.warning_value),
+        criticalValue: num(r.critical_value),
+        hardLimit: num(r.hard_limit),
+        recoveryMargin: Number(r.recovery_margin),
+        quotaWindow: (r.quota_window as ResourceLimit['quotaWindow']) ?? null,
+        measuredAt: r.measured_at ? iso(r.measured_at) : null,
+        lastSyncAt: r.last_sync_at ? iso(r.last_sync_at) : null,
+        freshness: r.freshness as ResourceLimit['freshness'],
+        syncError: (r.sync_error as string) ?? '',
+        enabled: Boolean(r.enabled),
+        alertState: r.alert_state as ResourceLimit['alertState'],
+        alertSince: r.alert_since ? iso(r.alert_since) : null,
+        managedBy: (r.managed_by as ResourceLimit['managedBy']) ?? null,
+        lastMeasurementId: (r.last_measurement_id as string) ?? null,
+        createdAt: iso(r.created_at),
+        updatedAt: iso(r.updated_at),
       }));
     },
   },

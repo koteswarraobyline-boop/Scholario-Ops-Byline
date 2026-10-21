@@ -29,6 +29,8 @@ import { log } from './logger.ts';
 import { serverInsight, applicationSlo } from './insights.ts';
 import { opsBackupHealth } from './opsBackup.ts';
 import { formatEta } from '../src/lib/insights.ts';
+import { assessment } from './resources.ts';
+import type { ResourceLimit } from '../src/types/index.ts';
 
 export interface AlertInput {
   fingerprint: string;
@@ -102,7 +104,7 @@ export function resolveAlert(fingerprint: string, source: string, recovery: stri
 }
 
 /** openAlert, and raise the severity of an already-open incident in place (with a FIRING notification) */
-function openOrEscalate(a: AlertInput) {
+export function openOrEscalate(a: AlertInput): { incident: Incident; created: boolean } {
   const { incident, created } = openAlert(a);
   const rank: Record<IncidentSeverity, number> = { INFO: 0, WARNING: 1, HIGH: 2, CRITICAL: 3, EMERGENCY: 4 };
   if (!created && rank[a.severity] > rank[incident.severity]) {
@@ -113,6 +115,7 @@ function openOrEscalate(a: AlertInput) {
     broadcast('incident_update', incident);
     notifyIncident(incident, 'FIRING');
   }
+  return { incident, created };
 }
 
 /** Predictive alerts: disk-full forecast, flapping monitors, SLO error-budget burn. */
@@ -164,6 +167,65 @@ export function evaluateInsightAlerts() {
       });
     } else if (b.burnRate1h !== null) resolveAlert(fp, 'SLO Monitor', `${app.name} error budget burn back within SLO (${b.remainingPercent}% left)`);
   }
+}
+
+function resourceDetail(r: ResourceLimit): string {
+  const ev = assessment(r);
+  const used = r.usage === null ? 'usage not measured' : `${r.usage} ${r.unit}`;
+  const cap = r.unlimited ? 'unlimited' : r.capacity === null ? 'capacity unknown' : `${r.capacity} ${r.unit}`;
+  const pct = ev.utilizationPercent === null ? '' : ` (${ev.utilizationPercent}% of capacity)`;
+  const thr = ev.warning === null ? 'no threshold' : `${ev.mode} warning ${ev.warning}, critical ${ev.critical} from ${ev.thresholdFrom}`;
+  return `${r.name}: ${used}${pct}; ${cap}; ${thr}; owner ${r.owner}`;
+}
+
+/** Warning, critical and exceeded open one incident per resource. Stale or missing data does not recover it and is not read as zero. */
+export function evaluateResourceAlerts(): void {
+  const now = new Date().toISOString();
+  let changed = false;
+  for (const r of db.resources) {
+    const ev = assessment(r);
+    const alerting = ev.state === 'WARNING' || ev.state === 'CRITICAL' || ev.state === 'EXCEEDED';
+    const alertSince = alerting ? (r.alertState === ev.state ? r.alertSince : now) : ev.state === 'NORMAL' ? null : r.alertSince;
+    if (r.alertState !== ev.state || r.freshness !== ev.freshness || r.alertSince !== alertSince) {
+      r.alertState = ev.state;
+      r.freshness = ev.freshness;
+      r.alertSince = alertSince;
+      r.updatedAt = now;
+      changed = true;
+    }
+    const fp = `resource-limit:${r.id}`;
+    const server = r.serverId ? db.servers.find(s => s.id === r.serverId) : undefined;
+    if (!r.enabled) {
+      resolveAlert(fp, 'Capacity', `${r.name} monitoring is disabled`);
+      continue;
+    }
+    if (ev.state === 'NORMAL') {
+      resolveAlert(fp, 'Capacity', `${r.name} is back within its limit (${resourceDetail(r)})`);
+    } else if (alerting) {
+      const severity: IncidentSeverity = ev.state === 'EXCEEDED' ? 'CRITICAL' : ev.state === 'CRITICAL' ? 'HIGH' : 'WARNING';
+      const title = ev.state === 'EXCEEDED' ? `${r.name} is over capacity` : ev.state === 'CRITICAL' ? `${r.name} is critical` : `${r.name} is near capacity`;
+      const detail = resourceDetail(r);
+      const rank: Record<IncidentSeverity, number> = { INFO: 0, WARNING: 1, HIGH: 2, CRITICAL: 3, EMERGENCY: 4 };
+      const existing = openFor(fp);
+      // A lower severity updates the same incident. It does not open another one and does not send FIRING again.
+      if (existing && rank[severity] < rank[existing.severity]) {
+        existing.severity = severity;
+        existing.title = title;
+        existing.rootCause = detail;
+        existing.timeline.push({ id: crypto.randomUUID(), timestamp: new Date().toISOString(), source: 'Capacity', level: 'INFO', message: `Reduced to ${severity}: ${detail}` });
+        persist();
+        broadcast('incident_update', existing);
+        continue;
+      }
+      const { incident, created } = openOrEscalate({
+        fingerprint: fp, title, severity, detail,
+        applicationId: r.applicationId ?? server?.applicationId ?? undefined,
+        environment: server?.environment ?? 'PRD', source: 'Capacity', affected: [r.name],
+      });
+      if (created && r.owner) incident.owner = r.owner;
+    }
+  }
+  if (changed) persist();
 }
 
 /** Derives alerts from current state. Unknown / not-configured states never open or close alerts. */
@@ -304,6 +366,8 @@ export function evaluateAlerts() {
         openAlert({ fingerprint: fp, title: `SSL certificate for ${m.target} expires soon`, severity: 'WARNING', detail: m.history[0]?.detail ?? 'Certificate close to expiry', applicationId: m.applicationId, environment: m.environment, source: 'SSL Monitor', affected: [m.target] });
       } else if (m.status === 'HEALTHY') resolveAlert(fp, 'SSL Monitor', `Certificate for ${m.target} renewed`);
     }
+
+    evaluateResourceAlerts();
   } catch (err) {
     log.error('alerts', 'alert evaluation failed', { error: err as Error });
   }

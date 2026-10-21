@@ -17,9 +17,10 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { config, isCloudflareConfigured, isHostingerConfigured, DATA_DIR } from './config.ts';
-import { initStore, flush, flushMetrics, StoreDataError } from './store.ts';
+import { initStore, flush, flushMetrics, StoreDataError, persist } from './store.ts';
 import { closePool, query, SCHEMA, MigrationError } from './db.ts';
 import { startHistory, flushChecks } from './history.ts';
+import { flushResourceMeasurements, startResourceHistory } from './resourceHistory.ts';
 import { startDeliveryLog, flushDeliveries } from './deliveries.ts';
 import { startLeaderElection, releaseLeadership } from './leader.ts';
 import { restoreNotificationMemory, flushNotificationGroups, replayPendingGroupSummaries } from './notify.ts';
@@ -32,6 +33,7 @@ import { syncLoadBalancers } from './loadbalancer.ts';
 import { closeAllSseClients } from './events.ts';
 import { log } from './logger.ts';
 import { evaluateAlerts } from './alerts.ts';
+import { syncAllServerPlans } from './resources.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.argv.includes('--dev') || process.env.NODE_ENV === 'development';
@@ -120,7 +122,9 @@ async function waitForStore(): Promise<boolean> {
 const localUiSafeMode = process.env.LOCAL_UI_SAFE_MODE === 'true';
 
 function startBackgroundWork() {
+  if (syncAllServerPlans()) persist();
   startHistory();
+  startResourceHistory();
   startDeliveryLog();
   // One process sends escalations / reminders (advisory lock); duplicate protection survives restarts
   startLeaderElection(30_000, () => {
@@ -317,7 +321,7 @@ async function main() {
     server.closeIdleConnections?.();
     const shutdownWork = flushNotificationGroups().then(() => localUiSafeMode
       ? closePool()
-      : Promise.allSettled([flush(), flushMetrics(), flushChecks(), flushDeliveries(), releaseLeadership()]).then(() => closePool()));
+      : Promise.allSettled([flush(), flushMetrics(), flushChecks(), flushResourceMeasurements(), flushDeliveries(), releaseLeadership()]).then(() => closePool()));
     void shutdownWork
       .then(() => log.info('server', 'shutdown complete'))
       .finally(() => process.exit(0));

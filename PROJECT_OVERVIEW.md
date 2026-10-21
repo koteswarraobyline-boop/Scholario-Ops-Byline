@@ -115,6 +115,7 @@ Login at `/login`. Every other route needs a session and is wrapped in the `Shel
 | `/setup` | Setup & Connections | Servers, applications (PRD/DR URLs, inventory, DB probe, thresholds), Cloudflare LB mapping, agent install |
 | `/applications` | Applications | Per-application PRD/DR health, DR readiness, availability |
 | `/infrastructure` | Infrastructure | VPS telemetry: CPU, RAM, disk, load, network, services, processes |
+| `/resources` | Capacity | Limits, measured usage, warning and critical thresholds |
 | `/monitors` | Monitors | HTTP/TCP/DNS/SSL monitors, history, latency charts, manual probe |
 | `/incidents` | Incidents | Incident list and timeline: acknowledge, status, severity, assign, notes, resolve |
 | `/resilience` | DR / Resilience | DR dashboard, Load Balancer failover console |
@@ -143,6 +144,7 @@ All routes are under `/api`. Health endpoints live outside the API router: `/api
 | Servers | CRUD on `/v1/servers`, `/:id/metrics`, `/:id/agent`, `POST /:id/rotate-token` |
 | Applications | CRUD on `/v1/applications`, `/:id/dr-readiness`, `/:id/availability`, `/:id/failover/preflight`, `POST /:id/failover/decision`, `POST /:id/failover` |
 | Monitors | CRUD on `/v1/monitors`, `/:id/toggle`, `/:id/probe`, `/:id/history`, `POST /v1/monitors/probe-all` |
+| Capacity | `GET/POST /v1/resources`, `GET/PATCH/DELETE /v1/resources/:id`, `POST /:id/measure`, `POST /v1/resources/evaluate` |
 | Tools | `POST /v1/tools/http`, `/tcp`, `/dns`, `/ssl` (one-off diagnostics) |
 | Incidents | `GET/POST /v1/incidents`, `/:id/acknowledge`, `/:id/status`, `/:id/severity`, `/:id/assign`, `/:id/notes`, `/:id/resolve` |
 | Notifications | CRUD on `/v1/channels`, `POST /:id/test`, `GET/PUT /v1/escalation-policies` |
@@ -154,7 +156,9 @@ All routes are under `/api`. Health endpoints live outside the API router: `/api
 
 ## 7. Database (PostgreSQL, schema `ops`)
 
-Tables: `meta`, `users`, `refresh_tokens`, `servers`, `applications`, `application_environments`, `application_load_balancers`, `monitors`, `monitor_buckets`, `check_results`, `server_metrics`, `incidents`, `audit_logs`, `channels`, `escalation_policies`, `maintenance_windows`, `runbooks`, `deployments`, `backups`.
+Tables: `meta`, `users`, `refresh_tokens`, `servers`, `applications`, `application_environments`, `application_load_balancers`, `monitors`, `monitor_buckets`, `check_results`, `server_metrics`, `incidents`, `audit_logs`, `channels`, `escalation_policies`, `maintenance_windows`, `runbooks`, `deployments`, `backups`, `resource_limits` (migration 010), `resource_measurements` (migration 011).
+
+- `resource_limits` stores capacity, usage, unit, owner, source and thresholds. Null capacity is unknown. `unlimited` is not zero. A migration copies existing server plan CPU, RAM and disk only. It does not copy registry user counts into seat limits. `resource_measurements` stores accepted usage samples for `CHECK_HISTORY_RETENTION_DAYS`. It is not backfilled.
 
 - `application_environments` (migration 003) holds the per-environment (PRD/DR) inventory: app port, health path, web server, process manager, routing, DB engine/name/port (`mysql` / `mariadb` / `postgresql`), and threshold overrides for replication lag and backup age. `NULL` means "not confirmed yet" and is shown as UNKNOWN/PENDING.
 - Retention: metrics `METRICS_RETENTION_HOURS` (48 h), check history `CHECK_HISTORY_RETENTION_DAYS` (90 d), audit `AUDIT_RETENTION_ENTRIES` (5000).

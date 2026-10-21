@@ -25,6 +25,7 @@ const MaintenanceView = lazy(() => import('./components/operations/MaintenanceVi
 const CommunicationsView = lazy(() => import('./components/communications/CommunicationsView').then(m => ({ default: m.CommunicationsView })));
 const ReportsView = lazy(() => import('./components/analytics/ReportsView').then(m => ({ default: m.ReportsView })));
 const ReliabilityView = lazy(() => import('./components/analytics/ReliabilityView').then(m => ({ default: m.ReliabilityView })));
+const ResourcesView = lazy(() => import('./components/capacity/ResourcesView').then(m => ({ default: m.ResourcesView })));
 const AuditLogsView = lazy(() => import('./components/admin/AuditLogsView').then(m => ({ default: m.AuditLogsView })));
 const UsersView = lazy(() => import('./components/admin/UsersView').then(m => ({ default: m.UsersView })));
 const SetupView = lazy(() => import('./components/setup/SetupView').then(m => ({ default: m.SetupView })));
@@ -78,6 +79,7 @@ const DashboardView: React.FC<{ tab: string }> = ({ tab }) => {
     maintenance:    <MaintenanceView />,
     communications: <CommunicationsView />,
     reliability:    <ReliabilityView />,
+    resources:      <ResourcesView />,
     reports:        <ReportsView />,
     audit:          <AuditLogsView />,
     users:          <UsersView />,
@@ -139,6 +141,7 @@ const DashboardRoutes: React.FC = () => (
     <Route path="/maintenance"   element={<DashboardView tab="maintenance" />} />
     <Route path="/communications"element={<DashboardView tab="communications" />} />
     <Route path="/reliability"   element={<DashboardView tab="reliability" />} />
+    <Route path="/resources"     element={<DashboardView tab="resources" />} />
     <Route path="/reports"       element={<DashboardView tab="reports" />} />
     <Route path="/audit"         element={<DashboardView tab="audit" />} />
     <Route path="/users"         element={<DashboardView tab="users" />} />

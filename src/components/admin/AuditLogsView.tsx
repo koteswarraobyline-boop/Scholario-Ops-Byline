@@ -10,7 +10,7 @@ import { Pagination } from '../ui/Pagination';
 
 const CATEGORIES: Array<AuditLog['category'] | ''> = [
   '', 'INCIDENT', 'FAILOVER', 'MAINTENANCE', 'MONITOR', 'CLOUDFLARE', 'INFRASTRUCTURE', 'RUNBOOK',
-  'APPLICATION', 'AUTH', 'USER', 'NOTIFICATION', 'DEPLOYMENT', 'BACKUP', 'REGISTRY',
+  'APPLICATION', 'AUTH', 'USER', 'NOTIFICATION', 'DEPLOYMENT', 'BACKUP', 'REGISTRY', 'CAPACITY',
 ];
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -18,7 +18,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   MAINTENANCE: 'text-purple-400', MONITOR: 'text-cyan-400', CLOUDFLARE: 'text-orange-400',
   INFRASTRUCTURE: 'text-emerald-400', RUNBOOK: 'text-yellow-400', USER: 'text-sky-400',
   NOTIFICATION: 'text-pink-400', APPLICATION: 'text-indigo-400', DEPLOYMENT: 'text-teal-400',
-  BACKUP: 'text-lime-400', REGISTRY: 'text-violet-400',
+  BACKUP: 'text-lime-400', REGISTRY: 'text-violet-400', CAPACITY: 'text-cyan-400',
 };
 
 const fmtDateTime = (iso: string) => {
