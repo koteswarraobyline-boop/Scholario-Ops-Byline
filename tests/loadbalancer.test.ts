@@ -30,6 +30,10 @@ const POOLS = [
 ];
 const health = (id: string, ip: string, rtt: string) => ({ pool_id: id, pop_health: { SAS: { healthy: true, origins: [{ [ip]: { healthy: true, rtt, failure_reason: 'No failures', response_code: 200 } }] } } });
 let mode: 'ok' | 'down' | 'perm' = 'ok';
+let lbPayload: Record<string, unknown> = {
+  id: 'lb1', name: 'app.example.com', enabled: true, proxied: true,
+  steering_policy: 'off', default_pools: [PRD_POOL, DR_POOL], fallback_pool: DR_POOL,
+};
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
   const u = String(input);
@@ -43,7 +47,7 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
   }
   if (u.includes(`/accounts/${ACC}/load_balancers/pools`)) return env(POOLS);
   if (u.includes('/zones?name=')) return env([{ id: 'zone1', name: 'example.com' }]);
-  if (u.includes('/zones/zone1/load_balancers')) return env([{ id: 'lb1', name: 'app.example.com', enabled: true, proxied: true, steering_policy: 'off', default_pools: [PRD_POOL, DR_POOL], fallback_pool: DR_POOL }]);
+  if (u.includes('/zones/zone1/load_balancers')) return env([lbPayload]);
   return env(null, 404, [{ code: 7003, message: 'not found' }]);
 }) as typeof fetch;
 
@@ -104,6 +108,7 @@ test('mapping is read from PostgreSQL and pool health is parsed', async () => {
   assert.equal(prd.origins[0].health[0].responseCode, 200);
   assert.equal(dr.origins[0].health[0].rttMs, 16.1);
   assert.equal(s.routing[0].activePoolId, PRD_POOL);
+  assert.deepEqual(s.routing[0].traffic, [{ poolId: PRD_POOL, percent: 100 }]);
   const r = readiness(db.applications.find(a => a.id === appId)!);
   for (const k of ['dr_pool', 'dr_origin']) assert.equal(r.checks.find(c => c.key === k)!.status, 'PASS', k);
 });
@@ -112,6 +117,7 @@ test('origin failure → routing to DR, incident raised, then recovered', async 
   mode = 'down';
   let s = await syncLoadBalancers();
   assert.equal(s.routing[0].activePoolId, DR_POOL);
+  assert.deepEqual(s.routing[0].traffic, [{ poolId: DR_POOL, percent: 100 }]);
   const inc = db.incidents.find(i => i.fingerprint === `cf-origin:${PRD_POOL}:${PRD_IP}`);
   assert.equal(inc?.status, 'OPEN');
   mode = 'ok';
@@ -130,6 +136,36 @@ test('a sync requested while another is running waits and reflects the latest co
   await first;
   assert.equal(second.status, 'OK', 'must not return the stale state of the running sync');
   assert.ok(second.pools.some(p => p.id === PRD_POOL && p.found));
+});
+
+test('random weights split traffic across healthy pools; one healthy pool takes 100%', async () => {
+  const saved = { ...lbPayload };
+  try {
+    lbPayload = {
+      ...saved, steering_policy: 'random',
+      random_steering: { default_weight: 1, pool_weights: { [PRD_POOL]: 0.7, [DR_POOL]: 0.3 } },
+    };
+    let s = await syncLoadBalancers();
+    assert.equal(s.routing[0].activePoolId, null);
+    assert.deepEqual(s.routing[0].traffic.map(t => [t.poolId, t.percent]), [[PRD_POOL, 70], [DR_POOL, 30]]);
+    assert.equal(db.applications.find(a => a.id === appId)!.failoverState, 'PRIMARY_ACTIVE');
+
+    mode = 'down';
+    s = await syncLoadBalancers();
+    assert.equal(s.routing[0].activePoolId, DR_POOL);
+    assert.deepEqual(s.routing[0].traffic, [{ poolId: DR_POOL, percent: 100 }]);
+    mode = 'ok';
+
+    lbPayload = { ...saved, steering_policy: 'dynamic_latency' };
+    s = await syncLoadBalancers();
+    assert.equal(s.routing[0].activePoolId, null);
+    assert.equal(s.routing[0].traffic.length, 2);
+    assert.ok(s.routing[0].traffic.every(t => t.percent === null));
+  } finally {
+    mode = 'ok';
+    lbPayload = saved;
+    await syncLoadBalancers();
+  }
 });
 
 test('missing permission → PERMISSION_REQUIRED and no stale "healthy"', async () => {

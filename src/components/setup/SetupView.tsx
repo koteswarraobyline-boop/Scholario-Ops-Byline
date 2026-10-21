@@ -508,7 +508,7 @@ const fromEnvForm = (f: EnvForm) => {
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
 
-const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> = ({ initial, onDone }) => {
+export const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> = ({ initial, onDone }) => {
   const st = useStyles();
   const { servers, cloudflareZones, createApplication, updateApplication, addMonitor } = useOps();
   const [form, setForm] = useState<AppForm>(initial ? {

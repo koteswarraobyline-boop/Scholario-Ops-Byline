@@ -277,7 +277,7 @@ export function failoverPreflight(app: Application, target: 'DR' | 'PRIMARY'): F
     key: 'routing', label: 'Current routing state',
     status: !routing ? (app.loadBalancer ? 'UNKNOWN' : 'NOT_CONFIGURED') : routing.found ? 'PASS' : 'UNKNOWN',
     detail: !routing ? (app.loadBalancer ? 'Routing not read yet' : 'No Load Balancer mapping')
-      : routing.found ? `${routing.hostname}: steering ${routing.steeringPolicy ?? 'default'}, pool order ${routing.defaultPools.map(poolName).join(' → ') || '—'}, fallback ${routing.fallbackPool ? poolName(routing.fallbackPool) : '—'}; serving: ${routing.activePoolId ? poolName(routing.activePoolId) : 'unknown'}`
+      : routing.found ? `${routing.hostname}: steering ${routing.steeringPolicy ?? 'default'}, pool order ${routing.defaultPools.map(poolName).join(' → ') || '—'}, fallback ${routing.fallbackPool ? poolName(routing.fallbackPool) : '—'}; serving: ${routing.traffic.length ? routing.traffic.map(t => `${poolName(t.poolId)} ${t.percent == null ? 'live' : `${t.percent}%`}`).join(' · ') : routing.activePoolId ? poolName(routing.activePoolId) : 'unknown'}`
         : `${routing.error ?? 'Load balancer not found'} — the token needs Zone › Load Balancers › Read on the zone`,
     observedAt: routing?.fetchedAt ?? null,
   });
