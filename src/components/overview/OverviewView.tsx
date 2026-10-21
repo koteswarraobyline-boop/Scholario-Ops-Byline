@@ -17,7 +17,7 @@ import { IncidentFlowChart } from '../visuals/IncidentFlowChart';
 import { TelemetryAreaGraph } from '../visuals/TelemetryAreaGraph';
 import { EmptyState } from '../ui/EmptyState';
 import { IctStatusPanel } from './IctStatusPanel';
-import { routeState } from '../ui/routing';
+import { originFlows, routeState } from '../ui/routing';
 import { Ago } from '../ui/Freshness';
 import { deadManLabel, lastServerHeartbeat } from '../ui/deadman';
 
@@ -495,22 +495,26 @@ export const OverviewView: React.FC = () => {
               const onDr = route === 'DR';
               const moving = route === 'MOVING';
               const unknown = route === 'UNKNOWN';
+              const split = route === 'SPLIT';
+              const flows = split ? originFlows(app, loadBalancer) : null;
+              const splitLabel = flows?.prd.percent != null && flows.dr.percent != null ? `SPLIT ${flows.prd.percent}/${flows.dr.percent}` : 'SPLIT';
               return (
                 <div key={app.id} className="flex items-center gap-2 flex-wrap text-[11px] font-mono">
                   <span className="font-semibold">{app.name}</span>
                   <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                     unknown ? 'bg-slate-900 text-slate-300 border border-slate-700'
                       : moving ? 'bg-blue-950 text-blue-300 border border-blue-800'
+                      : split ? 'bg-violet-950 text-violet-200 border border-violet-800'
                       : onDr ? 'bg-amber-950 text-amber-300 border border-amber-800'
                         : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
                   }`}>
-                    {unknown ? 'ROUTING UNKNOWN' : moving ? 'FAILING OVER' : onDr ? 'ON DR' : 'ON PRD'}
+                    {unknown ? 'ROUTING UNKNOWN' : moving ? 'FAILING OVER' : split ? splitLabel : onDr ? 'ON DR' : 'ON PRD'}
                   </span>
-                  <span className={route === 'PRD' ? 'text-emerald-400 font-semibold' : 'text-slate-400'}>
+                  <span className={route === 'PRD' || split ? 'text-emerald-400 font-semibold' : 'text-slate-400'}>
                     PRD {prd ? (prd.ip || prd.hostname) : 'not linked'}
                   </span>
                   <span className="text-slate-500">/</span>
-                  <span className={onDr ? 'text-amber-400 font-semibold' : 'text-slate-400'}>
+                  <span className={onDr || split ? 'text-amber-400 font-semibold' : 'text-slate-400'}>
                     DR {dr ? (dr.ip || dr.hostname) : 'not linked'}
                   </span>
                   {(app.loadBalancer?.hostname || app.dnsRecordName) && <span className="text-slate-500">· {app.loadBalancer ? `Cloudflare LB ${app.loadBalancer.hostname}` : app.dnsRecordName}</span>}

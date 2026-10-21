@@ -2,8 +2,8 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
 import { Application, Monitor, VpsServer } from '../../types';
-import { ArrowDown, Network } from 'lucide-react';
-import { EmptyState } from '../ui/EmptyState';
+import { ArrowDown } from 'lucide-react';
+import { DependencyRegisterSection } from '../setup/DependencyRegister';
 
 type NodeRef = { kind: 'app' | 'server' | 'monitor'; id: string } | null;
 
@@ -42,26 +42,6 @@ export const DependencyMapView: React.FC = () => {
   const monitorsOnServer = (srv: VpsServer) => monitors.filter(m => serverOfMonitor(m)?.id === srv.id);
 
   const orphanServers = servers.filter(s => !applications.some(a => a.prdServerId === s.id || a.drServerId === s.id));
-
-  if (applications.length === 0 && servers.length === 0) {
-    return (
-      <div className="space-y-6">
-        <div className={`pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
-          <h1 className="text-lg font-bold font-mono tracking-tight">DEPENDENCY MAP</h1>
-        </div>
-        {isLoading ? (
-          <div className={`text-xs font-mono animate-pulse ${muted}`}>Loading…</div>
-        ) : (
-          <EmptyState
-            icon={Network}
-            title="Nothing to map yet"
-            description="Register your servers and applications in Setup; the map is built from applications, their PRD/DR servers and their monitors."
-            action={{ label: 'Open Setup', onClick: () => navigate('/setup') }}
-          />
-        )}
-      </div>
-    );
-  }
 
   const nodeClass = (isSelected: boolean, status: string) =>
     `p-2.5 rounded border text-left transition-all cursor-pointer min-w-0 w-full ${
@@ -264,15 +244,24 @@ export const DependencyMapView: React.FC = () => {
       }`}>
         <div>
           <h1 className="text-lg font-bold font-mono tracking-tight">
-            DEPENDENCY MAP &amp; BLAST RADIUS
+            PROJECT DEPENDENCIES
           </h1>
           <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Applications → their PRD / DR servers → the monitors that check them (live status)
+            Which project depends on which project, database, server, storage, API or provider
           </p>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 font-mono text-xs">
+      <DependencyRegisterSection />
+
+      {(applications.length > 0 || servers.length > 0) && <div className={`pb-1 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+        <h2 className="text-sm font-bold font-mono tracking-tight">WHERE EACH PROJECT RUNS</h2>
+        <p className={`text-xs font-mono ${muted}`}>
+          The production server, the recovery server, and the monitors that check them. This is live status, not the dependency list above.
+        </p>
+      </div>}
+
+      {(applications.length > 0 || servers.length > 0) && <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 font-mono text-xs">
 
         {/* Map */}
         <div className={`lg:col-span-2 rounded-lg border p-5 space-y-5 transition-colors ${
@@ -340,7 +329,10 @@ export const DependencyMapView: React.FC = () => {
           {inspector}
         </div>
 
-      </div>
+      </div>}
+      {isLoading && applications.length === 0 && servers.length === 0 && (
+        <div className={`text-xs font-mono animate-pulse ${muted}`}>Loading…</div>
+      )}
     </div>
   );
 };

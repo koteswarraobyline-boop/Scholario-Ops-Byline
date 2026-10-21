@@ -1117,6 +1117,16 @@ export interface LbPool {
   healthError: string | null;
 }
 
+/** One pool that is currently receiving traffic. */
+export interface LbTrafficShare {
+  poolId: string;
+  /**
+   * Share of traffic, 0–100, when the steering policy fixes one (failover, or random weights).
+   * Null when the pool is receiving traffic but the policy does not publish a fixed share.
+   */
+  percent: number | null;
+}
+
 export interface LbRouting {
   hostname: string;
   found: boolean;
@@ -1125,8 +1135,13 @@ export interface LbRouting {
   steeringPolicy: string | null;
   defaultPools: string[];
   fallbackPool: string | null;
-  /** First enabled + healthy pool in default_pools order (null when unknown) */
+  /**
+   * Set only when a single pool receives all traffic.
+   * Null when routing is unknown, or when traffic is split — see `traffic`.
+   */
   activePoolId: string | null;
+  /** Pools currently receiving traffic. Empty when the serving set cannot be determined. */
+  traffic: LbTrafficShare[];
   fetchedAt: string | null;
   error: string | null;
 }
