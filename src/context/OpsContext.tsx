@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import {
   Application, VpsServer, Monitor, Incident, CloudflareZone, BackupRecord, Runbook, Deployment, MaintenanceWindow,
   CommunicationChannel, EscalationPolicy, AuditLog, DeadManControlPlane, IncidentStatus, IncidentSeverity, MonitorType,
-  IntegrationStatus, LoadBalancerState, RegistryComponent, DependencyLink,
+  IntegrationStatus, LoadBalancerState, RegistryComponent, DependencyLink, WorkerMonitorState,
 } from '../types';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { api, ApiError, HealthCheckResponse, BootstrapData, SystemSummary } from '../services/api';
@@ -34,6 +34,8 @@ interface OpsContextType {
   integrations: IntegrationStatus | null;
   /** Cloudflare Load Balancer pools / health / routing (read-only); null until loaded */
   loadBalancer: LoadBalancerState | null;
+  /** Read-only Worker script checks and posted origin events. Null until the first load. */
+  workerMonitor: WorkerMonitorState | null;
   syncLoadBalancers: () => Promise<boolean>;
 
   isLoading: boolean;
@@ -216,6 +218,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [deadMan, setDeadMan] = useState<DeadManControlPlane>(EMPTY_DEADMAN);
   const [integrations, setIntegrations] = useState<IntegrationStatus | null>(null);
   const [loadBalancer, setLoadBalancer] = useState<LoadBalancerState | null>(null);
+  const [workerMonitor, setWorkerMonitor] = useState<WorkerMonitorState | null>(null);
   const [serverSummary, setServerSummary] = useState<SystemSummary | null>(null);
 
   const [isLoading, setIsLoading] = useState(true);
@@ -324,6 +327,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setDeadMan(normalizeDeadMan(d.deadMan));
     setIntegrations(d.integrations);
     setLoadBalancer(d.loadBalancer ?? null);
+    setWorkerMonitor(d.workerMonitor ?? null);
     setServerSummary(d.summary);
     lastEventAt.current = Date.now();
   }, []);
@@ -433,6 +437,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setLoadBalancer(raw as LoadBalancerState);
           refetch('integrations', async () => setIntegrations(await api.integrations()));
           break;
+        case 'worker_update': setWorkerMonitor(raw as WorkerMonitorState); break;
         default: break;
       }
       if (event === 'monitor_update' || event === 'incident_created' || event === 'incident_update' || event === 'loadbalancer_update' || event === 'servers_changed') {
@@ -721,7 +726,7 @@ Fail over anyway? The override is recorded in the audit log.`)) {
       value={{
         applications, servers, monitors, incidents, cloudflareZones, backups, runbooks, registry, dependencyLinks, deployments,
         maintenanceWindows, communicationChannels, escalationPolicies, auditLogs, deadMan, integrations,
-        loadBalancer, syncLoadBalancers,
+        loadBalancer, workerMonitor, syncLoadBalancers,
         isLoading, loadError, realtimeStatus, refreshAll,
         activeTab, setActiveTab, selectedAppId, setSelectedAppId, selectedServerId, setSelectedServerId,
         selectedIncidentId, setSelectedIncidentId, selectedRunbookId, setSelectedRunbookId,

@@ -30,6 +30,7 @@ import { startEngine, stopEngine, engineLiveness } from './engine.ts';
 import { syncCloudflare } from './cloudflare.ts';
 import { syncEnabledConnections } from './providers/sync.ts';
 import { syncLoadBalancers } from './loadbalancer.ts';
+import { syncWorkers } from './workers.ts';
 import { closeAllSseClients } from './events.ts';
 import { log } from './logger.ts';
 import { evaluateAlerts } from './alerts.ts';
@@ -142,6 +143,9 @@ function startBackgroundWork() {
   // dashboard shows "Not configured" instead of nothing.
   void syncLoadBalancers().catch(err => log.error('loadbalancer', 'initial sync failed', { error: err as Error }));
   every('loadbalancer', config.cloudflareLbSyncIntervalSec * 1000, () => syncLoadBalancers().catch(() => {}));
+  // Read-only Worker script list. Does nothing to DNS, routes, or deployments.
+  void syncWorkers().catch(err => log.error('workers', 'initial sync failed', { error: err as Error }));
+  every('workers', config.cloudflareSyncIntervalSec * 1000, () => syncWorkers().catch(() => {}));
   if (isCloudflareConfigured()) {
     void syncCloudflare().catch(() => {});
     every('cloudflare', config.cloudflareSyncIntervalSec * 1000, () => syncCloudflare().catch(() => {}));

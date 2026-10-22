@@ -969,7 +969,7 @@ export const OverviewView: React.FC = () => {
                       </div>
                     </div>
                   ) : (
-                    <div className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>{srv.lastSeen ? `Agent ${srv.agentStatus}` : 'Not connected'}</div>
+                    <div className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`} title={srv.lastIngestError?.reason}>{srv.lastSeen ? `Agent ${srv.agentStatus}` : srv.lastIngestError ? 'Report rejected' : 'Not connected'}</div>
                   )}
                   <div className={`text-[9px] font-mono mt-1.5 truncate ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
                     {srv.region || 'Region n/a'} · {srv.environment}

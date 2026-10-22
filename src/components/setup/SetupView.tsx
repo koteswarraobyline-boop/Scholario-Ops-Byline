@@ -8,7 +8,8 @@ import { useOps } from '../../context/OpsContext';
 import { deadManLabel } from '../ui/deadman';
 import { useAuth } from '../../context/AuthContext';
 import { api, AgentInstallInfo, CloudflarePoolOption } from '../../services/api';
-import { Application, VpsServer } from '../../types';
+import { Application, TrafficRoutingMethod, VpsServer } from '../../types';
+import { blankRouting, effectiveRoutingMethod, ROUTING_METHOD_LABELS, ROUTING_METHODS } from '../../lib/trafficHealth';
 import { resolveAgentBaseUrl } from '../../lib/agentEndpoint';
 import { DependencyRegisterSection } from './DependencyRegister';
 
@@ -478,7 +479,13 @@ type AppForm = {
   rtoTargetMin: number; rpoTargetMin: number; prdServerId: string; drServerId: string;
   cloudflareZone: string; dnsRecordName: string; autoFailover: boolean;
   prdUrl: string; drUrl: string;
-  lbEnabled: boolean; lbAccountId: string; lbHostname: string; lbPrdPoolId: string; lbDrPoolId: string;
+  routingMethod: TrafficRoutingMethod;
+  directPrdHost: string; directDrHost: string; directTarget: string; directManual: 'UNKNOWN' | 'PRIMARY' | 'DR'; directVerified: string;
+  workerName: string; workerRoute: string; workerAccountId: string; workerEnv: string;
+  workerPrdOrigin: string; workerDrOrigin: string; workerStrategy: string; workerHealthSource: string;
+  workerFailback: 'automatic' | 'manual' | 'unknown';
+  customDescription: string; customEndpoint: string; customNotes: string;
+  lbAccountId: string; lbHostname: string; lbPrdPoolId: string; lbDrPoolId: string;
   hcExpectedStatus: string; hcIntervalSec: number; hcTimeoutSec: number; hcSsl: boolean;
 };
 
@@ -508,6 +515,21 @@ const fromEnvForm = (f: EnvForm) => {
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
 
+function routingFields(initial?: Application): Pick<AppForm, 'routingMethod' | 'directPrdHost' | 'directDrHost' | 'directTarget' | 'directManual' | 'directVerified' | 'workerName' | 'workerRoute' | 'workerAccountId' | 'workerEnv' | 'workerPrdOrigin' | 'workerDrOrigin' | 'workerStrategy' | 'workerHealthSource' | 'workerFailback' | 'customDescription' | 'customEndpoint' | 'customNotes' | 'lbAccountId' | 'lbHostname' | 'lbPrdPoolId' | 'lbDrPoolId'> {
+  const cfg = initial?.trafficRouting ?? blankRouting(initial?.loadBalancer ? 'cloudflare_lb' : 'unknown');
+  return {
+    routingMethod: initial?.trafficRouting?.method ?? (initial?.loadBalancer ? 'cloudflare_lb' : 'unknown'),
+    directPrdHost: cfg.direct.prdHostname, directDrHost: cfg.direct.drHostname, directTarget: cfg.direct.currentTarget,
+    directManual: cfg.direct.manualFailoverStatus, directVerified: cfg.direct.lastVerifiedAt ?? '',
+    workerName: cfg.worker.name, workerRoute: cfg.worker.route, workerAccountId: cfg.worker.accountId, workerEnv: cfg.worker.environment,
+    workerPrdOrigin: cfg.worker.prdOriginHostname, workerDrOrigin: cfg.worker.drOriginHostname,
+    workerStrategy: cfg.worker.failoverStrategy, workerHealthSource: cfg.worker.healthCheckSource, workerFailback: cfg.worker.failback,
+    customDescription: cfg.custom.description, customEndpoint: cfg.custom.endpoint, customNotes: cfg.custom.notes,
+    lbAccountId: initial?.loadBalancer?.accountId ?? '', lbHostname: initial?.loadBalancer?.hostname ?? '',
+    lbPrdPoolId: initial?.loadBalancer?.prdPoolId ?? '', lbDrPoolId: initial?.loadBalancer?.drPoolId ?? '',
+  };
+}
+
 export const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> = ({ initial, onDone }) => {
   const st = useStyles();
   const { servers, cloudflareZones, createApplication, updateApplication, addMonitor } = useOps();
@@ -516,8 +538,7 @@ export const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> 
     rtoTargetMin: initial.rtoTargetMin, rpoTargetMin: initial.rpoTargetMin, prdServerId: initial.prdServerId, drServerId: initial.drServerId,
     cloudflareZone: initial.cloudflareZone, dnsRecordName: initial.dnsRecordName ?? '', autoFailover: Boolean(initial.autoFailover),
     prdUrl: initial.prdUrl ?? '', drUrl: initial.drUrl ?? '',
-    lbEnabled: Boolean(initial.loadBalancer), lbAccountId: initial.loadBalancer?.accountId ?? '', lbHostname: initial.loadBalancer?.hostname ?? '',
-    lbPrdPoolId: initial.loadBalancer?.prdPoolId ?? '', lbDrPoolId: initial.loadBalancer?.drPoolId ?? '',
+    ...routingFields(initial),
     hcExpectedStatus: initial.healthCheck?.expectedStatus ? String(initial.healthCheck.expectedStatus) : '',
     hcIntervalSec: initial.healthCheck?.intervalSec ?? 30, hcTimeoutSec: initial.healthCheck?.timeoutSec ?? 15, hcSsl: initial.healthCheck?.sslMonitoring ?? true,
   } : {
@@ -525,7 +546,7 @@ export const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> 
     prdServerId: servers.find(s => s.environment === 'PRD')?.id ?? '', drServerId: servers.find(s => s.environment === 'DR')?.id ?? '',
     cloudflareZone: '', dnsRecordName: '', autoFailover: false,
     prdUrl: '', drUrl: '',
-    lbEnabled: false, lbAccountId: '', lbHostname: '', lbPrdPoolId: '', lbDrPoolId: '',
+    ...routingFields(undefined),
     hcExpectedStatus: '', hcIntervalSec: 30, hcTimeoutSec: 15, hcSsl: true,
   });
   const [envs, setEnvs] = useState<Record<'PRD' | 'DR', EnvForm>>({ PRD: toEnvForm(initial?.environments?.PRD), DR: toEnvForm(initial?.environments?.DR) });
@@ -559,11 +580,26 @@ export const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> 
     const payload = {
       name: form.name, codeName: form.codeName || slug(form.name), description: form.description, tier: form.tier,
       rtoTargetMin: form.rtoTargetMin, rpoTargetMin: form.rpoTargetMin, prdServerId: form.prdServerId, drServerId: form.drServerId,
-      cloudflareZone: form.cloudflareZone, dnsRecordName: form.dnsRecordName.trim(), autoFailover: form.lbEnabled ? false : form.autoFailover,
+      cloudflareZone: form.cloudflareZone, dnsRecordName: form.dnsRecordName.trim(), autoFailover: form.routingMethod === 'direct_dns' ? form.autoFailover : false,
       prdUrl: form.prdUrl.trim(), drUrl: form.drUrl.trim(),
-      loadBalancer: form.lbEnabled
-        ? { accountId: form.lbAccountId.trim(), hostname: form.lbHostname.trim(), prdPoolId: form.lbPrdPoolId.trim(), drPoolId: form.lbDrPoolId.trim() }
-        : null,
+      trafficRouting: {
+        method: form.routingMethod,
+        direct: {
+          prdHostname: form.directPrdHost.trim(), drHostname: form.directDrHost.trim(),
+          prdUrl: form.prdUrl.trim(), drUrl: form.drUrl.trim(), dnsRecordName: form.dnsRecordName.trim(),
+          currentTarget: form.directTarget.trim(), manualFailoverStatus: form.directManual,
+          lastVerifiedAt: form.directVerified.trim() || null,
+        },
+        worker: {
+          name: form.workerName.trim(), route: form.workerRoute.trim(), accountId: form.workerAccountId.trim(),
+          environment: form.workerEnv.trim(), prdOriginHostname: form.workerPrdOrigin.trim(), drOriginHostname: form.workerDrOrigin.trim(),
+          failoverStrategy: form.workerStrategy.trim(), healthCheckSource: form.workerHealthSource.trim(), failback: form.workerFailback,
+        },
+        custom: { description: form.customDescription.trim(), endpoint: form.customEndpoint.trim(), notes: form.customNotes.trim() },
+      },
+      ...(form.routingMethod === 'cloudflare_lb'
+        ? { loadBalancer: { accountId: form.lbAccountId.trim(), hostname: form.lbHostname.trim(), prdPoolId: form.lbPrdPoolId.trim(), drPoolId: form.lbDrPoolId.trim() } }
+        : {}),
       healthCheck: { expectedStatus: form.hcExpectedStatus.trim() ? Number(form.hcExpectedStatus) : null, intervalSec: form.hcIntervalSec, timeoutSec: form.hcTimeoutSec, sslMonitoring: form.hcSsl },
       environments: { PRD: fromEnvForm(envs.PRD), DR: fromEnvForm(envs.DR) },
     } as unknown as Partial<Application>;
@@ -617,11 +653,11 @@ export const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> 
         <Label text="Failover DNS record (A/AAAA)" hint="The record switched between PRD and DR IPs, e.g. app.example.com">
           <input className={st.input} value={form.dnsRecordName} onChange={e => set('dnsRecordName', e.target.value.trim().toLowerCase())} placeholder={form.cloudflareZone ? `app.${form.cloudflareZone}` : 'app.example.com'} />
         </Label>
-        <label className={`flex items-start gap-2 text-xs mt-5 ${form.lbEnabled ? 'opacity-50' : ''}`}>
-          <input type="checkbox" checked={form.autoFailover && !form.lbEnabled} disabled={form.lbEnabled} onChange={e => set('autoFailover', e.target.checked)} className="mt-0.5" />
+        <label className={`flex items-start gap-2 text-xs mt-5 ${form.routingMethod !== 'direct_dns' ? 'opacity-50' : ''}`}>
+          <input type="checkbox" checked={form.autoFailover && form.routingMethod === 'direct_dns'} disabled={form.routingMethod !== 'direct_dns'} onChange={e => set('autoFailover', e.target.checked)} className="mt-0.5" />
           <span>
             <b>Automatic failover</b>
-            <span className={`block text-[10px] ${st.faint}`}>{form.lbEnabled ? 'Not available when traffic is routed by a Cloudflare Load Balancer.' : 'Off by default. Switch DNS to DR when a PRD HTTP/TCP monitor is confirmed DOWN and all DR monitors are healthy (10 min cooldown). Failback is always manual.'}</span>
+            <span className={`block text-[10px] ${st.faint}`}>{form.routingMethod === 'direct_dns' ? 'Off by default. Switch DNS to DR when a PRD HTTP/TCP monitor is confirmed DOWN and all DR monitors are healthy (10 min cooldown). Failback is always manual.' : 'Only available for Direct DNS. Workers, Load Balancers, and custom routing are not switched by Scholario Ops.'}</span>
           </span>
         </label>
       </div>
@@ -670,11 +706,56 @@ export const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> 
         <p className={`text-[10px] mt-2 ${st.faint}`}>Empty fields are shown as PENDING. Setting the database type tells Scholario Ops to expect a database probe from the agent on that server (DB_ENGINE in the agent config); database passwords are never entered here.</p>
       </details>
 
-      <div className={`rounded border p-3 space-y-2 ${st.isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
-        <label className="flex items-center gap-2 text-[10px] uppercase tracking-wider font-mono font-bold">
-          <input type="checkbox" checked={form.lbEnabled} onChange={e => { set('lbEnabled', e.target.checked); if (e.target.checked) set('autoFailover', false); }} /> Cloudflare Load Balancer
-        </label>
-        {form.lbEnabled && (
+      <div className={`rounded border p-3 space-y-3 ${st.isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+        <Label text="Traffic routing method" hint="Each application chooses its own method. Switching methods keeps the other fields.">
+          <select className={st.input} value={form.routingMethod} onChange={e => set('routingMethod', e.target.value as TrafficRoutingMethod)}>
+            {ROUTING_METHODS.map(m => <option key={m} value={m}>{ROUTING_METHOD_LABELS[m]}</option>)}
+          </select>
+        </Label>
+        {form.routingMethod === 'unknown' && <p className={`text-[10px] ${st.faint}`}>No routing integration is assumed. VPS and application checks still run on their own.</p>}
+        {form.routingMethod === 'direct_dns' && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Label text="PRD hostname" hint="Name that should point at the PRD origin"><input className={st.input} value={form.directPrdHost} onChange={e => set('directPrdHost', e.target.value)} placeholder="app.example.com" /></Label>
+            <Label text="DR hostname" hint="Name that should point at the DR origin"><input className={st.input} value={form.directDrHost} onChange={e => set('directDrHost', e.target.value)} placeholder="dr-app.example.com" /></Label>
+            <Label text="Current routing target" hint="Only if you already know it. Leave empty when it is unknown."><input className={st.input} value={form.directTarget} onChange={e => set('directTarget', e.target.value)} placeholder="Unknown" /></Label>
+            <Label text="Manual failover status">
+              <select className={st.input} value={form.directManual} onChange={e => set('directManual', e.target.value as AppForm['directManual'])}>
+                <option value="UNKNOWN">Unknown</option><option value="PRIMARY">Primary (PRD)</option><option value="DR">DR</option>
+              </select>
+            </Label>
+            <Label text="Last verified" hint="Optional time you confirmed the record. Live DNS sync is shown separately."><input className={st.input} value={form.directVerified} onChange={e => set('directVerified', e.target.value)} placeholder="2026-10-22T09:00:00Z" /></Label>
+            <p className={`text-[10px] sm:col-span-2 ${st.faint}`}>PRD and DR URLs and the failover DNS record above are kept. This method does not need Load Balancer pool IDs.</p>
+          </div>
+        )}
+        {(form.routingMethod === 'cloudflare_worker' || form.routingMethod === 'cloudflare_worker_failover') && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Label text="Worker name" hint="Script name in the Cloudflare account. Not a Load Balancer pool."><input className={st.input} value={form.workerName} onChange={e => set('workerName', e.target.value)} placeholder="edge-router" /></Label>
+            <Label text="Worker route or hostname"><input className={st.input} value={form.workerRoute} onChange={e => set('workerRoute', e.target.value)} placeholder="app.example.com/*" /></Label>
+            <Label text="Cloudflare account ID" hint="Optional. Needed only to read the script list. The API token stays on the server."><input className={st.input} value={form.workerAccountId} onChange={e => set('workerAccountId', e.target.value.trim().toLowerCase())} placeholder="32-character account ID" /></Label>
+            <Label text="Deployment / environment"><input className={st.input} value={form.workerEnv} onChange={e => set('workerEnv', e.target.value)} placeholder="production" /></Label>
+            <Label text="PRD origin hostname"><input className={st.input} value={form.workerPrdOrigin} onChange={e => set('workerPrdOrigin', e.target.value)} placeholder="prd.internal.example" /></Label>
+            <Label text="DR origin hostname"><input className={st.input} value={form.workerDrOrigin} onChange={e => set('workerDrOrigin', e.target.value)} placeholder="dr.internal.example" /></Label>
+            <Label text="Failover decision strategy" hint="How the Worker chooses an origin, if you know. Leave empty when you do not."><input className={st.input} value={form.workerStrategy} onChange={e => set('workerStrategy', e.target.value)} placeholder="Unknown until the Worker is read" /></Label>
+            <Label text="Health-check source"><input className={st.input} value={form.workerHealthSource} onChange={e => set('workerHealthSource', e.target.value)} placeholder="Worker health check, or not connected" /></Label>
+            <Label text="Failback" hint="Recorded here only. Scholario Ops does not fail back automatically.">
+              <select className={st.input} value={form.workerFailback} onChange={e => set('workerFailback', e.target.value as AppForm['workerFailback'])}>
+                <option value="unknown">Unknown</option><option value="automatic">Automatic in the Worker</option><option value="manual">Manual</option>
+              </select>
+            </Label>
+            <p className={`text-[10px] sm:col-span-2 ${st.faint}`}>{form.routingMethod === 'cloudflare_worker_failover' ? 'Origin selection stays Unknown until a Worker event is received. A Worker name does not by itself mean failover is implemented.' : 'This method does not assume the Worker fails over between PRD and DR.'} Request counts stay Not connected unless the Worker posts events.</p>
+          </div>
+        )}
+        {form.routingMethod === 'custom' && (
+          <div className="grid grid-cols-1 gap-3">
+            <Label text="Description"><textarea className={st.input} rows={2} value={form.customDescription} onChange={e => set('customDescription', e.target.value)} /></Label>
+            <Label text="Routing endpoint"><input className={st.input} value={form.customEndpoint} onChange={e => set('customEndpoint', e.target.value)} placeholder="https://routing.example/status" /></Label>
+            <Label text="Monitoring notes"><textarea className={st.input} rows={2} value={form.customNotes} onChange={e => set('customNotes', e.target.value)} /></Label>
+          </div>
+        )}
+        {form.routingMethod !== 'cloudflare_lb' && (form.lbHostname || form.lbPrdPoolId) && (
+          <p className={`text-[10px] ${st.faint}`}>Saved Load Balancer mapping{form.lbHostname ? ` for ${form.lbHostname}` : ''} is kept and is not used while this method is selected.</p>
+        )}
+        {form.routingMethod === 'cloudflare_lb' && (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Label text="Cloudflare Account ID *" hint="32-character hex ID (Cloudflare dashboard → account home)">
@@ -793,7 +874,8 @@ const ApplicationsSection: React.FC = () => {
                   <div><span className={st.faint}>DR:</span> {dr ? `${dr.hostname} (${dr.ip})` : <span className="text-amber-500">not set</span>}</div>
                   <div className="col-span-2 break-all"><span className={st.faint}>PRD URL:</span> {a.prdUrl || <span className={st.faint}>not set</span>}</div>
                   <div className="col-span-2 break-all"><span className={st.faint}>DR URL:</span> {a.drUrl || <span className={st.faint}>not set</span>}</div>
-                  {a.loadBalancer ? (
+                  <div className="col-span-2"><span className={st.faint}>Routing:</span> {ROUTING_METHOD_LABELS[effectiveRoutingMethod(a)]}</div>
+                  {effectiveRoutingMethod(a) === 'cloudflare_lb' && a.loadBalancer ? (
                     <div className="col-span-2 break-all">
                       <span className={st.faint}>Cloudflare LB:</span> {a.loadBalancer.hostname} · account {a.loadBalancer.accountId.slice(0, 8)}… · PRD pool {a.loadBalancer.prdPoolId.slice(0, 8)}… · DR pool {a.loadBalancer.drPoolId.slice(0, 8)}…
                     </div>

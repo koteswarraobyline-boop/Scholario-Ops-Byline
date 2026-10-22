@@ -6,6 +6,8 @@ import { useAuth } from '../../context/AuthContext';
 import { Application, Monitor, OperationalStatus, VpsServer } from '../../types';
 import { X, AlertTriangle, ArrowRight, Plus, Layers, Loader2, Pencil, Trash2 } from 'lucide-react';
 import { AppEditor } from '../setup/SetupView';
+import { HealthDimensions } from './HealthDimensions';
+import { effectiveRoutingMethod, explainVps, ROUTING_METHOD_LABELS } from '../../lib/trafficHealth';
 import { MonitorFormModal } from '../monitors/CreateMonitorModal';
 import { EmptyState } from '../ui/EmptyState';
 import { useDialog } from '../ui/useDialog';
@@ -46,6 +48,10 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
     deployments,
     auditLogs,
     triggerFailover,
+    cloudflareZones,
+    loadBalancer,
+    integrations,
+    workerMonitor,
     setSelectedIncidentId,
     setActiveTab,
     openAddMonitorWithContext,
@@ -122,7 +128,8 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
         <>
           <div className={`font-semibold mt-1 ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{srv.hostname}</div>
           <div className={`text-[11px] ${muted}`}>{srv.ip || 'No IP'}{srv.region ? ` · ${srv.region}` : ''}</div>
-          <div className={`text-[10px] mt-0.5 ${statusColor(srv.status)}`}>{srv.status} · agent {srv.agentStatus}</div>
+          <div className={`text-[10px] mt-0.5 ${statusColor(explainVps(srv).status)}`}>VPS {explainVps(srv).status.replace(/_/g, ' ')} · agent {srv.lastSeen ? srv.agentStatus : 'NOT CONNECTED'}</div>
+          <div className={`text-[10px] mt-0.5 font-sans ${muted}`}>{explainVps(srv).detail}</div>
         </>
       ) : (
         <div className={`mt-1 text-[11px] italic ${muted}`}>No {env} server linked — configure it in Setup</div>
@@ -271,6 +278,17 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                 </p>
               )}
 
+              <HealthDimensions
+                application={application}
+                servers={servers}
+                monitors={monitors}
+                zones={cloudflareZones}
+                loadBalancer={loadBalancer}
+                cloudflareConfigured={Boolean(integrations?.cloudflare.configured)}
+                workerMonitor={workerMonitor}
+                isDark={isDark}
+              />
+
               <div className={`p-4 rounded border space-y-2 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
                 <div className={`text-xs font-bold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Domain &amp; Routing</div>
                 <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 ${muted}`}>
@@ -279,13 +297,15 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                     <div className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{application.cloudflareZone || 'Not configured'}</div>
                   </div>
                   <div>
-                    <span className={label}>{application.loadBalancer ? 'Cloudflare Load Balancer:' : 'DNS Record (switched on failover):'}</span>
-                    <div className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{application.loadBalancer ? `${application.loadBalancer.hostname} (read-only)` : application.dnsRecordName || 'Not configured'}</div>
+                    <span className={label}>Traffic routing method:</span>
+                    <div className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{ROUTING_METHOD_LABELS[effectiveRoutingMethod(application)]}</div>
                   </div>
                   <div>
-                    <span className={label}>Active Routing Target:</span>
-                    <div className={`font-semibold ${application.loadBalancer ? 'text-slate-400' : isFailingOver ? 'text-amber-500' : isDrActive ? 'text-rose-500' : 'text-emerald-500'}`}>
-                      {application.loadBalancer ? 'Decided by Cloudflare pool order — see PRD / DR Readiness' : isFailingOver ? 'Failover in progress' : isDrActive ? 'DR server' : 'Primary (PRD) server'}
+                    <span className={label}>Active routing target:</span>
+                    <div className={`font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+                      {effectiveRoutingMethod(application) === 'direct_dns'
+                        ? (isFailingOver ? 'Failover in progress' : isDrActive ? 'DR server' : 'Primary (PRD) server')
+                        : 'Shown under Health dimensions. Unknown until the selected integration reports it.'}
                     </div>
                   </div>
                   <div>
@@ -549,8 +569,10 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                 </div>
 
                 <div className={`pt-2 border-t space-y-2 ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
-                  {application.loadBalancer ? (
+                  {effectiveRoutingMethod(application) === 'cloudflare_lb' && application.loadBalancer ? (
                     <LbFailoverConsole app={application} />
+                  ) : effectiveRoutingMethod(application) === 'cloudflare_worker' || effectiveRoutingMethod(application) === 'cloudflare_worker_failover' || effectiveRoutingMethod(application) === 'custom' ? (
+                    <div className={`text-[11px] font-sans ${muted}`}>{ROUTING_METHOD_LABELS[effectiveRoutingMethod(application)]}. Scholario Ops does not change Worker routes, origins, or custom routing. Automatic failover stays off.</div>
                   ) : !canFailover ? (
                     <div className={`text-[11px] font-sans ${muted}`}>Only super administrators can switch traffic between PRD and DR.</div>
                   ) : failoverBlockers.length > 0 ? (

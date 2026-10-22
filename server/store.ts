@@ -13,8 +13,9 @@ import type pg from 'pg';
 import {
   Application, VpsServer, Monitor, Incident, AuditLog, CommunicationChannel,
   EscalationPolicy, MaintenanceWindow, Runbook, Deployment, BackupRecord, OpsUser, ServerMetricPoint, CheckRecord,
-  RegistryComponent, DependencyLink, ProviderConnectionRecord, ProviderInstanceRecord, ResourceLimit,
+  RegistryComponent, DependencyLink, ProviderConnectionRecord, ProviderInstanceRecord, ResourceLimit, WorkerRoutingEvent,
 } from '../src/types/index.ts';
+import { normalizeRouting } from '../src/lib/trafficHealth.ts';
 import { DATA_DIR, config } from './config.ts';
 import { query, withTransaction, migrate, T } from './db.ts';
 import { log, scrub } from './logger.ts';
@@ -75,6 +76,7 @@ export interface StoreData {
   providerConnections: ProviderConnectionRecord[];
   providerInstances: ProviderInstanceRecord[];
   resources: ResourceLimit[];
+  workerEvents: WorkerRoutingEvent[];
 }
 
 function emptyStore(): StoreData {
@@ -82,7 +84,7 @@ function emptyStore(): StoreData {
     version: 1, servers: [], applications: [], monitors: [], monitorBuckets: {}, incidents: [], incidentSeq: 1000,
     auditLogs: [], users: [], refreshTokens: [], channels: [], escalationPolicies: [], maintenanceWindows: [],
     runbooks: [], deployments: [], backups: [], registry: [], dependencyLinks: [],
-    providerConnections: [], providerInstances: [], resources: [],
+    providerConnections: [], providerInstances: [], resources: [], workerEvents: [],
   };
 }
 
@@ -130,7 +132,7 @@ const num = (v: unknown): number | null => (v === null || v === undefined ? null
 const omit = <O extends object>(o: O, keys: readonly string[]) => Object.fromEntries(Object.entries(o).filter(([k]) => !keys.includes(k)));
 
 const SERVER_CONFIG_KEYS = ['id', 'hostname', 'ip', 'environment', 'applicationId', 'provider', 'region', 'plan', 'planSpec', 'notes', 'agentToken', 'hostingerVmId', 'hostingerState', 'createdAt'] as const;
-const APP_CONFIG_KEYS = ['id', 'name', 'codeName', 'description', 'tier', 'rtoTargetMin', 'rpoTargetMin', 'prdServerId', 'drServerId', 'prdUrl', 'drUrl', 'cloudflareZone', 'dnsRecordName', 'autoFailover', 'failoverState', 'lastFailoverAt', 'healthCheck', 'loadBalancer', 'environments'] as const;
+const APP_CONFIG_KEYS = ['id', 'name', 'codeName', 'description', 'tier', 'rtoTargetMin', 'rpoTargetMin', 'prdServerId', 'drServerId', 'prdUrl', 'drUrl', 'cloudflareZone', 'dnsRecordName', 'autoFailover', 'failoverState', 'lastFailoverAt', 'healthCheck', 'loadBalancer', 'environments', 'trafficRouting'] as const;
 const MONITOR_CONFIG_KEYS = ['id', 'applicationId', 'serverId', 'name', 'type', 'target', 'environment', 'intervalSec', 'timeoutSec', 'retries', 'warningThresholdMs', 'criticalThresholdMs', 'failureConfirmationThreshold', 'recoveryConfirmationThreshold', 'expectedStatusCode', 'expectedBodyContains', 'enabled', 'runbookId', 'heartbeatToken', 'managedBy'] as const;
 const INCIDENT_COLUMN_KEYS = ['id', 'title', 'severity', 'status', 'applicationId', 'environment', 'fingerprint', 'rootCause', 'startedAt', 'resolvedAt', 'durationMinutes', 'owner', 'acknowledged', 'acknowledgedAt', 'acknowledgedBy', 'recoveryStatus', 'runbookId', 'mitigationActionTaken'] as const;
 
@@ -239,6 +241,56 @@ const TABLES: TableDef<unknown>[] = [
           replicationMaxLagSec: num(r.replication_max_lag_sec), backupMaxAgeHours: num(r.backup_max_age_hours), notes: (r.notes as string) ?? '',
         };
       }
+    },
+  },
+  {
+    table: 'application_routing', key: ['application_id'],
+    columns: ['application_id', 'method', 'direct', 'worker', 'custom'],
+    rows: d => d.applications.map(a => {
+      const cfg = normalizeRouting(a);
+      return { k: a.id, values: [a.id, cfg.method, JSON.stringify(cfg.direct), JSON.stringify(cfg.worker), JSON.stringify(cfg.custom)] };
+    }),
+    load: (rows, d) => {
+      const obj = <T>(v: unknown): Partial<T> => {
+        if (!v) return {};
+        if (typeof v === 'string') { try { return JSON.parse(v) as Partial<T>; } catch { return {}; } }
+        return typeof v === 'object' ? v as Partial<T> : {};
+      };
+      for (const r of rows) {
+        const app = d.applications.find(a => a.id === r.application_id);
+        if (!app) continue;
+        app.trafficRouting = normalizeRouting({
+          loadBalancer: app.loadBalancer,
+          trafficRouting: {
+            method: r.method as import('../src/types/index.ts').TrafficRoutingMethod,
+            direct: obj(r.direct) as import('../src/types/index.ts').TrafficRoutingConfig['direct'],
+            worker: obj(r.worker) as import('../src/types/index.ts').TrafficRoutingConfig['worker'],
+            custom: obj(r.custom) as import('../src/types/index.ts').TrafficRoutingConfig['custom'],
+          },
+        });
+      }
+    },
+  },
+  {
+    table: 'worker_events', key: ['id'],
+    columns: ['id', 'application_id', 'kind', 'origin', 'prd_health', 'dr_health', 'detail', 'observed_at', 'received_at'],
+    rows: d => d.workerEvents.map(e => ({
+      k: e.id,
+      values: [e.id, e.applicationId, e.kind, e.origin, e.prdHealth, e.drHealth, e.detail, e.observedAt, e.receivedAt],
+    })),
+    load: (rows, d) => {
+      d.workerEvents = rows.map(r => ({
+        id: r.id as string,
+        applicationId: r.application_id as string,
+        kind: r.kind as WorkerRoutingEvent['kind'],
+        origin: (r.origin as string) ?? null,
+        prdHealth: (r.prd_health as WorkerRoutingEvent['prdHealth']) ?? null,
+        drHealth: (r.dr_health as WorkerRoutingEvent['drHealth']) ?? null,
+        detail: (r.detail as string) ?? '',
+        observedAt: iso(r.observed_at),
+        receivedAt: iso(r.received_at),
+        source: 'worker_event' as const,
+      })).sort((a, b) => b.observedAt.localeCompare(a.observedAt));
     },
   },
   {

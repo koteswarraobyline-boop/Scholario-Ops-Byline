@@ -18,8 +18,11 @@ import {
 } from './validate.ts';
 import {
   HTTP_TYPES, TCP_TYPES, INFRA_TYPES, PUSH_TYPES, runMonitorNow, registerNewMonitor, recomputeDerived,
-  ingestAgentReport, publicServer, performFailover, FailoverError, nextIncidentId, isFailoverInProgress, closeIncidentsReferencing, forgetMonitor, forgetServer, AgentReport, closeMonitorIncident,
+  ingestAgentReport, publicServer, performFailover, FailoverError, nextIncidentId, isFailoverInProgress, closeIncidentsReferencing, forgetMonitor, forgetServer, AgentReport, closeMonitorIncident, noteIngestRejection,
 } from './engine.ts';
+import { parseRoutingUpdate } from './routingConfig.ts';
+import { authorizeWorkerEvent, eventsFor, recordWorkerEvent, workerMonitorState } from './workers.ts';
+import { effectiveRoutingMethod } from '../src/lib/trafficHealth.ts';
 import { httpProbe, tcpProbe, dnsProbe, sslProbe, parseHostPort, normalizeUrl } from './probes.ts';
 import { sendToChannel, notifyIncident, notifyTargetPolicy, deliveryRuntime, pendingGroupedAlerts, CHANNEL_FAILING_AFTER, verifySmtp, smtpConfigProblem, smtpEndpoint, smtpServerLabel, teamsTargetProblem } from './notify.ts';
 import { cfState, syncCloudflare, CloudflareError, listCloudflareAccounts, listLoadBalancerPools } from './cloudflare.ts';
@@ -375,8 +378,22 @@ function buildApplication(req: Request, existing?: Application): Application {
     environments = next;
   }
 
-  const autoFailover = optBool(b, 'autoFailover') ?? existing?.autoFailover ?? false;
-  if (autoFailover && loadBalancer) throw new ValidationError('Automatic failover is not available for Load-Balancer-managed applications — traffic is switched in Cloudflare');
+  let trafficRouting = existing?.trafficRouting;
+  if (b.trafficRouting !== undefined) trafficRouting = parseRoutingUpdate(existing?.trafficRouting, b.trafficRouting);
+  const routingMethod = effectiveRoutingMethod({ trafficRouting, loadBalancer });
+  if (routingMethod === 'cloudflare_lb' && !loadBalancer) {
+    throw new ValidationError('Cloudflare Load Balancer routing needs the account ID, hostname, PRD pool and DR pool. Other methods do not use pool IDs.');
+  }
+  if (b.loadBalancer === null && routingMethod === 'cloudflare_lb') {
+    throw new ValidationError('Switch the routing method before removing the saved Load Balancer mapping.');
+  }
+
+  const dnsFailoverAllowed = routingMethod === 'direct_dns' || (routingMethod === 'unknown' && !loadBalancer);
+  const requestedAuto = optBool(b, 'autoFailover');
+  if (requestedAuto && !dnsFailoverAllowed) {
+    throw new ValidationError('Automatic failover is not available unless the routing method is Direct DNS / direct origin. Load Balancer, Worker, and custom routing are not switched by Scholario Ops.');
+  }
+  const autoFailover = dnsFailoverAllowed ? (requestedAuto ?? existing?.autoFailover ?? false) : false;
   if (autoFailover && (!dnsRecordName || !drServerId || !prdServerId)) throw new ValidationError('Auto-failover needs PRD server, DR server and a DNS record');
 
   return {
@@ -413,6 +430,7 @@ function buildApplication(req: Request, existing?: Application): Application {
     loadBalancer,
     healthCheck,
     environments,
+    trafficRouting,
   };
 }
 
@@ -578,30 +596,36 @@ export function buildRouter(): Router {
 
   r.post('/v1/agent/ingest', h((req, res) => {
     const srv = agentServer(req);
-    if (!srv) return fail(res, 401, 'Invalid agent token');
+    if (!srv) {
+      const ip = req.ip ?? '';
+      const matched = ip ? db.servers.filter(s => s.ip === ip) : [];
+      if (matched.length === 1) noteIngestRejection(matched[0], 'A request from this server IP was rejected because the agent token does not match. Reinstall the agent from Setup. No telemetry was stored.');
+      return fail(res, 401, 'Invalid agent token');
+    }
+    const reject = (status: number, reason: string) => { noteIngestRejection(srv, reason); return fail(res, status, reason); };
     // A real report is a few KB (≈ 50 KB with many PM2 apps / filesystems); refuse anything far larger
-    if (Number(req.headers['content-length'] ?? 0) > AGENT_REPORT_MAX_BYTES) return fail(res, 413, `Report larger than ${AGENT_REPORT_MAX_BYTES} bytes`);
+    if (Number(req.headers['content-length'] ?? 0) > AGENT_REPORT_MAX_BYTES) return reject(413, `Report larger than ${AGENT_REPORT_MAX_BYTES} bytes`);
     const b = body(req) as unknown as AgentReport;
     const pctOk = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100;
     if (!pctOk(b.cpuPercent) || !pctOk(b.ramPercent) || !pctOk(b.diskPercent)) {
-      return fail(res, 400, 'cpuPercent, ramPercent and diskPercent are required numbers between 0 and 100');
+      return reject(400, 'cpuPercent, ramPercent and diskPercent are required numbers between 0 and 100');
     }
     if (typeof b.observedAt !== 'string' || Number.isNaN(Date.parse(b.observedAt))) {
-      return fail(res, 400, 'observedAt (ISO-8601 timestamp) is required — update the agent (reinstall from Setup)');
+      return reject(400, 'observedAt (ISO-8601 timestamp) is required — update the agent (reinstall from Setup)');
     }
     const skewSec = Math.abs(Date.now() - Date.parse(b.observedAt)) / 1000;
     if (skewSec > config.agentMaxClockSkewSec) {
-      return fail(res, 400, `Report timestamp is ${Math.round(skewSec)}s away from server time (max ${config.agentMaxClockSkewSec}s) — check NTP on the VPS`);
+      return reject(400, `Report timestamp is ${Math.round(skewSec)}s away from server time (max ${config.agentMaxClockSkewSec}s) — check NTP on the VPS`);
     }
     for (const k of ['load', 'processes', 'services', 'logs', 'errors', 'databases', ...LIST_KEYS] as const) {
-      if (b[k] !== undefined && !Array.isArray(b[k])) return fail(res, 400, `${k} must be a list`);
+      if (b[k] !== undefined && !Array.isArray(b[k])) return reject(400, `${k} must be a list`);
     }
     for (const k of NULLABLE_LIST_KEYS) {
-      if (b[k] !== undefined && b[k] !== null && !Array.isArray(b[k])) return fail(res, 400, `${k} must be a list or null`);
+      if (b[k] !== undefined && b[k] !== null && !Array.isArray(b[k])) return reject(400, `${k} must be a list or null`);
     }
     for (const k of NULLABLE_OBJECT_KEYS) {
       const v = b[k];
-      if (v !== undefined && v !== null && (typeof v !== 'object' || Array.isArray(v))) return fail(res, 400, `${k} must be an object or null`);
+      if (v !== undefined && v !== null && (typeof v !== 'object' || Array.isArray(v))) return reject(400, `${k} must be an object or null`);
     }
     ingestAgentReport(srv, b, { sourceIp: req.ip });
     const telemetry = applyServerTelemetry(srv);
@@ -714,6 +738,30 @@ export function buildRouter(): Router {
   }));
 
   // ── Everything below requires a signed-in user ─────────────────────────────
+  r.post('/v1/worker-events', h((req, res) => {
+    const authz = authorizeWorkerEvent(req.headers.authorization);
+    if (!authz.ok) return fail(res, authz.status, authz.message);
+    const b = body(req);
+    const codeName = reqStr(b, 'application', 'application (code name)', 60).toLowerCase();
+    const app = db.applications.find(a => a.codeName === codeName || a.id === codeName);
+    if (!app) return fail(res, 404, `Unknown application ${codeName}`);
+    try {
+      const event = recordWorkerEvent({
+        applicationId: app.id,
+        kind: reqStr(b, 'kind', 'kind', 40),
+        origin: optStr(b, 'origin', 'origin', 253) ?? null,
+        prdHealth: optStr(b, 'prdHealth', 'prdHealth', 20) ?? null,
+        drHealth: optStr(b, 'drHealth', 'drHealth', 20) ?? null,
+        detail: optStr(b, 'detail', 'detail', 500) ?? '',
+        observedAt: optStr(b, 'observedAt', 'observedAt', 40),
+      });
+      audit('Worker', `WORKER_${event.kind.toUpperCase()}`, 'CLOUDFLARE', app.id, `${app.name}: ${event.detail || event.origin || event.kind}`);
+      ok(res, { accepted: true, id: event.id });
+    } catch (err) {
+      return fail(res, 400, (err as Error).message);
+    }
+  }));
+
   r.use(requireAuth);
 
   // Every authenticated change is committed to PostgreSQL before the response is sent,
@@ -783,6 +831,7 @@ export function buildRouter(): Router {
       auditLogs: db.auditLogs.slice(0, 200),
       cloudflareZones: cfState.zones,
       loadBalancer: lbState,
+      workerMonitor: workerMonitorState(),
       deadMan: infraHeartbeat(),
       integrations: integrationStatus(req),
       summary: summary(),
@@ -1005,7 +1054,7 @@ export function buildRouter(): Router {
     persist();
     const monitorChanges = syncAppUrlMonitors(app, operatorName(req));
     recomputeDerived();
-    audit(operatorName(req), 'APPLICATION_CREATED', 'APPLICATION', app.id, `${app.name} (${app.codeName}) · PRD URL ${app.prdUrl || '—'} · DR URL ${app.drUrl || '—'} · LB ${app.loadBalancer ? `${app.loadBalancer.hostname} pools ${app.loadBalancer.prdPoolId}/${app.loadBalancer.drPoolId}` : '—'} · DNS ${app.dnsRecordName || '—'}${monitorChanges.length ? ` · monitors: ${monitorChanges.join('; ')}` : ''}`);
+    audit(operatorName(req), 'APPLICATION_CREATED', 'APPLICATION', app.id, `${app.name} (${app.codeName}) · routing ${effectiveRoutingMethod(app)} · PRD URL ${app.prdUrl || '—'} · DR URL ${app.drUrl || '—'} · LB ${app.loadBalancer ? `${app.loadBalancer.hostname} pools ${app.loadBalancer.prdPoolId}/${app.loadBalancer.drPoolId}` : '—'} · DNS ${app.dnsRecordName || '—'}${monitorChanges.length ? ` · monitors: ${monitorChanges.join('; ')}` : ''}`);
     broadcast('applications_changed', null);
     if (isCloudflareConfigured()) void syncCloudflare().catch(() => {});
     if (app.loadBalancer) void syncLoadBalancers().catch(() => {});
@@ -1024,6 +1073,7 @@ export function buildRouter(): Router {
     const diff = (['name', 'codeName', 'tier', 'prdServerId', 'drServerId', 'rtoTargetMin', 'rpoTargetMin', 'prdUrl', 'drUrl', 'cloudflareZone', 'dnsRecordName', 'autoFailover'] as const)
       .filter(k => String(before[k] ?? '') !== String(app[k] ?? '')).map(k => `${k}: ${before[k] ?? '—'} → ${app[k] ?? '—'}`);
     if (JSON.stringify(before.loadBalancer ?? null) !== JSON.stringify(app.loadBalancer ?? null)) diff.push(`Cloudflare LB: ${before.loadBalancer ? JSON.stringify(before.loadBalancer) : '—'} → ${app.loadBalancer ? JSON.stringify(app.loadBalancer) : '—'}`);
+    if (effectiveRoutingMethod(before) !== effectiveRoutingMethod(app)) diff.push(`routing method: ${effectiveRoutingMethod(before)} → ${effectiveRoutingMethod(app)}`);
     if (JSON.stringify(before.healthCheck ?? null) !== JSON.stringify(app.healthCheck ?? null)) diff.push(`health check: ${JSON.stringify(app.healthCheck)}`);
     if (JSON.stringify(before.environments ?? null) !== JSON.stringify(app.environments ?? null)) diff.push('environment details updated');
     audit(operatorName(req), 'APPLICATION_UPDATED', 'APPLICATION', app.id, `${app.name}: ${diff.join('; ') || 'no field changes'}${monitorChanges.length ? ` · monitors: ${monitorChanges.join('; ')}` : ''}`);
@@ -1041,6 +1091,7 @@ export function buildRouter(): Router {
     db.applications = db.applications.filter(a => a.id !== app.id);
     closeIncidentsReferencing([app.id, ...removed.map(m => m.id)], operatorName(req), `application ${app.name} was deleted`);
     for (const s of db.servers) if (s.applicationId === app.id) s.applicationId = '';
+    db.workerEvents = db.workerEvents.filter(e => e.applicationId !== app.id);
     unlinkApplicationResources(app.id);
     forgetRegistryReferences({ applicationId: app.id });
     persist();

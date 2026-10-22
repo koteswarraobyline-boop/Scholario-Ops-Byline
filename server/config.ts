@@ -163,6 +163,8 @@ export const config = {
   auditRetention: int('AUDIT_RETENTION_ENTRIES', 5000, 100),
   /** Token CI pipelines use to report deployments (POST /api/v1/deployments/report) */
   deployReportToken: str('DEPLOY_REPORT_TOKEN'),
+  /** Optional. Signs POST /api/v1/worker-events. Empty means that ingest stays disconnected. */
+  workerEventsToken: str('WORKER_EVENTS_TOKEN'),
 };
 
 export const isCloudflareConfigured = () => config.cloudflareApiToken.length > 0;
