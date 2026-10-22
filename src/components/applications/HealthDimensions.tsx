@@ -1,6 +1,6 @@
 import React from 'react';
 import { Application, CloudflareZone, LoadBalancerState, Monitor, VpsServer, WorkerMonitorState } from '../../types';
-import { explainApplication, explainRouting, explainVps, ROUTING_METHOD_LABELS } from '../../lib/trafficHealth';
+import { explainApplication, explainRouting, explainVps, normalizeRouting, ROUTING_METHOD_LABELS } from '../../lib/trafficHealth';
 
 const tone = (status: string) =>
     status === 'HEALTHY' || status === 'PRD' ? 'text-emerald-500'
@@ -46,6 +46,13 @@ export const HealthDimensions: React.FC<{
   const vpsDr = explainVps(dr);
   const appPrd = explainApplication(application, 'PRD', monitors);
   const appDr = explainApplication(application, 'DR', monitors);
+  const cfg = normalizeRouting(application);
+  const workerStatus = !worker ? 'Unknown'
+    : worker.connection === 'verified' ? 'Verified'
+      : worker.connection === 'unavailable' ? 'Unavailable'
+        : worker.connection === 'configured' ? 'Configured'
+          : worker.connection === 'not_connected' ? 'Not connected'
+            : 'Unknown';
   return (
     <div className="space-y-3">
       <div className={`text-xs font-bold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Health dimensions</div>
@@ -79,6 +86,20 @@ export const HealthDimensions: React.FC<{
           {routing.warnings.map(w => <li key={w}>{w}</li>)}
         </ul>
       )}
+      <div className={`text-[11px] font-sans space-y-1 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+        {cfg.method === 'direct_dns' && (
+          <p>PRD host {cfg.direct.prdHostname || 'not set'} · DR host {cfg.direct.drHostname || 'not set'} · record {cfg.direct.dnsRecordName || application.dnsRecordName || 'not set'} · manual failover {cfg.direct.manualFailoverStatus} · last verified {cfg.direct.lastVerifiedAt ? new Date(cfg.direct.lastVerifiedAt).toLocaleString() : 'not recorded'}</p>
+        )}
+        {cfg.method === 'cloudflare_lb' && (
+          <p>Load Balancer {application.loadBalancer?.hostname || 'not set'} · last successful sync {loadBalancer?.lastSuccessAt ? new Date(loadBalancer.lastSuccessAt).toLocaleString() : 'none'} · pool sync {loadBalancer?.status ?? 'not loaded'}</p>
+        )}
+        {(cfg.method === 'cloudflare_worker' || cfg.method === 'cloudflare_worker_failover') && (
+          <p>Worker {cfg.worker.name || 'not set'} · route {cfg.worker.route || 'not set'} · status {workerStatus}{worker?.lastDeployedAt ? ` · last deployment ${new Date(worker.lastDeployedAt).toLocaleString()}` : ''} · requests {worker?.requests ?? 'Not connected'} · errors {worker?.errors ?? 'Not connected'} · PRD origin {cfg.worker.prdOriginHostname || 'not set'} · DR origin {cfg.worker.drOriginHostname || 'not set'}</p>
+        )}
+        {cfg.method === 'custom' && (
+          <p>{cfg.custom.description || 'No description'}{cfg.custom.endpoint ? ` · ${cfg.custom.endpoint}` : ''}{cfg.custom.notes ? ` · ${cfg.custom.notes}` : ''}</p>
+        )}
+      </div>
       {routing.recentEvents.length > 0 && (
         <div>
           <div className={`text-[10px] uppercase mb-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Routing events</div>

@@ -17,7 +17,7 @@ import { IncidentFlowChart } from '../visuals/IncidentFlowChart';
 import { TelemetryAreaGraph } from '../visuals/TelemetryAreaGraph';
 import { EmptyState } from '../ui/EmptyState';
 import { IctStatusPanel } from './IctStatusPanel';
-import { originFlows, routeState } from '../ui/routing';
+import { dnsPointsAt, originFlows, routeState, servingLabel } from '../ui/routing';
 import { Ago } from '../ui/Freshness';
 import { deadManLabel, lastServerHeartbeat } from '../ui/deadman';
 
@@ -491,7 +491,7 @@ export const OverviewView: React.FC = () => {
             ) : applications.map(app => {
               const prd = servers.find(s => s.id === app.prdServerId);
               const dr = servers.find(s => s.id === app.drServerId);
-              const route = routeState(app, loadBalancer);
+              const route = routeState(app, loadBalancer, dnsPointsAt(app, servers, cloudflareZones));
               const onDr = route === 'DR';
               const moving = route === 'MOVING';
               const unknown = route === 'UNKNOWN';
@@ -815,7 +815,7 @@ export const OverviewView: React.FC = () => {
                   const prdServer = servers.find(s => s.id === app.prdServerId);
                   const drServer  = servers.find(s => s.id === app.drServerId);
                   const dot = dotFor(app.status);
-                  const isDr      = app.failoverState === 'DR_ACTIVE';
+                  const route = routeState(app, loadBalancer, dnsPointsAt(app, servers, cloudflareZones));
                   const lag       = app.currentReplicationLagSec;
                   const lagWarn   = lag !== null && lag > app.rpoTargetMin * 60;
                   const err       = app.errorRatePercent;
@@ -836,8 +836,8 @@ export const OverviewView: React.FC = () => {
                             {app.status}
                           </span>
                         </div>
-                        <div className={`text-[10px] mt-0.5 font-bold ${isDr ? 'text-amber-400' : isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-                          {app.failoverState === 'FAILING_OVER' ? 'FAILING OVER' : isDr ? 'DR ACTIVE' : 'PRD ACTIVE'}
+                        <div className={`text-[10px] mt-0.5 font-bold ${route === 'DR' ? 'text-amber-400' : route === 'UNKNOWN' ? 'text-slate-400' : isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                          {route === 'UNKNOWN' ? 'ROUTING UNKNOWN' : servingLabel(route).toUpperCase()}
                         </div>
                       </td>
 
@@ -969,7 +969,7 @@ export const OverviewView: React.FC = () => {
                       </div>
                     </div>
                   ) : (
-                    <div className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`} title={srv.lastIngestError?.reason}>{srv.lastSeen ? `Agent ${srv.agentStatus}` : srv.lastIngestError ? 'Report rejected' : 'Not connected'}</div>
+                    <div className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`} title={srv.lastIngestError?.reason}>{srv.lastSeen ? `Agent ${srv.agentStatus}${srv.lastIngestError && srv.agentStatus !== 'CONNECTED' ? ' · report rejected' : ''}` : srv.lastIngestError ? 'Report rejected' : 'Not connected'}</div>
                   )}
                   <div className={`text-[9px] font-mono mt-1.5 truncate ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
                     {srv.region || 'Region n/a'} · {srv.environment}

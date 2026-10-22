@@ -103,20 +103,54 @@ function urlMonitor(monitors: Monitor[], appId: string, env: 'PRD' | 'DR'): Moni
   return list.find(m => m.managedBy === 'app-url') ?? list[0];
 }
 
+const rank: Record<DimensionStatus, number> = { NOT_CONFIGURED: 0, NOT_CONNECTED: 0, HEALTHY: 1, UNKNOWN: 2, WARNING: 3, CRITICAL: 4 };
+
+function worse(a: DimensionStatus, b: DimensionStatus): DimensionStatus {
+  return rank[b] > rank[a] ? b : a;
+}
+
+function monitorStatus(m: Monitor): DimensionStatus {
+  if (!m.lastCheck) return 'UNKNOWN';
+  if (m.status === 'HEALTHY' || m.status === 'WARNING' || m.status === 'CRITICAL') return m.status;
+  return 'UNKNOWN';
+}
+
 export function explainApplication(app: Pick<Application, 'id'>, env: 'PRD' | 'DR', monitors: Monitor[]): HealthDimension {
   const m = urlMonitor(monitors, app.id, env);
-  if (!m) return { status: 'NOT_CONFIGURED', detail: `No ${env} application URL monitor is configured.`, observedAt: null, source: 'application monitors' };
-  if (!m.lastCheck) return { status: 'UNKNOWN', detail: `${m.name} has not been checked yet.`, observedAt: null, source: 'application monitors' };
   const ssl = monitors.find(x => x.enabled && x.applicationId === app.id && x.environment === env && x.type === 'SSL');
-  const http: DimensionStatus = m.status === 'HEALTHY' ? 'HEALTHY' : m.status === 'WARNING' ? 'WARNING' : m.status === 'CRITICAL' ? 'CRITICAL' : 'UNKNOWN';
-  let status = http;
-  const parts = [`${m.name}: ${m.lastProbeStatus || m.status}${m.lastStatusCode ? ` HTTP ${m.lastStatusCode}` : ''}${m.responseTimeMs ? `, ${Math.round(m.responseTimeMs)} ms` : ''}`];
-  if (ssl?.lastCheck && (ssl.status === 'WARNING' || ssl.status === 'CRITICAL') && status === 'HEALTHY') {
-    status = ssl.status === 'CRITICAL' ? 'CRITICAL' : 'WARNING';
-    parts.push(`TLS ${ssl.status}`);
-  } else if (ssl && !ssl.lastCheck) parts.push('TLS certificate has not been checked yet');
-  if (m.history[0]?.detail) parts.push(m.history[0].detail);
-  return { status, detail: parts.join(' — '), observedAt: m.lastCheck, source: 'application monitors' };
+  const data = monitors.filter(x => x.enabled && x.applicationId === app.id && x.environment === env && (x.type === 'DB_CONN' || x.type === 'DB_REPLICATION'));
+  if (!m && !ssl && data.length === 0) return { status: 'NOT_CONFIGURED', detail: `No ${env} application URL, TLS, or database monitor is configured.`, observedAt: null, source: 'application monitors' };
+  let status: DimensionStatus = 'NOT_CONFIGURED';
+  const parts: string[] = [];
+  let observedAt: string | null = null;
+  const note = (at: string) => { if (at && (!observedAt || at > observedAt)) observedAt = at; };
+  if (m && !m.lastCheck) {
+    status = 'UNKNOWN';
+    parts.push(`${m.name} has not been checked yet.`);
+  } else if (m) {
+    status = monitorStatus(m);
+    parts.push(`${m.name}: ${m.lastProbeStatus || m.status}${m.lastStatusCode ? ` HTTP ${m.lastStatusCode}` : ''}${m.responseTimeMs ? `, ${Math.round(m.responseTimeMs)} ms` : ''}`);
+    if (m.history[0]?.detail) parts.push(m.history[0].detail);
+    note(m.lastCheck);
+  }
+  if (ssl?.lastCheck) {
+    const tls = monitorStatus(ssl);
+    if (tls === 'WARNING' || tls === 'CRITICAL') status = worse(status, tls);
+    parts.push(`TLS ${ssl.status}${ssl.history[0]?.detail ? ` (${ssl.history[0].detail})` : ''}`);
+    note(ssl.lastCheck);
+  } else if (ssl) parts.push('TLS certificate has not been checked yet');
+  for (const extra of data) {
+    if (!extra.lastCheck) {
+      parts.push(`${extra.name} has not been checked yet`);
+      continue;
+    }
+    status = worse(status === 'NOT_CONFIGURED' ? 'HEALTHY' : status, monitorStatus(extra));
+    const lag = extra.type === 'DB_REPLICATION' && typeof extra.lastValue === 'number' ? `, lag ${extra.lastValue}s` : '';
+    parts.push(`${extra.name}: ${extra.status}${lag}`);
+    note(extra.lastCheck);
+  }
+  if (status === 'NOT_CONFIGURED') status = 'UNKNOWN';
+  return { status, detail: parts.join(' — '), observedAt, source: 'application monitors' };
 }
 
 function poolLive(lb: LoadBalancerState | null, appId: string, poolId: string): boolean | null {
@@ -247,7 +281,11 @@ export function explainRouting(args: {
       if (routing.activePoolId === mapping.prdPoolId) { origin = 'PRD'; known = true; }
       else if (routing.activePoolId === mapping.drPoolId) { origin = 'DR'; known = true; }
     } else if (routing && !routing.found) base.warnings.push(routing.error || `Load Balancer hostname ${mapping.hostname} was not found.`);
-    const worst: DimensionStatus = prd === false || dr === false ? 'CRITICAL' : prd === true && dr === true ? 'HEALTHY' : 'UNKNOWN';
+    const servingDown = known && ((origin === 'PRD' && prd === false) || (origin === 'DR' && dr === false));
+    const worst: DimensionStatus = prd === false && dr === false || servingDown ? 'CRITICAL'
+      : prd === false || dr === false ? 'WARNING'
+        : prd === true && dr === true ? 'HEALTHY'
+          : 'UNKNOWN';
     return finish(worst, known
       ? `Load Balancer ${mapping.hostname} is serving ${origin}.`
       : `Load Balancer ${mapping.hostname} is mapped. The serving pool is unknown.`, at, 'cloudflare load balancer', {

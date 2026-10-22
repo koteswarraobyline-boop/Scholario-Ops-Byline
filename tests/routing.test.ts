@@ -26,6 +26,7 @@ const DR_POOL = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const {
   blankRouting, effectiveRoutingMethod, explainApplication, explainRouting, explainVps, normalizeRouting, vpsOperationalStatus,
 } = await import('../src/lib/trafficHealth.ts');
+const { dnsPointsAt, routeState } = await import('../src/components/ui/routing.ts');
 const { parseRoutingUpdate } = await import('../server/routingConfig.ts');
 const { authorizeWorkerEvent, matchWorkerScript, WORKER_PERMISSION_HINT } = await import('../server/workers.ts');
 const { config } = await import('../server/config.ts');
@@ -363,6 +364,48 @@ test('worker event ingest rejects a bad token and does not require a session', a
   });
   config.workerEventsToken = previous;
   assert.equal(closed.status, 503);
+});
+
+test('a healthy serving pool with a down standby is a routing warning, and database checks change application health', () => {
+  const app = application({
+    name: 'ICT',
+    loadBalancer: { accountId: ACC, hostname: 'ict.example.com', prdPoolId: PRD_POOL, drPoolId: DR_POOL },
+    trafficRouting: blankRouting('cloudflare_lb'),
+  });
+  const explained = explainRouting({
+    app, servers: [], cloudflareConfigured: true, zones: [], worker: null, events: [], eventsConnected: false,
+    lb: {
+      status: 'OK', lastSyncAt: '2026-10-22T10:00:00.000Z', lastSuccessAt: '2026-10-22T10:00:00.000Z', lastError: null, accountId: ACC,
+      pools: [
+        { id: PRD_POOL, applicationId: app.id, name: 'prd', description: '', enabled: true, healthy: true, role: 'PRD', found: true, origins: [], listFetchedAt: null, healthFetchedAt: null, healthError: null },
+        { id: DR_POOL, applicationId: app.id, name: 'dr', description: '', enabled: true, healthy: false, role: 'DR', found: true, origins: [], listFetchedAt: null, healthFetchedAt: null, healthError: null },
+      ],
+      routing: [{ hostname: 'ict.example.com', found: true, enabled: true, proxied: true, steeringPolicy: 'off', defaultPools: [PRD_POOL], fallbackPool: DR_POOL, activePoolId: PRD_POOL, traffic: [{ poolId: PRD_POOL, percent: 100 }], fetchedAt: '2026-10-22T10:00:00.000Z', error: null }],
+    },
+  });
+  assert.equal(explained.status, 'WARNING');
+  assert.equal(explained.currentOrigin, 'PRD');
+  assert.equal(explained.drHealth.status, 'CRITICAL');
+  const db = monitor({ applicationId: app.id, type: 'DB_REPLICATION', status: 'CRITICAL', name: 'PRD replication', lastValue: 90 });
+  const http = monitor({ applicationId: app.id, status: 'HEALTHY', lastStatusCode: 200 });
+  const combined = explainApplication(app, 'PRD', [http, db]);
+  assert.equal(combined.status, 'CRITICAL');
+  assert.match(combined.detail, /lag 90s/);
+});
+
+test('Worker and unconfigured applications are not labelled as serving PRD', () => {
+  const worker = application({ trafficRouting: blankRouting('cloudflare_worker') });
+  assert.equal(routeState(worker, null), 'UNKNOWN');
+  const freshDns = application({
+    cloudflareZone: 'example.com', dnsRecordName: 'app.example.com', prdServerId: 'prd', drServerId: 'dr',
+    trafficRouting: blankRouting('direct_dns'), failoverState: 'PRIMARY_ACTIVE',
+  });
+  assert.equal(routeState(freshDns, null), 'UNKNOWN');
+  assert.equal(dnsPointsAt(freshDns, [{ id: 'prd', ip: '187.127.167.51' }, { id: 'dr', ip: '201.18.193.125' }], [{
+    domain: 'example.com',
+    dnsRecords: [{ id: 'r', type: 'A', name: 'app.example.com', target: '187.127.167.51', proxied: false, ttl: 1, lastModified: '2026-10-22T10:00:00.000Z' }],
+  }]), 'PRD');
+  assert.equal(routeState(freshDns, null, 'PRD'), 'PRD');
 });
 
 test('the routing migration backfills without changing Load Balancer rows', () => {

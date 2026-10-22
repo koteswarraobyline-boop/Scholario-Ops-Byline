@@ -552,7 +552,7 @@ export const InfrastructureView: React.FC = () => {
                           <td className="py-2.5 px-3.5">
                             <div className={`font-semibold ${hasReported(s) ? agentColor(s.agentStatus) : 'text-slate-400'}`} title={explainVps(s).detail}>{hasReported(s) ? s.agentStatus : 'NOT CONNECTED'}</div>
                             <div className={`text-[10px] ${muted}`} title={explainVps(s).detail}>
-                              {hasReported(s) ? fmtAgo(s.lastSeen) : s.lastIngestError ? 'report rejected — metrics unknown' : 'no accepted report — metrics unknown'}{s.agentVersion ? ` · v${s.agentVersion.replace(/^v/, '')}` : ''}
+                              {hasReported(s) ? fmtAgo(s.lastSeen) : s.lastIngestError ? 'report rejected — metrics unknown' : 'no accepted report — metrics unknown'}{hasReported(s) && s.lastIngestError && s.agentStatus !== 'CONNECTED' ? ' · last report rejected' : ''}{s.agentVersion ? ` · v${s.agentVersion.replace(/^v/, '')}` : ''}
                             </div>
                           </td>
                           <td className="py-2.5 px-3.5 tabular-nums">{bar(s, s.telemetry.cpuPercent, THRESHOLDS.cpuPercent.warning, 'bg-blue-500')}</td>

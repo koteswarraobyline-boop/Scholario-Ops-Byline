@@ -8,7 +8,8 @@ import { Users, Globe, AlertTriangle, RefreshCw, ShieldCheck, Loader2 } from 'lu
 import { EmptyState } from '../ui/EmptyState';
 import { Ago, verdictColor } from '../ui/Freshness';
 import { LbFailoverConsole } from './LbFailoverConsole';
-import { originFlows, poolReceiving, routeState } from '../ui/routing';
+import { dnsPointsAt, originFlows, poolReceiving, routeState } from '../ui/routing';
+import { effectiveRoutingMethod, normalizeRouting, ROUTING_METHOD_LABELS } from '../../lib/trafficHealth';
 import { LbPoolCard } from '../providers/LoadBalancerPanel';
 
 const validDate = (s?: string | null) => Boolean(s) && !Number.isNaN(Date.parse(s as string));
@@ -100,18 +101,22 @@ export const DrDashboardView: React.FC = () => {
   const prdMonitors = monitors.filter(m => m.applicationId === selectedApp.id && m.environment === 'PRD' && m.enabled);
   const drMonitors = monitors.filter(m => m.applicationId === selectedApp.id && m.environment === 'DR' && m.enabled);
 
-  const lbMapped = Boolean(selectedApp.loadBalancer);
+  const method = effectiveRoutingMethod(selectedApp);
+  const lbMapped = method === 'cloudflare_lb' && Boolean(selectedApp.loadBalancer);
+  const dnsSwitch = method === 'direct_dns' || (method === 'unknown' && !selectedApp.loadBalancer);
   const routing = lbMapped ? loadBalancer?.routing.find(r => r.hostname === selectedApp.loadBalancer!.hostname) : undefined;
   const lbPools = lbMapped ? (loadBalancer?.pools ?? []).filter(p => p.applicationId === selectedApp.id) : [];
   const flows = lbMapped ? originFlows(selectedApp, loadBalancer) : null;
+  const pointsAt = dnsPointsAt(selectedApp, servers, cloudflareZones);
+  const route = routeState(selectedApp, loadBalancer, pointsAt);
   // For LB apps, "receiving traffic" comes from Cloudflare routing; null = unknown
   const lbServing = (env: 'PRD' | 'DR'): boolean | null => {
     if (!flows?.known) return null;
     return env === 'PRD' ? flows.prd.receiving : flows.dr.receiving;
   };
   const trafficSplit = Boolean(flows?.known && flows.prd.receiving && flows.dr.receiving);
-  const isDrActive = lbMapped ? lbServing('DR') === true && !trafficSplit : selectedApp.failoverState === 'DR_ACTIVE';
-  const isFailingOver = selectedApp.failoverState === 'FAILING_OVER';
+  const isDrActive = route === 'DR';
+  const isFailingOver = route === 'MOVING';
   const target: 'DR' | 'PRIMARY' = isDrActive ? 'PRIMARY' : 'DR';
   const targetServer = target === 'DR' ? drServer : prdServer;
 
@@ -176,7 +181,7 @@ export const DrDashboardView: React.FC = () => {
             PRD / DR READINESS
           </h1>
           <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            DR readiness from live checks, and failover between PRD and DR (Cloudflare Load Balancer or DNS)
+            DR readiness from live checks. Failover follows the application's routing method. Worker and custom routes are not switched here.
           </p>
         </div>
 
@@ -196,7 +201,7 @@ export const DrDashboardView: React.FC = () => {
           >
             {applications.map(app => (
               <option key={app.id} value={app.id}>
-                {app.name} ({({ PRD: 'Primary active', DR: 'DR active', SPLIT: 'Traffic split', MOVING: 'switching', UNKNOWN: 'routing unknown' } as const)[routeState(app, loadBalancer)]})
+                {app.name} ({({ PRD: 'Primary active', DR: 'DR active', SPLIT: 'Traffic split', MOVING: 'switching', UNKNOWN: 'routing unknown' } as const)[routeState(app, loadBalancer, dnsPointsAt(app, servers, cloudflareZones))]})
               </option>
             ))}
           </select>
@@ -212,8 +217,8 @@ export const DrDashboardView: React.FC = () => {
             <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />
             <h2 className="text-xs font-bold uppercase tracking-wider">Routing: {selectedApp.name}</h2>
           </div>
-          <span className={`text-xs font-bold ${lbMapped && !flows?.known ? 'text-slate-400' : trafficSplit ? 'text-violet-400' : isFailingOver || isDrActive ? 'text-amber-500' : 'text-emerald-500'}`}>
-            {lbMapped && !flows?.known ? 'ROUTING UNKNOWN'
+          <span className={`text-xs font-bold ${route === 'UNKNOWN' ? 'text-slate-400' : trafficSplit ? 'text-violet-400' : isFailingOver || isDrActive ? 'text-amber-500' : 'text-emerald-500'}`}>
+            {route === 'UNKNOWN' ? 'ROUTING UNKNOWN'
               : isFailingOver ? 'FAILOVER IN PROGRESS'
                 : trafficSplit ? (flows!.prd.percent != null && flows!.dr.percent != null ? `SPLIT ${flows!.prd.percent}% / ${flows!.dr.percent}%` : 'TRAFFIC SPLIT')
                   : isDrActive ? 'ROUTED TO DR' : 'ROUTED TO PRIMARY'}
@@ -224,12 +229,12 @@ export const DrDashboardView: React.FC = () => {
           <div className={`p-3 rounded border text-center space-y-1 ${isDark ? 'bg-[#0B0F17] border-[#1A2436]' : 'bg-slate-50 border-slate-200'}`}>
             <Users className="w-4 h-4 mx-auto text-blue-500" />
             <div className="font-bold">Public traffic</div>
-            <div className={`text-[10px] truncate ${muted}`}>{selectedApp.loadBalancer?.hostname || selectedApp.dnsRecordName || 'DNS record not configured'}</div>
+            <div className={`text-[10px] truncate ${muted}`}>{lbMapped ? selectedApp.loadBalancer!.hostname : method === 'cloudflare_worker' || method === 'cloudflare_worker_failover' ? (normalizeRouting(selectedApp).worker.route || normalizeRouting(selectedApp).worker.name || 'Worker route not set') : method === 'custom' ? (normalizeRouting(selectedApp).custom.endpoint || 'Endpoint not set') : selectedApp.dnsRecordName || 'DNS record not configured'}</div>
           </div>
 
           <div className={`p-3 rounded border text-center space-y-1 ${isDark ? 'bg-[#0B0F17] border-[#1A2436]' : 'bg-slate-50 border-slate-200'}`}>
             <Globe className="w-4 h-4 mx-auto text-amber-500" />
-            <div className="font-bold">{lbMapped ? 'Cloudflare Load Balancer' : 'Cloudflare DNS'}</div>
+            <div className="font-bold">{ROUTING_METHOD_LABELS[method]}</div>
             <div className={`text-[10px] truncate ${muted}`}>{selectedApp.cloudflareZone || 'Zone not configured'}</div>
             {lbMapped ? (
               <div className={`text-[10px] font-semibold ${routing?.found ? 'text-emerald-500' : muted}`}>
@@ -245,8 +250,8 @@ export const DrDashboardView: React.FC = () => {
           </div>
 
           <div className="md:col-span-2 space-y-2">
-            {originRow(prdServer, 'PRD', lbMapped ? lbServing('PRD') : !isDrActive && !isFailingOver, prdMonitors, trafficSplit ? flows!.prd.percent : null)}
-            {originRow(drServer, 'DR', lbMapped ? lbServing('DR') : isDrActive, drMonitors, trafficSplit ? flows!.dr.percent : null)}
+            {originRow(prdServer, 'PRD', lbMapped ? lbServing('PRD') : dnsSwitch ? (route === 'PRD' ? true : route === 'UNKNOWN' || route === 'MOVING' ? null : false) : null, prdMonitors, trafficSplit ? flows!.prd.percent : null)}
+            {originRow(drServer, 'DR', lbMapped ? lbServing('DR') : dnsSwitch ? (route === 'DR' ? true : route === 'UNKNOWN' || route === 'MOVING' ? null : false) : null, drMonitors, trafficSplit ? flows!.dr.percent : null)}
           </div>
         </div>
 
@@ -281,6 +286,8 @@ export const DrDashboardView: React.FC = () => {
         <div className={`pt-3 border-t space-y-2 text-xs ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
           {lbMapped ? (
             <LbFailoverConsole key={selectedApp.id} app={selectedApp} />
+          ) : !dnsSwitch ? (
+            <div className={`font-sans ${muted}`}>{ROUTING_METHOD_LABELS[method]}. Scholario Ops does not change Worker routes, origins, or custom routing. The selected origin stays unknown until that integration reports it.</div>
           ) : !canFailover ? (
             <div className={`font-sans ${muted}`}>Only super administrators can switch traffic between PRD and DR.</div>
           ) : blockers.length > 0 ? (

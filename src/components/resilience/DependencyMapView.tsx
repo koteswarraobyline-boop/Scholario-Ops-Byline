@@ -4,6 +4,7 @@ import { useOps } from '../../context/OpsContext';
 import { Application, Monitor, VpsServer } from '../../types';
 import { ArrowDown } from 'lucide-react';
 import { DependencyRegisterSection } from '../setup/DependencyRegister';
+import { dnsPointsAt, routeState, servingLabel } from '../ui/routing';
 
 type NodeRef = { kind: 'app' | 'server' | 'monitor'; id: string } | null;
 
@@ -24,7 +25,7 @@ const statusDot = (s: string) =>
           : 'bg-slate-500';
 
 export const DependencyMapView: React.FC = () => {
-  const { theme, applications, servers, monitors, isLoading } = useOps();
+  const { theme, applications, servers, monitors, cloudflareZones, loadBalancer, isLoading } = useOps();
   const navigate = useNavigate();
   const isDark = theme === 'dark';
   const muted = isDark ? 'text-slate-400' : 'text-slate-500';
@@ -129,7 +130,7 @@ export const DependencyMapView: React.FC = () => {
               <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
               <span className={`text-xs font-bold ${statusText(app.status)}`}>{app.status}</span>
               <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
-              <span className={`text-xs ${muted}`}>{app.failoverState === 'DR_ACTIVE' ? 'Serving from DR' : app.failoverState === 'FAILING_OVER' ? 'Switching' : 'Serving from PRD'}</span>
+              <span className={`text-xs ${muted}`}>{servingLabel(routeState(app, loadBalancer, dnsPointsAt(app, servers, cloudflareZones))) === 'Unknown' ? 'Origin unknown' : `Serving from ${servingLabel(routeState(app, loadBalancer, dnsPointsAt(app, servers, cloudflareZones)))}`}</span>
             </div>
           </div>
           <div className="space-y-4 text-xs">
@@ -184,8 +185,10 @@ export const DependencyMapView: React.FC = () => {
               {listBox(
                 apps.map(a => {
                   const role = a.prdServerId === srv.id ? 'PRD' : a.drServerId === srv.id ? 'DR' : srv.environment;
-                  const live = (role === 'PRD' && a.failoverState !== 'DR_ACTIVE') || (role === 'DR' && a.failoverState === 'DR_ACTIVE');
-                  return { key: a.id, label: <>{a.name} · {role}{live ? ' · serving traffic' : ' · standby'}</>, onClick: () => setSelected({ kind: 'app', id: a.id }) };
+                  const route = routeState(a, loadBalancer, dnsPointsAt(a, servers, cloudflareZones));
+                  const live = route === 'SPLIT' || (role === 'PRD' && route === 'PRD') || (role === 'DR' && route === 'DR');
+                  const place = route === 'UNKNOWN' || route === 'MOVING' ? 'routing unknown' : live ? 'serving traffic' : 'standby';
+                  return { key: a.id, label: <>{a.name} · {role} · {place}</>, onClick: () => setSelected({ kind: 'app', id: a.id }) };
                 }),
                 'No applications use this server', '→', 'text-amber-500',
               )}
