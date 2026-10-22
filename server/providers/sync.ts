@@ -6,7 +6,7 @@ import { db, persist } from '../store.ts';
 import { broadcast } from '../events.ts';
 import { log } from '../logger.ts';
 import {
-  HostingerError, HostingerVm, attachLegacyServers, hostingerState, noteHostingerFailure, noteHostingerSuccess, pullHostinger, vmAddresses,
+  HostingerError, HostingerVm, attachLegacyServers, hostingerState, noteHostingerFailure, noteHostingerSuccess, noteProviderBackupCheck, pullHostinger, pullRecoveryPoints, storeRecoveryPoints, vmAddresses,
 } from '../hostinger.ts';
 import { redactSecrets, tokenFromEnv } from './env.ts';
 import { ensureLegacyHostingerConnection } from './connections.ts';
@@ -99,8 +99,22 @@ async function runSync(id: string, manual: boolean): Promise<void> {
       noteHostingerSuccess(pulled.infos, pulled.fetchedAt);
       serversChanged = attachLegacyServers(pulled.vms, pulled.infos);
     }
+    let backupsChanged = false;
+    for (const srv of db.servers) {
+      const vm = pulled.vms.find(v => vmAddresses(v, 'ipv4').includes(srv.ip) || vmAddresses(v, 'ipv6').includes(srv.ip));
+      if (!vm) continue;
+      const hostname = vm.hostname || srv.hostname;
+      const recovered = await pullRecoveryPoints(token, conn.tokenEnv, vm.id, hostname);
+      noteProviderBackupCheck(vm.id, recovered.points.length, recovered.error, pulled.fetchedAt);
+      if (recovered.error) {
+        log.warn('hostinger', `backup list for vm ${vm.id} was not read: ${redactSecrets(recovered.error)}`);
+        continue;
+      }
+      if (storeRecoveryPoints(srv, vm.id, recovered.points, recovered.complete)) backupsChanged = true;
+    }
     persist();
     if (serversChanged) broadcast('servers_changed', null);
+    if (backupsChanged) broadcast('backups_changed', null);
   } catch (err) {
     const kind = err instanceof HostingerError ? err.kind : 'ERROR';
     const message = redactSecrets(err instanceof HostingerError ? err.message : (err as Error).message);

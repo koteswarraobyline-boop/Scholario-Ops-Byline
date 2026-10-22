@@ -46,6 +46,8 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
     if (hostingerMode === 'timeout') return new Promise<Response>((_, rej) => init?.signal?.addEventListener('abort', () => rej(Object.assign(new Error('aborted'), { name: 'AbortError' }))));
     if (hostingerMode === 'ratelimit-then-ok' && hostingerCalls === 1) return new Response('slow down', { status: 429, headers: { 'retry-after': '1' } });
     if (u.endsWith('/data-centers')) return Response.json([{ id: 17, name: 'in-mum', city: 'Mumbai', location: 'in', continent: 'Asia' }]);
+    if (u.includes('/backups')) return Response.json({ data: [{ id: 325, size: 20_000_000_000, location: 'nl-srv-nodebackups', created_at: new Date().toISOString() }], meta: { current_page: 1, per_page: 15, total: 1 } });
+    if (u.endsWith('/snapshot')) return new Response('', { status: 404 });
     return Response.json([
       { id: 1001, hostname: 'srv-prd.example', state: 'running', cpus: 8, memory: 32768, disk: 409600, plan: 'KVM 8', ipv4: [{ id: 1, address: PRD_IP }], template: { name: 'Ubuntu 24.04' }, data_center_id: 17 },
       { id: 1002, hostname: 'srv-dr.example', state: 'stopped', cpus: 2, memory: 8192, disk: 102400, plan: 'KVM 2', ipv4: [{ id: 2, address: DR_IP }], template: { name: 'Ubuntu 24.04' }, data_center_id: 99 },
@@ -134,6 +136,16 @@ test('Hostinger: success → normalised VM data attached to the matching server'
   assert.equal(dr.hostinger?.status, 'UNAVAILABLE', 'stopped VM is UNAVAILABLE');
   assert.equal(dr.hostinger?.region, null, 'unknown data center → no invented region');
   assert.equal(prd.planSpec?.source, 'hostinger');
+  const saved = db.backups.filter(b => b.id === 'hostinger-backup:1001:325');
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].serverId, prd.id);
+  assert.equal(saved[0].sizeGb, 20);
+  assert.match(saved[0].destination, /Hostinger backup · nl-srv-nodebackups/);
+  assert.equal(saved[0].status, 'SUCCESS');
+  assert.equal(saved[0].encrypted, false);
+  assert.equal(db.backups.some(b => b.id.startsWith('hostinger-snapshot:')), false);
+  await syncHostinger();
+  assert.equal(db.backups.filter(b => b.id === 'hostinger-backup:1001:325').length, 1);
   assert.equal(vmStatus('restarting'), 'DEGRADED');
   assert.equal(vmStatus('something-new'), 'UNKNOWN');
 });
