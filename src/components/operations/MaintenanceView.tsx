@@ -83,7 +83,7 @@ const CreateMaintenanceForm: React.FC<{ onClose: () => void }> = ({ onClose }) =
     }`}>
       <div className="flex items-center justify-between">
         <span className="font-bold text-sm">Schedule maintenance window</span>
-        <button type="button" onClick={onClose} className="p-1 text-slate-400 hover:text-slate-200 cursor-pointer"><X className="w-4 h-4" /></button>
+        <button type="button" onClick={onClose} aria-label="Close schedule maintenance" title="Close" className="p-1 text-slate-400 hover:text-slate-200 cursor-pointer"><X className="w-4 h-4" aria-hidden="true" /></button>
       </div>
 
       <div>

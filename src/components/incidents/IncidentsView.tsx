@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { IncidentMinutes } from '../ui/IncidentMinutes';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
 import { Incident, IncidentStatus, IncidentSeverity } from '../../types';
@@ -14,6 +15,7 @@ import {
 import { IncidentFlowChart } from '../visuals/IncidentFlowChart';
 import { IncidentTimelineView } from './IncidentTimelineView';
 import { EmptyState } from '../ui/EmptyState';
+import { useDialog } from '../ui/useDialog';
 
 const SEVERITIES: IncidentSeverity[] = ['INFO', 'WARNING', 'HIGH', 'CRITICAL', 'EMERGENCY'];
 const STATUSES: IncidentStatus[] = ['OPEN', 'ACKNOWLEDGED', 'INVESTIGATING', 'MITIGATING', 'MONITORING', 'RESOLVED', 'CLOSED'];
@@ -53,6 +55,7 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
     theme
   } = useOps();
   const { user, canDo } = useAuth();
+  const dialog = useDialog(onClose);
 
   const isDark = theme === 'dark';
   const canAck = canDo('acknowledge_incident');
@@ -122,7 +125,9 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 overflow-y-auto animate-in fade-in" onClick={onClose}>
       <div
-        className={`w-full max-w-4xl rounded border overflow-hidden flex flex-col max-h-[92vh] shadow-2xl ${
+        {...dialog}
+        aria-labelledby="incident-detail-title"
+        className={`w-full max-w-4xl rounded border overflow-hidden flex flex-col max-h-[92vh] shadow-2xl focus:outline-none ${
           isDark ? 'bg-[#101624] text-slate-100 border-[#223048]' : 'bg-white text-slate-900 border-slate-300'
         }`}
         onClick={e => e.stopPropagation()}
@@ -149,7 +154,7 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
                 {app?.name ?? 'No application'} ({incident.environment})
               </span>
             </div>
-            <h2 className={`text-base font-bold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{incident.title}</h2>
+            <h2 id="incident-detail-title" className={`text-base font-bold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{incident.title}</h2>
           </div>
 
           <div className="flex items-center gap-2 font-mono shrink-0">
@@ -171,8 +176,8 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
                 RESOLVE
               </button>
             )}
-            <button onClick={onClose} className={`p-1 cursor-pointer ${isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800'}`}>
-              <X className="w-5 h-5" />
+            <button onClick={onClose} aria-label="Close incident details" title="Close (Esc)" className={`p-1 cursor-pointer ${isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800'}`}>
+              <X className="w-5 h-5" aria-hidden="true" />
             </button>
           </div>
         </div>
@@ -183,7 +188,7 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
         }`}>
           <div className="flex flex-wrap items-center gap-4">
             <span>Started: <strong className={isDark ? 'text-slate-200' : 'text-slate-800'}>{fmtDateTime(incident.startedAt)}</strong></span>
-            <span>Duration: <strong className={`tabular-nums ${closed ? 'text-emerald-500' : 'text-rose-500'}`}>{incident.durationMinutes ?? 0} min</strong></span>
+            <span>Duration: <strong className={`tabular-nums ${closed ? 'text-emerald-500' : 'text-rose-500'}`}><IncidentMinutes incident={incident} /> min</strong></span>
             <span className="flex items-center gap-1.5">
               Owner:{' '}
               <strong className={incident.owner && incident.owner !== 'Unassigned' ? (isDark ? 'text-slate-200' : 'text-slate-800') : 'text-amber-500'}>
@@ -616,6 +621,7 @@ const DeclareIncidentModal: React.FC<{ onClose: () => void }> = ({ onClose }) =>
   const [environment, setEnvironment] = useState<'PRD' | 'DR'>('PRD');
   const [description, setDescription] = useState('');
   const [saving, setSaving] = useState(false);
+  const dialog = useDialog(onClose);
 
   const inputCls = `w-full p-2 border rounded text-xs font-mono focus:outline-none focus:border-blue-500 ${
     isDark ? 'bg-[#0A0F1A] border-[#1E293B] text-slate-100' : 'bg-white border-slate-300 text-slate-900'
@@ -646,19 +652,21 @@ const DeclareIncidentModal: React.FC<{ onClose: () => void }> = ({ onClose }) =>
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 overflow-y-auto" onClick={onClose}>
       <form
+        {...dialog}
+        aria-labelledby="declare-incident-title"
         onSubmit={submit}
         onClick={e => e.stopPropagation()}
-        className={`w-full max-w-lg rounded border shadow-2xl p-5 space-y-4 font-mono text-xs ${
+        className={`w-full max-w-lg rounded border shadow-2xl p-5 space-y-4 font-mono text-xs focus:outline-none ${
           isDark ? 'bg-[#101624] text-slate-100 border-[#223048]' : 'bg-white text-slate-900 border-slate-300'
         }`}
       >
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-bold flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-rose-500" />
+          <h2 id="declare-incident-title" className="text-sm font-bold flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-500" aria-hidden="true" />
             DECLARE INCIDENT
           </h2>
-          <button type="button" onClick={onClose} className={`p-1 cursor-pointer ${isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800'}`}>
-            <X className="w-5 h-5" />
+          <button type="button" onClick={onClose} aria-label="Close declare incident" title="Close (Esc)" className={`p-1 cursor-pointer ${isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800'}`}>
+            <X className="w-5 h-5" aria-hidden="true" />
           </button>
         </div>
         <p className={`font-sans text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
@@ -855,7 +863,7 @@ export const IncidentsView: React.FC = () => {
                             {app?.name ?? '—'} ({inc.environment})
                           </td>
                           <td className={`py-2.5 px-3.5 tabular-nums ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
-                            {inc.durationMinutes ?? 0} min
+                            <IncidentMinutes incident={inc} /> min
                           </td>
                           <td className={`py-2.5 px-3.5 font-sans ${unassigned ? 'text-amber-500' : isDark ? 'text-slate-300' : 'text-slate-700'}`}>
                             {inc.owner || 'Unassigned'}

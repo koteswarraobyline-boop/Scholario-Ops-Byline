@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import {
   Application, VpsServer, Monitor, Incident, CloudflareZone, BackupRecord, Runbook, Deployment, MaintenanceWindow,
   CommunicationChannel, EscalationPolicy, AuditLog, DeadManControlPlane, IncidentStatus, IncidentSeverity, MonitorType,
-  IntegrationStatus, LoadBalancerState,
+  IntegrationStatus, LoadBalancerState, RegistryComponent, DependencyLink, WorkerMonitorState,
 } from '../types';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { api, ApiError, HealthCheckResponse, BootstrapData, SystemSummary } from '../services/api';
@@ -23,6 +23,8 @@ interface OpsContextType {
   cloudflareZones: CloudflareZone[];
   backups: BackupRecord[];
   runbooks: Runbook[];
+  registry: RegistryComponent[];
+  dependencyLinks: DependencyLink[];
   deployments: Deployment[];
   maintenanceWindows: MaintenanceWindow[];
   communicationChannels: CommunicationChannel[];
@@ -32,12 +34,15 @@ interface OpsContextType {
   integrations: IntegrationStatus | null;
   /** Cloudflare Load Balancer pools / health / routing (read-only); null until loaded */
   loadBalancer: LoadBalancerState | null;
+  /** Read-only Worker script checks and posted origin events. Null until the first load. */
+  workerMonitor: WorkerMonitorState | null;
   syncLoadBalancers: () => Promise<boolean>;
 
   isLoading: boolean;
   loadError: string | null;
   realtimeStatus: RealtimeStatus;
-  refreshAll: () => Promise<void>;
+  /** Resolves true when the data was reloaded */
+  refreshAll: () => Promise<boolean>;
 
   // Navigation & selection
   activeTab: string;
@@ -52,7 +57,8 @@ interface OpsContextType {
   setSelectedRunbookId: (id: string | null) => void;
   isCommandPaletteOpen: boolean;
   setIsCommandPaletteOpen: (open: boolean) => void;
-  lastUpdatedSecondsAgo: number;
+  /** Time of the last realtime event or refresh. A ref: reading it never re-renders the app (see ui/SinceLastUpdate) */
+  lastEventAtRef: React.RefObject<number>;
 
   // Incidents
   acknowledgeIncident: (incidentId: string) => Promise<boolean>;
@@ -67,8 +73,8 @@ interface OpsContextType {
   triggerFailover: (appId: string, targetOrigin: 'DR' | 'PRIMARY', reason?: string) => Promise<boolean>;
 
   // Monitors
-  runProbeCheck: (monitorId: string) => Promise<void>;
-  runAllProbes: () => Promise<void>;
+  runProbeCheck: (monitorId: string) => Promise<boolean>;
+  runAllProbes: () => Promise<boolean>;
   addMonitor: (input: Partial<Monitor>) => Promise<Monitor | null>;
   updateMonitor: (monitorId: string, input: Partial<Monitor>) => Promise<Monitor | null>;
   deleteMonitor: (monitorId: string) => Promise<boolean>;
@@ -102,6 +108,12 @@ interface OpsContextType {
   createRunbook: (data: Partial<Runbook>) => Promise<Runbook | null>;
   updateRunbook: (id: string, data: Partial<Runbook>) => Promise<Runbook | null>;
   deleteRunbook: (id: string) => Promise<boolean>;
+
+  // Dependency register
+  saveRegistryComponent: (id: string | null, data: Partial<RegistryComponent>) => Promise<RegistryComponent | null>;
+  deleteRegistryComponent: (id: string) => Promise<boolean>;
+  saveDependencyLink: (id: string | null, data: Partial<DependencyLink>) => Promise<DependencyLink | null>;
+  deleteDependencyLink: (id: string) => Promise<boolean>;
 
   // Providers
   syncCloudflare: () => Promise<boolean>;
@@ -139,6 +151,7 @@ interface OpsContextType {
     criticalIncidents: number;
     drReadinessCount: number;
     backupsCurrentCount: number;
+    backupApps: SystemSummary['backupApps'] | null;
     cloudflareStatus: SystemSummary['cloudflareStatus'];
     overallHealth: SystemSummary['overallHealth'];
     /** When the backend computed the health / DR / Cloudflare figures (null until loaded) */
@@ -150,16 +163,37 @@ interface OpsContextType {
 const OpsContext = createContext<OpsContextType | undefined>(undefined);
 
 const EMPTY_DEADMAN: DeadManControlPlane = {
-  id: 'deadman-outbound',
-  name: 'External Dead-Man Heartbeat',
-  nodeLocation: 'Not configured',
-  targetControlPlane: '',
-  lastHeartbeatReceivedAt: '',
-  intervalSec: 60,
-  toleranceSec: 180,
+  id: 'deadman-infrastructure',
+  name: 'Dead-Man Watchdog Heartbeat Stream',
   status: 'NOT_CONFIGURED',
-  consecutiveMisses: 0,
+  evaluatedAt: '',
+  telemetryIntervalSec: null,
+  staleAfterSec: 60,
+  disconnectedAfterSec: 600,
+  servers: [],
+  counts: { healthy: 0, degraded: 0, failing: 0, unknown: 0, total: 0 },
 };
+
+/**
+ * Accepts whatever the API sends for the dead-man heartbeat and returns a complete object. An older
+ * backend (or a partial payload) must never crash the UI: missing lists become empty, an unknown
+ * status becomes UNKNOWN.
+ */
+export function normalizeDeadMan(raw: unknown): DeadManControlPlane {
+  const d = (raw && typeof raw === 'object' ? raw : {}) as Partial<DeadManControlPlane>;
+  const statuses: DeadManControlPlane['status'][] = ['HEALTHY', 'DEGRADED', 'FAILING', 'UNKNOWN', 'NOT_CONFIGURED'];
+  const servers = Array.isArray(d.servers) ? d.servers.filter(s => s && typeof s === 'object' && s.server && s.applications && s.services && s.databases) : [];
+  return {
+    ...EMPTY_DEADMAN,
+    ...d,
+    status: statuses.includes(d.status as DeadManControlPlane['status']) ? d.status as DeadManControlPlane['status'] : (servers.length ? 'UNKNOWN' : 'NOT_CONFIGURED'),
+    servers,
+    counts: d.counts && typeof d.counts === 'object' ? { ...EMPTY_DEADMAN.counts, ...d.counts } : EMPTY_DEADMAN.counts,
+    telemetryIntervalSec: typeof d.telemetryIntervalSec === 'number' ? d.telemetryIntervalSec : null,
+    staleAfterSec: typeof d.staleAfterSec === 'number' ? d.staleAfterSec : EMPTY_DEADMAN.staleAfterSec,
+    disconnectedAfterSec: typeof d.disconnectedAfterSec === 'number' ? d.disconnectedAfterSec : EMPTY_DEADMAN.disconnectedAfterSec,
+  };
+}
 
 const upsert = <T extends { id: string }>(list: T[], item: T, prepend = true): T[] =>
   list.some(x => x.id === item.id) ? list.map(x => (x.id === item.id ? item : x)) : prepend ? [item, ...list] : [...list, item];
@@ -174,6 +208,8 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [cloudflareZones, setCloudflareZones] = useState<CloudflareZone[]>([]);
   const [backups, setBackups] = useState<BackupRecord[]>([]);
   const [runbooks, setRunbooks] = useState<Runbook[]>([]);
+  const [registry, setRegistry] = useState<RegistryComponent[]>([]);
+  const [dependencyLinks, setDependencyLinks] = useState<DependencyLink[]>([]);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [maintenanceWindows, setMaintenanceWindows] = useState<MaintenanceWindow[]>([]);
   const [communicationChannels, setCommunicationChannels] = useState<CommunicationChannel[]>([]);
@@ -182,6 +218,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [deadMan, setDeadMan] = useState<DeadManControlPlane>(EMPTY_DEADMAN);
   const [integrations, setIntegrations] = useState<IntegrationStatus | null>(null);
   const [loadBalancer, setLoadBalancer] = useState<LoadBalancerState | null>(null);
+  const [workerMonitor, setWorkerMonitor] = useState<WorkerMonitorState | null>(null);
   const [serverSummary, setServerSummary] = useState<SystemSummary | null>(null);
 
   const [isLoading, setIsLoading] = useState(true);
@@ -200,10 +237,32 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [selectedServerId, setSelectedServerId] = useState<string | null>(null);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [selectedRunbookId, setSelectedRunbookId] = useState<string | null>(null);
+  // The open incident is part of the address (/incidents?id=INC-1042): links in Teams / email /
+  // PagerDuty notifications open it directly, and the URL can be shared
+  const withIncidentId = (id: string | null) => {
+    const params = new URLSearchParams(location.search);
+    if (id) params.set('id', id); else params.delete('id');
+    const qs = params.toString();
+    navigate({ pathname: '/incidents', search: qs ? `?${qs}` : '' }, { replace: true });
+  };
+  // Address changed (a link was opened, back/forward, navigation): the address wins
+  useEffect(() => {
+    if (location.pathname !== '/incidents') return;
+    const urlId = new URLSearchParams(location.search).get('id');
+    if (urlId) { if (urlId !== selectedIncidentId) setSelectedIncidentId(urlId); }
+    else if (selectedIncidentId) withIncidentId(selectedIncidentId); // e.g. banner: select, then navigate to /incidents
+  }, [location.pathname, location.search]);
+  // Selection changed on the page (opened / closed an incident): write it to the address.
+  // Not on the first render: then the address is applied above and must not be stripped first.
+  const selectionMounted = useRef(false);
+  useEffect(() => {
+    if (!selectionMounted.current) { selectionMounted.current = true; return; }
+    if (location.pathname !== '/incidents') return;
+    if (new URLSearchParams(location.search).get('id') !== selectedIncidentId) withIncidentId(selectedIncidentId);
+  }, [selectedIncidentId]);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isAddMonitorModalOpen, setIsAddMonitorModalOpen] = useState(false);
   const [addMonitorInitialContext, setAddMonitorInitialContext] = useState<{ applicationId?: string; serverId?: string; defaultType?: MonitorType } | null>(null);
-  const [lastUpdatedSecondsAgo, setLastUpdatedSecondsAgo] = useState(0);
   const lastEventAt = useRef(Date.now());
 
   const [apiHealth, setApiHealth] = useState<OpsContextType['apiHealth']>({
@@ -232,7 +291,8 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const dismissToast = useCallback((id: number) => setToasts(prev => prev.filter(t => t.id !== id)), []);
   const notify = useCallback((type: Toast['type'], message: string) => {
     const id = ++toastSeq.current;
-    setToasts(prev => [...prev.slice(-4), { id, type, message }]);
+    // The same message again (e.g. a test sent repeatedly) replaces the earlier toast instead of stacking
+    setToasts(prev => [...prev.filter(t => !(t.type === type && t.message === message)).slice(-4), { id, type, message }]);
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), type === 'error' ? 8000 : 4000);
   }, []);
 
@@ -258,23 +318,32 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setEscalationPolicies(d.escalationPolicies);
     setMaintenanceWindows(d.maintenanceWindows);
     setRunbooks(d.runbooks);
+    setRegistry(d.registry ?? []);
+    setDependencyLinks(d.dependencyLinks ?? []);
     setDeployments(d.deployments);
     setBackups(d.backups);
     setAuditLogs(d.auditLogs);
     setCloudflareZones(d.cloudflareZones);
-    setDeadMan(d.deadMan);
+    setDeadMan(normalizeDeadMan(d.deadMan));
     setIntegrations(d.integrations);
     setLoadBalancer(d.loadBalancer ?? null);
+    setWorkerMonitor(d.workerMonitor ?? null);
     setServerSummary(d.summary);
     lastEventAt.current = Date.now();
   }, []);
 
+  // The full-page error is only for a first load that failed; later failures keep the last data on
+  // screen (the shell shows "API unreachable — data may be stale")
+  const loadedOnce = useRef(false);
   const refreshAll = useCallback(async () => {
     try {
       applyBootstrap(await api.bootstrap());
+      loadedOnce.current = true;
       setLoadError(null);
+      return true;
     } catch (err) {
-      setLoadError(errMessage(err));
+      if (!loadedOnce.current) setLoadError(errMessage(err));
+      return false;
     } finally {
       setIsLoading(false);
     }
@@ -312,8 +381,13 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   useEffect(() => {
     void refreshAll();
     void triggerHealthCheck();
-    const healthTimer = setInterval(triggerHealthCheck, 15_000);
-    const summaryTimer = setInterval(refreshSummary, 15_000);
+    // Polling pauses while the tab is hidden (the realtime stream keeps the data current) and
+    // catches up as soon as the tab is visible again
+    const visible = () => typeof document === 'undefined' || !document.hidden;
+    const healthTimer = setInterval(() => { if (visible()) void triggerHealthCheck(); }, 15_000);
+    const summaryTimer = setInterval(() => { if (visible()) void refreshSummary(); }, 15_000);
+    const onVisible = () => { if (visible()) { void triggerHealthCheck(); void refreshSummary(); } };
+    document.addEventListener('visibilitychange', onVisible);
     let firstConnect = true;
 
     const unsubscribe = api.connectRealtimeStream((event, raw) => {
@@ -351,14 +425,19 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         case 'maintenance_update': setMaintenanceWindows(prev => upsert(prev, data)); break;
         case 'maintenance_deleted': setMaintenanceWindows(prev => prev.filter(w => w.id !== (raw as { id: string }).id)); break;
         case 'runbooks_changed': refetch('runbooks', async () => setRunbooks(await api.getRunbooks())); break;
+        case 'registry_changed': refetch('registry', async () => {
+          const r = await api.getRegistry();
+          setRegistry(r.components); setDependencyLinks(r.links);
+        }); break;
         case 'deployments_changed': refetch('deployments', async () => setDeployments(await api.getDeployments())); break;
         case 'backups_changed': refetch('backups', async () => setBackups(await api.getBackups())); break;
         case 'cloudflare_update': setCloudflareZones(raw as CloudflareZone[]); refetch('integrations', async () => setIntegrations(await api.integrations())); break;
-        case 'deadman_update': setDeadMan(raw as DeadManControlPlane); break;
+        case 'deadman_update': setDeadMan(normalizeDeadMan(raw)); break;
         case 'loadbalancer_update':
           setLoadBalancer(raw as LoadBalancerState);
           refetch('integrations', async () => setIntegrations(await api.integrations()));
           break;
+        case 'worker_update': setWorkerMonitor(raw as WorkerMonitorState); break;
         default: break;
       }
       if (event === 'monitor_update' || event === 'incident_created' || event === 'incident_update' || event === 'loadbalancer_update' || event === 'servers_changed') {
@@ -369,6 +448,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return () => {
       clearInterval(healthTimer);
       clearInterval(summaryTimer);
+      document.removeEventListener('visibilitychange', onVisible);
       unsubscribe();
       Object.values(pending.current).forEach(clearTimeout);
     };
@@ -386,10 +466,6 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (!apiHealth.reachable) setRealtimeStatus('OFFLINE');
   }, [apiHealth.reachable]);
 
-  useEffect(() => {
-    const timer = setInterval(() => setLastUpdatedSecondsAgo(Math.floor((Date.now() - lastEventAt.current) / 1000)), 1000);
-    return () => clearInterval(timer);
-  }, []);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -426,7 +502,20 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // ── Failover ──────────────────────────────────────────────────────────────
   const triggerFailover = useCallback(async (appId: string, target: 'DR' | 'PRIMARY', reason?: string) => {
-    const res = await run(() => api.triggerFailover(appId, target, reason));
+    // A failed pre-flight (412) is shown to the operator, who can explicitly override it
+    const res = await run(async () => {
+      try {
+        return await api.triggerFailover(appId, target, reason);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 412 && typeof window !== 'undefined'
+          && window.confirm(`${err.message}
+
+Fail over anyway? The override is recorded in the audit log.`)) {
+          return api.triggerFailover(appId, target, reason, true);
+        }
+        throw err;
+      }
+    });
     if (!res) return false;
     setApplications(prev => upsert(prev, res.app, false));
     notify('success', res.changed.length
@@ -439,6 +528,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const runProbeCheck = useCallback(async (id: string) => {
     const m = await run(() => api.probeMonitor(id));
     if (m) setMonitors(prev => upsert(prev, m));
+    return Boolean(m);
   }, [run]);
   const runAllProbes = useCallback(async () => {
     const list = await run(() => api.probeAllMonitors());
@@ -446,6 +536,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setMonitors(list);
       notify('info', `Ran ${list.filter(m => m.enabled).length} monitor check(s)`);
     }
+    return Boolean(list);
   }, [run, notify]);
   const addMonitor = useCallback(async (input: Partial<Monitor>) => {
     const m = await run(() => api.createMonitor(input), `Monitor "${input.name}" created`);
@@ -577,6 +668,33 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return Boolean(r);
   }, [run]);
 
+  // ── Dependency register ───────────────────────────────────────────────────
+  // Deletes cascade to links and feature references, so the register is reloaded as a whole
+  const reloadRegistry = useCallback(async () => {
+    const r = await api.getRegistry().catch(() => null);
+    if (r) { setRegistry(r.components); setDependencyLinks(r.links); }
+  }, []);
+  const saveRegistryComponent = useCallback(async (id: string | null, data: Partial<RegistryComponent>) => {
+    const c = await run(() => (id ? api.updateRegistryComponent(id, data) : api.createRegistryComponent(data)), id ? 'Register entry updated' : 'Register entry added');
+    if (c) await reloadRegistry();
+    return c;
+  }, [run, reloadRegistry]);
+  const deleteRegistryComponent = useCallback(async (id: string) => {
+    const r = await run(() => api.deleteRegistryComponent(id), 'Register entry deleted');
+    if (r) await reloadRegistry();
+    return Boolean(r);
+  }, [run, reloadRegistry]);
+  const saveDependencyLink = useCallback(async (id: string | null, data: Partial<DependencyLink>) => {
+    const l = await run(() => (id ? api.updateDependencyLink(id, data) : api.createDependencyLink(data)), id ? 'Dependency updated' : 'Dependency added');
+    if (l) await reloadRegistry();
+    return l;
+  }, [run, reloadRegistry]);
+  const deleteDependencyLink = useCallback(async (id: string) => {
+    const r = await run(() => api.deleteDependencyLink(id), 'Dependency removed');
+    if (r) await reloadRegistry();
+    return Boolean(r);
+  }, [run, reloadRegistry]);
+
   // ── Providers ─────────────────────────────────────────────────────────────
   const syncCloudflare = useCallback(async () => {
     const zones = await run(() => api.syncCloudflare(), 'Cloudflare synced');
@@ -606,13 +724,13 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   return (
     <OpsContext.Provider
       value={{
-        applications, servers, monitors, incidents, cloudflareZones, backups, runbooks, deployments,
+        applications, servers, monitors, incidents, cloudflareZones, backups, runbooks, registry, dependencyLinks, deployments,
         maintenanceWindows, communicationChannels, escalationPolicies, auditLogs, deadMan, integrations,
-        loadBalancer, syncLoadBalancers,
+        loadBalancer, workerMonitor, syncLoadBalancers,
         isLoading, loadError, realtimeStatus, refreshAll,
         activeTab, setActiveTab, selectedAppId, setSelectedAppId, selectedServerId, setSelectedServerId,
         selectedIncidentId, setSelectedIncidentId, selectedRunbookId, setSelectedRunbookId,
-        isCommandPaletteOpen, setIsCommandPaletteOpen, lastUpdatedSecondsAgo,
+        isCommandPaletteOpen, setIsCommandPaletteOpen, lastEventAtRef: lastEventAt,
         acknowledgeIncident, changeIncidentStatus, changeIncidentSeverity, assignIncidentOwner, addIncidentNote, resolveIncident, createIncident,
         triggerFailover,
         runProbeCheck, runAllProbes, addMonitor, updateMonitor, deleteMonitor, toggleMonitorStatus,
@@ -621,6 +739,7 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         sendTestNotification, createChannel, updateChannel, deleteChannel, saveEscalationPolicies,
         createMaintenance, completeMaintenance, deleteMaintenance,
         toggleRunbookStep, resetRunbook, createRunbook, updateRunbook, deleteRunbook,
+        saveRegistryComponent, deleteRegistryComponent, saveDependencyLink, deleteDependencyLink,
         syncCloudflare, syncHostinger,
         apiHealth, triggerHealthCheck,
         theme, setTheme, toggleTheme,
@@ -630,12 +749,14 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           healthyApps,
           totalServers: servers.length,
           healthyServers: servers.filter(s => s.status === 'HEALTHY').length,
-          totalMonitors: monitors.length,
-          healthyMonitors: monitors.filter(m => m.status === 'HEALTHY').length,
+          // Paused monitors are not counted (they would keep the totals permanently "not all healthy")
+          totalMonitors: monitors.filter(m => m.enabled).length,
+          healthyMonitors: monitors.filter(m => m.enabled && m.status === 'HEALTHY').length,
           openIncidents: openIncidentList.length,
           criticalIncidents,
           drReadinessCount: serverSummary?.drReadinessCount ?? 0,
           backupsCurrentCount: serverSummary?.backupsCurrentCount ?? 0,
+          backupApps: serverSummary?.backupApps ?? null,
           cloudflareStatus: serverSummary?.cloudflareStatus ?? 'UNKNOWN',
           // Never "OPERATIONAL" without the backend's evaluation
           overallHealth: criticalIncidents > 0 ? 'CRITICAL' : serverSummary?.overallHealth ?? 'UNKNOWN',

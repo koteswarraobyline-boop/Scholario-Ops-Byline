@@ -5,9 +5,16 @@ import { HttpProbeResult, TcpProbeResult, ProbeStatus } from '../src/types/index
 
 const USER_AGENT = 'Scholario-Ops-Monitor/3.0';
 
-export function normalizeUrl(target: string): string {
+export function normalizeUrl(target: string, scheme: 'http' | 'https' = 'http'): string {
   const t = target.trim();
-  return /^https?:\/\//i.test(t) ? t : `http://${t}`;
+  return /^https?:\/\//i.test(t) ? t : `${scheme}://${t}`;
+}
+
+/** Socket and resolver failures share these classes. Anything else that never connected is a connection error. */
+export function classifySocketError(message: string): ProbeStatus {
+  if (/timed out/i.test(message) || /\bETIMEDOUT\b|\bETIMEOUT\b/.test(message)) return 'TIMEOUT';
+  if (/ENOTFOUND|EAI_AGAIN|EAI_FAIL|EAI_NODATA/.test(message)) return 'DNS_ERROR';
+  return 'CONNECTION_ERROR';
 }
 
 /** Splits "host:port" (IPv4, hostname or [IPv6]:port) */
@@ -46,19 +53,65 @@ export interface HttpCheckOptions {
   method?: string;
   body?: string;
   headers?: Record<string, string>;
+  /** Used when the target has no http:// or https:// prefix. HTTPS monitors pass https. */
+  scheme?: 'http' | 'https';
 }
 
 export async function httpProbe(target: string, opts: HttpCheckOptions): Promise<HttpProbeResult & { body: string }> {
-  const url = normalizeUrl(target);
+  const url = normalizeUrl(target, opts.scheme ?? 'http');
   const start = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+  const timedOut = () => Date.now() - start >= opts.timeoutMs;
   let resolvedIp: string | undefined;
   try {
     const hostname = new URL(url).hostname.replace(/^\[|\]$/g, '');
-    resolvedIp = net.isIP(hostname) ? hostname : (await dns.promises.lookup(hostname)).address;
+    if (net.isIP(hostname)) resolvedIp = hostname;
+    else {
+      const left = opts.timeoutMs - (Date.now() - start);
+      if (left <= 0) {
+        clearTimeout(timer);
+        return {
+          target: url, reachable: false, probeStatus: 'TIMEOUT', statusCode: null, latencyMs: Date.now() - start,
+          responseSnippet: `Error: Timed out after ${opts.timeoutMs}ms`, error: `Timed out after ${opts.timeoutMs}ms`,
+          testedAt: new Date().toISOString(), body: '',
+        };
+      }
+      let lookupTimer: NodeJS.Timeout | undefined;
+      try {
+        resolvedIp = await Promise.race([
+          dns.promises.lookup(hostname).then(r => r.address),
+          new Promise<string>((_, reject) => {
+            lookupTimer = setTimeout(() => {
+              const e = new Error(`Timed out after ${opts.timeoutMs}ms`);
+              e.name = 'TimeoutError';
+              reject(e);
+            }, left);
+          }),
+        ]);
+      } catch (err) {
+        const e = err as Error;
+        if (e.name === 'TimeoutError') {
+          clearTimeout(timer);
+          return {
+            target: url, reachable: false, probeStatus: 'TIMEOUT', statusCode: null, latencyMs: Date.now() - start,
+            responseSnippet: `Error: Timed out after ${opts.timeoutMs}ms`, error: `Timed out after ${opts.timeoutMs}ms`,
+            testedAt: new Date().toISOString(), body: '',
+          };
+        }
+        // A definitive lookup failure is reported by fetch below, which classifies DNS_ERROR.
+      } finally { if (lookupTimer) clearTimeout(lookupTimer); }
+    }
   } catch {
-    // resolution failure is reported by fetch below
+    // An unparseable URL is reported by fetch below.
+  }
+  if (timedOut()) {
+    clearTimeout(timer);
+    return {
+      target: url, reachable: false, probeStatus: 'TIMEOUT', statusCode: null, latencyMs: Date.now() - start,
+      responseSnippet: `Error: Timed out after ${opts.timeoutMs}ms`, error: `Timed out after ${opts.timeoutMs}ms`,
+      testedAt: new Date().toISOString(), body: '',
+    };
   }
   try {
     const resp = await fetch(url, {
@@ -139,24 +192,44 @@ export function tcpProbe(host: string, port: number, timeoutMs: number): Promise
   });
 }
 
-export async function dnsProbe(hostname: string, timeoutMs: number): Promise<{ ok: boolean; latencyMs: number; detail: string }> {
+function dnsFailureStatus(errors: Error[]): ProbeStatus {
+  const messages = errors.map(e => `${(e as NodeJS.ErrnoException).code ?? ''} ${e.message}`);
+  const timeout = messages.some(m => classifySocketError(m) === 'TIMEOUT');
+  const definitive = messages.some(m => classifySocketError(m) !== 'TIMEOUT');
+  if (timeout && !definitive) return 'TIMEOUT';
+  if (messages.some(m => /ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH/.test(m))) return 'CONNECTION_ERROR';
+  return 'DNS_ERROR';
+}
+
+export async function dnsProbe(hostname: string, timeoutMs: number, servers?: string[]): Promise<{ ok: boolean; latencyMs: number; detail: string; probeStatus: ProbeStatus }> {
   const start = Date.now();
-  const resolver = new dns.promises.Resolver({ timeout: timeoutMs, tries: 1 });
+  const resolver = new dns.promises.Resolver({ timeout: Math.max(1, timeoutMs), tries: 1 });
+  if (servers?.length) resolver.setServers(servers);
+  const name = hostname.trim().replace(/^[a-z]+:\/\//i, '').replace(/[/:].*$/, '');
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const e = new Error(`Timed out after ${timeoutMs}ms`) as NodeJS.ErrnoException;
+      e.code = 'ETIMEOUT';
+      reject(e);
+    }, timeoutMs);
+  });
   try {
-    const name = hostname.trim().replace(/^[a-z]+:\/\//i, '').replace(/[/:].*$/, '');
-    const [v4, v6] = await Promise.allSettled([resolver.resolve4(name), resolver.resolve6(name)]);
-    const addrs = [
-      ...(v4.status === 'fulfilled' ? v4.value : []),
-      ...(v6.status === 'fulfilled' ? v6.value : []),
-    ];
+    const settled = await Promise.race([
+      Promise.allSettled([resolver.resolve4(name), resolver.resolve6(name)]),
+      deadline,
+    ]);
+    const addrs = settled.flatMap(r => r.status === 'fulfilled' ? r.value : []);
     if (addrs.length === 0) {
-      const reason = v4.status === 'rejected' ? (v4.reason as Error).message : 'no A/AAAA records';
-      return { ok: false, latencyMs: Date.now() - start, detail: `DNS resolution failed: ${reason}` };
+      const errors = settled.flatMap(r => r.status === 'rejected' ? [r.reason as Error] : []);
+      const reason = errors[0]?.message || 'no A/AAAA records';
+      return { ok: false, latencyMs: Date.now() - start, detail: `DNS resolution failed: ${reason}`, probeStatus: dnsFailureStatus(errors) };
     }
-    return { ok: true, latencyMs: Date.now() - start, detail: `Resolved ${name} → ${addrs.join(', ')}` };
+    return { ok: true, latencyMs: Date.now() - start, detail: `Resolved ${name} → ${addrs.join(', ')}`, probeStatus: 'UP' };
   } catch (err) {
-    return { ok: false, latencyMs: Date.now() - start, detail: `DNS resolution failed: ${(err as Error).message}` };
-  }
+    const e = err as Error;
+    return { ok: false, latencyMs: Date.now() - start, detail: `DNS resolution failed: ${e.message}`, probeStatus: dnsFailureStatus([e]) };
+  } finally { if (timer) clearTimeout(timer); }
 }
 
 export interface SslInfo { ok: boolean; latencyMs: number; daysLeft: number | null; validTo: string | null; issuer: string | null; protocol: string | null; detail: string }
@@ -183,6 +256,11 @@ export function sslProbe(target: string, timeoutMs: number): Promise<SslInfo> {
       const issuer = (cert.issuer?.O || cert.issuer?.CN || null) as string | null;
       const authorized = socket.authorized;
       const authError = socket.authorizationError ? String(socket.authorizationError) : null;
+      const detail = !authorized
+        ? `Certificate NOT trusted: ${authError}`
+        : daysLeft < 0
+          ? `Certificate expired ${-daysLeft} days ago`
+          : `Certificate valid for ${daysLeft} days (issuer: ${issuer ?? 'unknown'}, ${socket.getProtocol()})`;
       finish({
         ok: authorized && daysLeft >= 0,
         latencyMs,
@@ -190,9 +268,7 @@ export function sslProbe(target: string, timeoutMs: number): Promise<SslInfo> {
         validTo: validTo.toISOString(),
         issuer,
         protocol: socket.getProtocol(),
-        detail: authorized
-          ? `Certificate valid for ${daysLeft} days (issuer: ${issuer ?? 'unknown'}, ${socket.getProtocol()})`
-          : `Certificate NOT trusted: ${authError}`,
+        detail,
       });
     });
     socket.once('timeout', () => finish({ ok: false, latencyMs: Date.now() - start, daysLeft: null, validTo: null, issuer: null, protocol: null, detail: `Timed out after ${timeoutMs}ms` }));

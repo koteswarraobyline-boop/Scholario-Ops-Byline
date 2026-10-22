@@ -4,7 +4,8 @@ import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
 import { Environment, OperationalStatus, VpsServer } from '../../types';
 import { Globe, ShieldCheck, Server, RefreshCw, Network, Loader2, X } from 'lucide-react';
-import { routeState } from '../ui/routing';
+import { OriginFlow, routeState, visualTraffic } from '../ui/routing';
+import { effectiveRoutingMethod, ROUTING_METHOD_LABELS } from '../../lib/trafficHealth';
 
 const parseTs = (iso?: string | null): number | null => {
   if (!iso) return null;
@@ -19,6 +20,32 @@ const fmtWhen = (iso?: string | null) => {
 
 const statusText = (s: OperationalStatus) =>
   s === 'HEALTHY' ? 'text-emerald-500' : s === 'WARNING' || s === 'STALE' ? 'text-amber-500' : s === 'CRITICAL' ? 'text-rose-500' : 'text-slate-400';
+
+/** Moving dashes on a side that is receiving traffic. Thickness and speed follow that side's share. */
+const FlowBranch: React.FC<{ flow: OriginFlow; color: string; showShare: boolean }> = ({ flow, color, showShare }) => {
+  const width = !flow.receiving ? 1.5 : flow.percent == null ? 2.5 : 1.75 + (flow.percent / 100) * 2.25;
+  const duration = flow.percent == null ? '0.9s' : `${(1.35 - (flow.percent / 100) * 0.7).toFixed(2)}s`;
+  return (
+    <div className="relative h-8 flex items-center">
+      <svg className="w-full h-8" preserveAspectRatio="none" aria-hidden="true">
+        <line
+          x1="0" y1="16" x2="100%" y2="16"
+          stroke={flow.receiving ? color : '#475569'}
+          strokeWidth={width}
+          className={flow.receiving ? 'animate-flow-packet' : undefined}
+          strokeDasharray={flow.receiving ? undefined : '4 4'}
+          strokeOpacity={flow.receiving ? 1 : 0.4}
+          style={flow.receiving ? { animationDuration: duration } : undefined}
+        />
+      </svg>
+      {flow.receiving && showShare && (
+        <span className="absolute left-1/2 top-0 -translate-x-1/2 text-[9px] font-mono font-bold leading-none" style={{ color }}>
+          {flow.percent == null ? 'live' : `${flow.percent}%`}
+        </span>
+      )}
+    </div>
+  );
+};
 
 export const TrafficFlowChart: React.FC = () => {
   const { applications, servers, monitors, cloudflareZones, integrations, triggerFailover, theme, loadBalancer } = useOps();
@@ -65,18 +92,32 @@ export const TrafficFlowChart: React.FC = () => {
   }
 
   const route = routeState(app, loadBalancer);
-  const routeUnknown = route === 'UNKNOWN';
+  const routingMethod = effectiveRoutingMethod(app);
+  const dnsSwitch = routingMethod === 'direct_dns' || (routingMethod === 'unknown' && !app.loadBalancer);
   const isDrActive = route === 'DR';
   const isFailingOver = route === 'MOVING';
   const lbRouting = app.loadBalancer ? loadBalancer?.routing.find(r => r.hostname === app.loadBalancer!.hostname) : undefined;
   const lbPoolName = (id: string) => loadBalancer?.pools.find(x => x.id === id)?.name || id;
   const prdServer = servers.find(s => s.id === app.prdServerId);
   const drServer = servers.find(s => s.id === app.drServerId);
-  const zone = cloudflareZones.find(z => z.domain === app.cloudflareZone);
+  const zone = cloudflareZones.find(z => app.cloudflareZone && (z.domain === app.cloudflareZone || app.cloudflareZone.endsWith(`.${z.domain}`)));
   const dnsRecord = app.dnsRecordName ? zone?.dnsRecords.find(r => r.name === app.dnsRecordName) : undefined;
   const pointsAt: 'PRD' | 'DR' | 'OTHER' | null = dnsRecord
     ? dnsRecord.target === prdServer?.ip ? 'PRD' : dnsRecord.target === drServer?.ip ? 'DR' : 'OTHER'
     : null;
+  const visual = visualTraffic(app, loadBalancer, pointsAt);
+  const flowing = visual.kind === 'single' || visual.kind === 'split';
+  const split = visual.kind === 'split';
+  const sideFlow = (env: 'PRD' | 'DR'): OriginFlow => {
+    if (visual.kind === 'single') return visual.side === env ? { receiving: true, percent: 100 } : { receiving: false, percent: 0 };
+    if (visual.kind === 'split') return { receiving: true, percent: env === 'PRD' ? visual.prd : visual.dr };
+    return { receiving: false, percent: null };
+  };
+  const badge = visual.kind === 'moving' ? 'FAILOVER IN PROGRESS'
+    : visual.kind === 'unknown' ? 'ROUTING UNKNOWN'
+      : visual.kind === 'split'
+        ? (visual.prd != null && visual.dr != null ? `SPLIT ${visual.prd}% / ${visual.dr}%` : 'BOTH LIVE')
+        : visual.side === 'DR' ? 'DR ACTIVE' : 'PRIMARY ACTIVE';
 
   const availability = (env: Environment) => {
     const list = monitors.filter(m => m.applicationId === app.id && m.environment === env && m.enabled);
@@ -87,8 +128,10 @@ export const TrafficFlowChart: React.FC = () => {
 
   const target: 'DR' | 'PRIMARY' = isDrActive ? 'PRIMARY' : 'DR';
   const targetServer = target === 'DR' ? drServer : prdServer;
-  const blocker = app.loadBalancer
-    ? 'Routed by the Cloudflare Load Balancer — use the failover pre-flight on PRD / DR Readiness'
+  const blocker = !dnsSwitch
+    ? (routingMethod === 'cloudflare_lb'
+      ? 'Routed by the Cloudflare Load Balancer — use the failover pre-flight on PRD / DR Readiness'
+      : `${ROUTING_METHOD_LABELS[routingMethod]}. Scholario Ops does not change this route.`)
     : !integrations?.cloudflare.configured
     ? 'Cloudflare is not configured'
     : !app.cloudflareZone || !app.dnsRecordName
@@ -112,8 +155,12 @@ export const TrafficFlowChart: React.FC = () => {
   const muted = isDark ? 'text-slate-400' : 'text-slate-500';
   const cardClass = `p-2.5 rounded border ${isDark ? 'bg-[#0B0F17] border-[#1D283E]' : 'bg-slate-50 border-slate-200'}`;
 
-  const renderOrigin = (env: 'PRD' | 'DR', srv: VpsServer | undefined, active: boolean, avail: { total: number; healthy: number; critical: number }) => {
-    const routeLabel = routeUnknown ? 'ROUTING UNKNOWN' : active ? 'ACTIVE' : 'STANDBY';
+  const renderOrigin = (env: 'PRD' | 'DR', srv: VpsServer | undefined, flow: OriginFlow, avail: { total: number; healthy: number; critical: number }) => {
+    const active = flowing && flow.receiving;
+    const routeLabel = visual.kind === 'moving' ? 'SWITCHING'
+      : !flowing ? 'ROUTING UNKNOWN'
+        : !flow.receiving ? 'STANDBY'
+          : split && flow.percent != null ? `ACTIVE ${flow.percent}%` : 'ACTIVE';
     return (
     <div className={`p-2.5 rounded-lg border transition-all ${
       active
@@ -166,19 +213,23 @@ export const TrafficFlowChart: React.FC = () => {
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-semibold text-xs tracking-tight">Traffic &amp; Failover Routing</span>
               <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold ${
-                routeUnknown
+                visual.kind === 'unknown'
                   ? (isDark ? 'bg-slate-900 text-slate-300 border border-slate-700' : 'bg-slate-100 text-slate-700 border border-slate-300')
-                  : isFailingOver
+                  : visual.kind === 'moving'
                   ? (isDark ? 'bg-blue-950 text-blue-300 border border-blue-800' : 'bg-blue-100 text-blue-800 border border-blue-300')
-                  : isDrActive
-                    ? (isDark ? 'bg-amber-950 text-amber-300 border border-amber-800' : 'bg-amber-100 text-amber-800 border border-amber-300')
-                    : (isDark ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-emerald-100 text-emerald-800 border border-emerald-300')
+                  : visual.kind === 'split'
+                    ? (isDark ? 'bg-violet-950 text-violet-200 border border-violet-800' : 'bg-violet-100 text-violet-800 border border-violet-300')
+                    : visual.side === 'DR'
+                      ? (isDark ? 'bg-amber-950 text-amber-300 border border-amber-800' : 'bg-amber-100 text-amber-800 border border-amber-300')
+                      : (isDark ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-emerald-100 text-emerald-800 border border-emerald-300')
               }`}>
-                {routeUnknown ? 'ROUTING UNKNOWN' : isFailingOver ? 'FAILOVER IN PROGRESS' : isDrActive ? 'DR ACTIVE' : 'PRIMARY ACTIVE'}
+                {badge}
               </span>
             </div>
             <p className={`text-[11px] font-mono mt-0.5 ${muted}`}>
-              Clients → Cloudflare DNS record → active origin (PRD or DR). Failover switches the DNS record between server IPs.
+              {split
+                ? 'Clients → Cloudflare → both origins. The moving line on each side is that side’s share of traffic.'
+                : 'Clients → Cloudflare → the origin that is actually serving. The moving line follows PRD, DR, or both when traffic is split.'}
             </p>
           </div>
         </div>
@@ -265,6 +316,7 @@ export const TrafficFlowChart: React.FC = () => {
           isDark ? 'bg-[#070B12] border-[#182336]' : 'bg-[#F8FAFC] border-[#E2E8F0]'
         }`}>
           <div className="min-w-[760px] flex items-center justify-between relative py-2">
+            {/* Packets move only on a path Cloudflare (or the synced DNS record) says is carrying traffic */}
             {/* Stage 1: Clients */}
             <div className={`w-36 ${tile}`}>
               <div className="w-8 h-8 rounded-full bg-blue-500/20 text-blue-500 flex items-center justify-center mb-1.5">
@@ -276,7 +328,7 @@ export const TrafficFlowChart: React.FC = () => {
 
             <div className="flex-1 px-1.5">
               <svg className="w-full h-8" preserveAspectRatio="none" aria-hidden="true">
-                <line x1="0" y1="16" x2="100%" y2="16" stroke="#3B82F6" strokeWidth="2.5" className="animate-flow-packet" />
+                <line x1="0" y1="16" x2="100%" y2="16" stroke="#3B82F6" strokeWidth="2.5" className={flowing ? 'animate-flow-packet' : ''} strokeDasharray={flowing ? undefined : '4 4'} strokeOpacity={flowing ? 1 : 0.4} />
               </svg>
             </div>
 
@@ -292,13 +344,13 @@ export const TrafficFlowChart: React.FC = () => {
               }`}>
                 {!integrations?.cloudflare.configured
                   ? 'Cloudflare not configured'
-                  : zone ? `Zone ${zone.status}${zone.sslMode ? ` · SSL ${zone.sslMode}` : ''}` : 'Zone not found in account'}
+                  : zone ? `Zone ${zone.status}${zone.sslMode ? ` · SSL ${zone.sslMode}` : ''}` : 'Token cannot see this zone'}
               </span>
             </div>
 
             <div className="flex-1 px-1.5">
               <svg className="w-full h-8" preserveAspectRatio="none" aria-hidden="true">
-                <line x1="0" y1="16" x2="100%" y2="16" stroke="#6366F1" strokeWidth="2.5" className="animate-flow-packet" />
+                <line x1="0" y1="16" x2="100%" y2="16" stroke="#6366F1" strokeWidth="2.5" className={flowing ? 'animate-flow-packet' : ''} strokeDasharray={flowing ? undefined : '4 4'} strokeOpacity={flowing ? 1 : 0.4} />
               </svg>
             </div>
 
@@ -307,36 +359,39 @@ export const TrafficFlowChart: React.FC = () => {
               <div className="w-8 h-8 rounded-full bg-amber-500/20 text-amber-500 flex items-center justify-center mb-1.5">
                 <Network className="w-4 h-4" />
               </div>
-              <span className="font-semibold text-xs font-mono">{app.loadBalancer ? 'Load Balancer' : 'DNS Record'}</span>
-              <span className={`text-[10px] font-mono mt-0.5 ${muted}`}>
+              <span className="font-semibold text-xs font-mono">{ROUTING_METHOD_LABELS[routingMethod]}</span>
+              <span className={`text-[10px] font-mono mt-0.5 break-words ${muted}`}>
                 {app.loadBalancer
-                  ? (lbRouting?.found ? `order ${lbRouting.defaultPools.map(lbPoolName).join(' → ')}` : lbRouting?.error ? 'Routing not readable' : `Cloudflare LB: ${(loadBalancer?.status ?? 'PENDING').replace('_', ' ')}`)
+                  ? (lbRouting?.found ? `order ${lbRouting.defaultPools.map(lbPoolName).join(' → ')}` : lbRouting?.error ? lbRouting.error : `Cloudflare LB: ${(loadBalancer?.status ?? 'PENDING').replace('_', ' ')}`)
                   : dnsRecord ? `${dnsRecord.type} → ${dnsRecord.target}` : 'Record not synced'}
               </span>
               <span className={`text-[9px] font-mono mt-1 px-1.5 py-0.5 rounded font-semibold ${
-                pointsAt === 'PRD' ? 'bg-emerald-500/15 text-emerald-400'
-                  : pointsAt === 'DR' ? 'bg-amber-500/20 text-amber-400'
-                    : 'bg-slate-500/15 text-slate-400'
+                app.loadBalancer
+                  ? (visual.kind === 'split' ? 'bg-violet-500/15 text-violet-300'
+                    : visual.kind === 'single' && visual.side === 'PRD' ? 'bg-emerald-500/15 text-emerald-400'
+                      : visual.kind === 'single' && visual.side === 'DR' ? 'bg-amber-500/20 text-amber-400'
+                        : 'bg-slate-500/15 text-slate-400')
+                  : pointsAt === 'PRD' ? 'bg-emerald-500/15 text-emerald-400'
+                    : pointsAt === 'DR' ? 'bg-amber-500/20 text-amber-400'
+                      : 'bg-slate-500/15 text-slate-400'
               }`}>
                 {app.loadBalancer
-                  ? (route === 'PRD' ? 'Serving PRD pool' : route === 'DR' ? 'Serving DR pool' : 'Serving pool unknown')
+                  ? (visual.kind === 'split'
+                    ? (visual.prd != null && visual.dr != null
+                      ? `${lbRouting?.steeringPolicy ?? 'split'} · PRD ${visual.prd}% · DR ${visual.dr}%`
+                      : `${lbRouting?.steeringPolicy ?? 'dynamic'} · both pools live`)
+                    : visual.kind === 'single' ? `Serving ${visual.side} pool` : 'Serving pool unknown')
                   : pointsAt === 'PRD' ? 'Points at PRD' : pointsAt === 'DR' ? 'Points at DR' : pointsAt === 'OTHER' ? 'Points at unknown IP' : `State: ${app.failoverState.replace('_', ' ')}`}
                 {!app.loadBalancer && dnsRecord ? (dnsRecord.proxied ? ' · proxied' : ' · DNS only') : ''}
               </span>
             </div>
 
-            {/* Split connectors to origins */}
-            <div className="w-12 flex flex-col items-center justify-center relative">
-              <div className="h-28 w-full flex flex-col justify-between items-center py-2">
-                <div className={`w-full border-t-2 ${route === 'PRD' ? 'border-emerald-500' : 'border-dashed border-slate-600'}`} />
-                <div className={`w-full border-t-2 ${isDrActive ? 'border-amber-500' : 'border-dashed border-slate-600'}`} />
-              </div>
-            </div>
-
-            {/* Stage 4: Origins */}
-            <div className="w-64 space-y-2.5 z-10">
-              {renderOrigin('PRD', prdServer, route === 'PRD', prdAvail)}
-              {renderOrigin('DR', drServer, isDrActive, drAvail)}
+            {/* Stage 4: each branch moves only while that origin is receiving traffic */}
+            <div className="grid grid-cols-[4.75rem_16rem] gap-x-1 gap-y-2.5 items-center z-10">
+              <FlowBranch flow={sideFlow('PRD')} color="#34d399" showShare={split} />
+              {renderOrigin('PRD', prdServer, sideFlow('PRD'), prdAvail)}
+              <FlowBranch flow={sideFlow('DR')} color="#fbbf24" showShare={split} />
+              {renderOrigin('DR', drServer, sideFlow('DR'), drAvail)}
             </div>
           </div>
         </div>

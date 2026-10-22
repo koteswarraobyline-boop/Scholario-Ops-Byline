@@ -5,12 +5,13 @@
  * module reads, from the Cloudflare API:
  *   GET /accounts/:acc/load_balancers/pools               pool + origin config / health
  *   GET /accounts/:acc/load_balancers/pools/:id/health    per-PoP origin health, RTT, response code
- *   GET /zones?name=… + GET /zones/:zone/load_balancers   routing (default pool order), optional
+ *   GET /accounts/:acc/load_balancers                     routing, same account permission as the pools
+ *   GET /zones/:zone/load_balancers                       routing fallback when the account list is not allowed
  *
  * Nothing here modifies Cloudflare. When a call fails the affected values become null
  * (unknown) — previous "healthy" values are never carried forward as if they were live.
  */
-import { Application, LbOrigin, LbOriginHealth, LbPool, LbRouting, LoadBalancerState } from '../src/types/index.ts';
+import { Application, LbOrigin, LbOriginHealth, LbPool, LbRouting, LbTrafficShare, LoadBalancerState } from '../src/types/index.ts';
 import { isCloudflareConfigured } from './config.ts';
 import { db, persist } from './store.ts';
 import { broadcast, audit } from './events.ts';
@@ -26,7 +27,10 @@ interface RawPoolHealth {
   pool_id?: string;
   pop_health?: Record<string, { healthy?: boolean; origins?: Array<Record<string, { healthy?: boolean; rtt?: string; failure_reason?: string; response_code?: number }>> }>;
 }
-interface RawLb { id: string; name: string; enabled?: boolean; proxied?: boolean; default_pools?: string[]; fallback_pool?: string; steering_policy?: string }
+interface RawLb {
+  id: string; name: string; enabled?: boolean; proxied?: boolean; default_pools?: string[]; fallback_pool?: string; steering_policy?: string;
+  random_steering?: { default_weight?: number; pool_weights?: Record<string, number> };
+}
 
 export const lbState: LoadBalancerState = {
   accountId: null,
@@ -129,31 +133,126 @@ async function zoneIdFor(hostname: string): Promise<string> {
   throw new CloudflareError(`No Cloudflare zone found for ${hostname}`);
 }
 
-async function readRouting(app: Application, pools: LbPool[], now: string): Promise<LbRouting> {
+/** true = enabled and healthy, false = known down or disabled, null = not enough data to say. */
+function poolLive(p: LbPool | undefined): boolean | null {
+  const originStates = p ? p.origins.filter(o => o.enabled !== false).map(originHealthy) : [];
+  const healthy = !p ? null : originStates.some(h => h === true) ? true : originStates.length && originStates.every(h => h === false) ? false : p.healthy;
+  if (!p || p.enabled === null || healthy === null) return null;
+  return p.enabled && healthy;
+}
+
+function weightFor(id: string, steering: RawLb['random_steering']): number {
+  const listed = steering?.pool_weights?.[id];
+  if (typeof listed === 'number' && Number.isFinite(listed) && listed >= 0) return listed;
+  const fallback = steering?.default_weight;
+  if (typeof fallback === 'number' && Number.isFinite(fallback) && fallback >= 0) return fallback;
+  return 1;
+}
+
+/** Largest-remainder rounding so the shares sum to 100. */
+function toPercents(items: { pid: string; w: number }[]): LbTrafficShare[] {
+  const sum = items.reduce((a, b) => a + b.w, 0);
+  const rows = items.map(i => {
+    const exact = (i.w / sum) * 100;
+    const percent = Math.floor(exact);
+    return { poolId: i.pid, percent, frac: exact - percent };
+  });
+  let leftover = 100 - rows.reduce((a, b) => a + b.percent, 0);
+  for (const row of [...rows].sort((a, b) => b.frac - a.frac || a.poolId.localeCompare(b.poolId))) {
+    if (leftover <= 0) break;
+    row.percent += 1;
+    leftover -= 1;
+  }
+  return rows.map(({ poolId, percent }) => ({ poolId, percent }));
+}
+
+/**
+ * Who is receiving traffic right now.
+ * - off (failover): 100% to the first enabled + healthy pool. An unknown pool before that winner blocks the answer.
+ * - random: weights from random_steering, renormalized across enabled + healthy pools.
+ * - any other policy: one healthy pool gets 100%; several healthy pools are all live, with no invented percentage.
+ * Any unknown health in a non-failover policy makes the whole answer unknown.
+ */
+function decideTraffic(lb: RawLb, pools: LbPool[]): { activePoolId: string | null; traffic: LbTrafficShare[] } {
+  const order = lb.default_pools ?? [];
+  const policy = (lb.steering_policy ?? 'off').toLowerCase();
+  const judged = order.map(pid => ({ pid, live: poolLive(pools.find(p => p.id === pid)) }));
+  const none = { activePoolId: null, traffic: [] as LbTrafficShare[] };
+
+  if (policy === 'off') {
+    for (const j of judged) {
+      if (j.live === null) return none;
+      if (j.live) return { activePoolId: j.pid, traffic: [{ poolId: j.pid, percent: 100 }] };
+    }
+    return none;
+  }
+
+  if (judged.some(j => j.live === null)) return none;
+  const live = judged.filter(j => j.live);
+  if (live.length === 0) return none;
+  if (live.length === 1) return { activePoolId: live[0].pid, traffic: [{ poolId: live[0].pid, percent: 100 }] };
+
+  if (policy === 'random') {
+    const weighted = live
+      .map(j => ({ pid: j.pid, w: weightFor(j.pid, lb.random_steering) }))
+      .filter(j => j.w > 0);
+    if (weighted.length === 0) return none;
+    if (weighted.length === 1) return { activePoolId: weighted[0].pid, traffic: [{ poolId: weighted[0].pid, percent: 100 }] };
+    return { activePoolId: null, traffic: toPercents(weighted) };
+  }
+
+  return { activePoolId: null, traffic: live.map(j => ({ poolId: j.pid, percent: null })) };
+}
+
+/** Account list first (no Zone permission required). Zone list is the fallback. */
+async function loadBalancerFor(app: Application): Promise<RawLb> {
   const hostname = app.loadBalancer!.hostname;
-  const base: LbRouting = { hostname, found: false, enabled: null, proxied: null, steeringPolicy: null, defaultPools: [], fallbackPool: null, activePoolId: null, fetchedAt: null, error: null };
-  if (!hostname) return { ...base, error: 'No load balancer hostname configured' };
+  const accountId = app.loadBalancer!.accountId;
+  const problems: string[] = [];
+  if (accountId) {
+    try {
+      const found: RawLb[] = [];
+      for (let page = 1; page <= 20; page++) {
+        const res = await cf<RawLb[]>(`/accounts/${accountId}/load_balancers?per_page=50&page=${page}`);
+        found.push(...(res.result ?? []));
+        if (!res.result_info?.total_pages || page >= res.result_info.total_pages) break;
+      }
+      const lb = found.find(l => l.name === hostname);
+      if (lb) return lb;
+      problems.push(`No load balancer named ${hostname} on the Cloudflare account`);
+    } catch (err) {
+      problems.push(describe(err));
+    }
+  }
   try {
     const zoneId = await zoneIdFor(hostname);
     const res = await cf<RawLb[]>(`/zones/${zoneId}/load_balancers`);
-    const lb = res.result.find(l => l.name === hostname);
-    if (!lb) return { ...base, fetchedAt: now, error: `No load balancer named ${hostname} in the zone` };
+    const lb = (res.result ?? []).find(l => l.name === hostname);
+    if (lb) return lb;
+    problems.push(`No load balancer named ${hostname} in the zone`);
+  } catch (err) {
+    problems.push(describe(err));
+  }
+  const zoneHidden = problems.some(p => /zone found/i.test(p));
+  const denied = problems.some(p => /permission required/i.test(p));
+  if (zoneHidden && denied) {
+    throw new CloudflareError('API token cannot read which pool is serving. Add Account › Load Balancing: Load Balancers › Read, or Zone › Zone › Read and Zone › Load Balancers › Read for this zone.');
+  }
+  throw new CloudflareError(problems.join(' · ') || `Load balancer ${hostname} was not found`);
+}
+
+async function readRouting(app: Application, pools: LbPool[], now: string): Promise<LbRouting> {
+  const hostname = app.loadBalancer!.hostname;
+  const base: LbRouting = { hostname, found: false, enabled: null, proxied: null, steeringPolicy: null, defaultPools: [], fallbackPool: null, activePoolId: null, traffic: [], fetchedAt: null, error: null };
+  if (!hostname) return { ...base, error: 'No load balancer hostname configured' };
+  try {
+    const lb = await loadBalancerFor(app);
     const defaultPools = lb.default_pools ?? [];
-    // Failover steering sends traffic to the first enabled + healthy pool in default_pools order.
-    // If any pool's health is unknown we cannot say which one is active.
-    let activePoolId: string | null = null;
-    for (const pid of defaultPools) {
-      const p = pools.find(x => x.id === pid);
-      // Prefer per-PoP origin health (fresher) over the pool list's aggregate flag
-      const originStates = p ? p.origins.filter(o => o.enabled !== false).map(originHealthy) : [];
-      const healthy = !p ? null : originStates.some(h => h === true) ? true : originStates.length && originStates.every(h => h === false) ? false : p.healthy;
-      if (!p || p.enabled === null || healthy === null) { activePoolId = null; break; }
-      if (p.enabled && healthy) { activePoolId = pid; break; }
-    }
+    const decided = decideTraffic(lb, pools);
     return {
       hostname, found: true, enabled: bool(lb.enabled), proxied: bool(lb.proxied),
       steeringPolicy: lb.steering_policy ?? null, defaultPools, fallbackPool: lb.fallback_pool ?? null,
-      activePoolId, fetchedAt: now, error: null,
+      activePoolId: decided.activePoolId, traffic: decided.traffic, fetchedAt: now, error: null,
     };
   } catch (err) {
     return { ...base, error: describe(err) };

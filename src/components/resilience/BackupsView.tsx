@@ -4,6 +4,7 @@ import { BackupRecord, BackupStatus } from '../../types';
 import { api } from '../../services/api';
 import { Ago, verdictColor } from '../ui/Freshness';
 import { Archive } from 'lucide-react';
+import { OpsBackupPanel } from './OpsBackupPanel';
 
 const validDate = (s?: string | null) => Boolean(s) && !Number.isNaN(Date.parse(s as string));
 const fmtDateTime = (s?: string | null, fallback = '—') => (validDate(s) ? new Date(s as string).toLocaleString() : fallback);
@@ -73,7 +74,7 @@ curl -fsS -X POST "${baseUrl}/api/v1/backups/report" \\
     <div className={`rounded-lg border p-5 space-y-3 font-mono text-xs ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
       <div className="font-bold uppercase tracking-wider text-[11px]">How backups are reported</div>
       <p className={`font-sans text-[12px] ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
-        Scholario Ops does not run backups itself. Your backup script on each VPS reports every run to{' '}
+        Scholario Ops does not run backups itself. Hostinger recovery points are fetched with the existing VPS API token. A database dump is separate: the backup script on each VPS reports every run to{' '}
         <code className="font-mono">POST /api/v1/backups/report</code>, authenticated with that server's agent token
         (<code className="font-mono">Authorization: Bearer &lt;agent token&gt;</code>). The token is the <code className="font-mono">AGENT_TOKEN</code>{' '}
         value in <code className="font-mono">/etc/scholario-agent.conf</code>, written when the agent was installed from Setup.
@@ -99,11 +100,12 @@ curl -fsS -X POST "${baseUrl}/api/v1/backups/report" \\
             BACKUPS
           </h1>
           <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Backup runs reported by the backup scripts on your servers
+            Hostinger recovery points for linked VPS servers, and runs reported by backup scripts
           </p>
         </div>
       </div>
 
+      <OpsBackupPanel />
       {statusPanel}
 
       {backups.length === 0 ? (
@@ -114,7 +116,7 @@ curl -fsS -X POST "${baseUrl}/api/v1/backups/report" \\
             </div>
             <h3 className={`text-sm font-semibold font-mono ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>No backups reported yet</h3>
             <p className={`text-xs mt-1.5 max-w-md ${muted}`}>
-              Backups appear here once a backup script on one of your servers reports a run. Add the call below to the end of your backup script.
+              Hostinger backups and the current snapshot are read for each linked VPS during provider sync. A database dump still has to be reported by the backup script on that server.
             </p>
           </div>
           {instructions}
