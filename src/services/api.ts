@@ -85,6 +85,8 @@ export interface BootstrapData {
   auditLogs: AuditLog[];
   cloudflareZones: CloudflareZone[];
   loadBalancer: LoadBalancerState;
+  /** Absent until the server that added Worker monitoring is deployed. */
+  workerMonitor?: import('../types').WorkerMonitorState;
   deadMan: DeadManControlPlane;
   integrations: IntegrationStatus;
   summary: SystemSummary;

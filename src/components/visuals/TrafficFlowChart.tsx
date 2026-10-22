@@ -5,6 +5,7 @@ import { useAuth } from '../../context/AuthContext';
 import { Environment, OperationalStatus, VpsServer } from '../../types';
 import { Globe, ShieldCheck, Server, RefreshCw, Network, Loader2, X } from 'lucide-react';
 import { OriginFlow, routeState, visualTraffic } from '../ui/routing';
+import { effectiveRoutingMethod, ROUTING_METHOD_LABELS } from '../../lib/trafficHealth';
 
 const parseTs = (iso?: string | null): number | null => {
   if (!iso) return null;
@@ -91,6 +92,8 @@ export const TrafficFlowChart: React.FC = () => {
   }
 
   const route = routeState(app, loadBalancer);
+  const routingMethod = effectiveRoutingMethod(app);
+  const dnsSwitch = routingMethod === 'direct_dns' || (routingMethod === 'unknown' && !app.loadBalancer);
   const isDrActive = route === 'DR';
   const isFailingOver = route === 'MOVING';
   const lbRouting = app.loadBalancer ? loadBalancer?.routing.find(r => r.hostname === app.loadBalancer!.hostname) : undefined;
@@ -125,8 +128,10 @@ export const TrafficFlowChart: React.FC = () => {
 
   const target: 'DR' | 'PRIMARY' = isDrActive ? 'PRIMARY' : 'DR';
   const targetServer = target === 'DR' ? drServer : prdServer;
-  const blocker = app.loadBalancer
-    ? 'Routed by the Cloudflare Load Balancer — use the failover pre-flight on PRD / DR Readiness'
+  const blocker = !dnsSwitch
+    ? (routingMethod === 'cloudflare_lb'
+      ? 'Routed by the Cloudflare Load Balancer — use the failover pre-flight on PRD / DR Readiness'
+      : `${ROUTING_METHOD_LABELS[routingMethod]}. Scholario Ops does not change this route.`)
     : !integrations?.cloudflare.configured
     ? 'Cloudflare is not configured'
     : !app.cloudflareZone || !app.dnsRecordName
@@ -354,7 +359,7 @@ export const TrafficFlowChart: React.FC = () => {
               <div className="w-8 h-8 rounded-full bg-amber-500/20 text-amber-500 flex items-center justify-center mb-1.5">
                 <Network className="w-4 h-4" />
               </div>
-              <span className="font-semibold text-xs font-mono">{app.loadBalancer ? 'Load Balancer' : 'DNS Record'}</span>
+              <span className="font-semibold text-xs font-mono">{ROUTING_METHOD_LABELS[routingMethod]}</span>
               <span className={`text-[10px] font-mono mt-0.5 break-words ${muted}`}>
                 {app.loadBalancer
                   ? (lbRouting?.found ? `order ${lbRouting.defaultPools.map(lbPoolName).join(' → ')}` : lbRouting?.error ? lbRouting.error : `Cloudflare LB: ${(loadBalancer?.status ?? 'PENDING').replace('_', ' ')}`)

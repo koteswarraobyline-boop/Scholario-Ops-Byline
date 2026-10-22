@@ -17,6 +17,7 @@ import { log } from './logger.ts';
 import { applyExtendedReport, ExtendedAgentReport } from './telemetry.ts';
 import { infraHeartbeat } from './heartbeat.ts';
 import { agentHealth, serverHealth } from './telemetryHealth.ts';
+import { effectiveRoutingMethod, explainVps, vpsOperationalStatus } from '../src/lib/trafficHealth.ts';
 import { detectFlapping } from '../src/lib/insights.ts';
 import { isMockIncident } from '../src/lib/mockIncident.ts';
 
@@ -846,6 +847,7 @@ export function ingestAgentReport(srv: ServerRecord, r: AgentReport, meta: { sou
   });
 
   const wasDisconnected = srv.agentStatus !== 'CONNECTED';
+  srv.lastIngestError = null;
   recomputeServer(srv);
   if (wasDisconnected) audit('Telemetry Agent', 'AGENT_CONNECTED', 'INFRASTRUCTURE', srv.id, `Agent on ${srv.hostname} (${srv.ip}) is reporting`);
   persist();
@@ -856,7 +858,16 @@ export function ingestAgentReport(srv: ServerRecord, r: AgentReport, meta: { sou
 export function publicServer(s: ServerRecord) {
   const { agentToken: _t, ...rest } = s;
   const { health, warnings } = serverHealth(s);
-  return { ...rest, agent: agentHealth(s), health, warnings };
+  return { ...rest, agent: agentHealth(s), health, warnings, vps: explainVps(s) };
+}
+
+/** A report reached this server and was refused. Does not update lastSeen or telemetry. */
+export function noteIngestRejection(srv: ServerRecord, reason: string): void {
+  const at = new Date().toISOString();
+  if (srv.lastIngestError?.reason === reason && Date.now() - Date.parse(srv.lastIngestError.at) < 60_000) return;
+  srv.lastIngestError = { at, reason };
+  persist();
+  broadcast('server_update', publicServer(srv));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -867,19 +878,8 @@ function recomputeServer(srv: ServerRecord): boolean {
   const age = srv.lastSeen ? (Date.now() - Date.parse(srv.lastSeen)) / 1000 : Infinity;
   srv.agentStatus = age <= config.telemetryStaleSec ? 'CONNECTED' : age <= config.telemetryStaleSec * 10 ? 'STALE' : 'DISCONNECTED';
 
-  const monitorStatuses = db.monitors.filter(m => m.enabled && m.serverId === srv.id).map(m => m.status);
-  let status = worst(monitorStatuses.filter(s => s !== 'UNKNOWN'), 'UNKNOWN');
-
-  if (srv.agentStatus === 'CONNECTED') {
-    const t = srv.telemetry;
-    const hot = Math.max(t.cpuPercent, t.ramPercent, t.diskPercent);
-    const resourceStatus: OperationalStatus = hot >= 95 ? 'CRITICAL' : hot >= 85 ? 'WARNING' : 'HEALTHY';
-    status = status === 'UNKNOWN' ? resourceStatus : worst([status, resourceStatus === 'CRITICAL' ? 'WARNING' : resourceStatus]);
-  } else if (srv.lastSeen) {
-    // The agent used to report and stopped: treat as degraded visibility
-    status = status === 'UNKNOWN' || status === 'HEALTHY' ? 'STALE' : status;
-  }
-  srv.status = status;
+  // VPS status follows the agent only. HTTP monitors and Cloudflare routing do not change it.
+  srv.status = vpsOperationalStatus(srv);
   return before !== `${srv.status}|${srv.agentStatus}`;
 }
 
@@ -903,8 +903,8 @@ function recomputeApplication(app: Application): boolean {
   if (active.length > 0) {
     app.status = worst(active.map(m => m.status).filter(s => s !== 'UNKNOWN'), 'UNKNOWN');
   } else {
-    const srv = db.servers.find(s => s.id === (activeEnv === 'DR' ? app.drServerId : app.prdServerId));
-    app.status = srv?.status ?? 'UNKNOWN';
+    // No application monitors. Do not copy VPS status onto the application.
+    app.status = 'UNKNOWN';
   }
   if (app.failoverState === 'FAILING_OVER') app.status = worst([app.status, 'WARNING']);
 
@@ -1051,8 +1051,15 @@ export class FailoverError extends Error {
 }
 
 export async function performFailover(app: Application, target: 'DR' | 'PRIMARY', operator: string, reason: string) {
-  if (app.loadBalancer) {
-    throw new FailoverError(`${app.name} traffic is routed by the Cloudflare Load Balancer (${app.loadBalancer.hostname}). Scholario Ops has read-only access to it — change pool order / enablement in Cloudflare after reviewing the pre-flight checks.`, 409);
+  const routingMethod = effectiveRoutingMethod(app);
+  if (routingMethod === 'cloudflare_lb') {
+    throw new FailoverError(`${app.name} traffic is routed by the Cloudflare Load Balancer (${app.loadBalancer?.hostname || 'mapped hostname'}). Scholario Ops has read-only access to it — change pool order / enablement in Cloudflare after reviewing the pre-flight checks.`, 409);
+  }
+  if (routingMethod === 'cloudflare_worker' || routingMethod === 'cloudflare_worker_failover') {
+    throw new FailoverError(`${app.name} traffic is routed by a Cloudflare Worker. Scholario Ops does not change Worker routes or origins.`, 409);
+  }
+  if (routingMethod === 'custom') {
+    throw new FailoverError(`${app.name} uses custom routing. Scholario Ops will not change DNS records or origins.`, 409);
   }
   if (failoverLocks.has(app.id)) throw new FailoverError('A failover for this application is already in progress', 409);
   const targetServer = db.servers.find(s => s.id === (target === 'DR' ? app.drServerId : app.prdServerId));
@@ -1102,7 +1109,10 @@ export async function evaluateAutoFailover(m: Monitor) {
   if (m.consecutiveFailures < Math.max(1, m.failureConfirmationThreshold)) return; // still CRITICAL from before, but the latest check passed
   const app = db.applications.find(a => a.id === m.applicationId);
   // Load-balancer-managed applications (ICT) are never failed over automatically
-  if (!app || app.loadBalancer || !app.autoFailover || app.failoverState !== 'PRIMARY_ACTIVE') return;
+  const routingMethod = app ? effectiveRoutingMethod(app) : 'unknown';
+  // Only Direct DNS (and a not-yet-classified app that has no Load Balancer) may move a DNS record.
+  if (!app || !app.autoFailover || app.failoverState !== 'PRIMARY_ACTIVE') return;
+  if (routingMethod !== 'direct_dns' && !(routingMethod === 'unknown' && !app.loadBalancer)) return;
   if (app.lastFailoverAt && Date.now() - Date.parse(app.lastFailoverAt) < FAILOVER_COOLDOWN_MS) return;
   const lastAttempt = autoFailoverAttemptAt.get(app.id);
   if (lastAttempt && Date.now() - lastAttempt < FAILOVER_COOLDOWN_MS) return;

@@ -6,6 +6,7 @@ import { Search, X, Server, ChevronRight } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
 import { useDialog } from '../ui/useDialog';
 import { THRESHOLDS } from '../../lib/thresholds';
+import { explainVps } from '../../lib/trafficHealth';
 import { fmtNum, fmtAgo, fmtTime, LevelBadge } from './telemetryUi';
 import { OverviewTab, ResourcesTab, ApplicationsTab, ServicesTab, NetworkTab, StorageTab, DatabaseTab, AgentTab } from './ServerTabs';
 
@@ -80,7 +81,9 @@ export const VpsDetailModal: React.FC<VpsDetailModalProps> = ({ server, onClose,
       <div>
         {reported
           ? `The agent has not reported any ${what} for this server.`
-          : `No ${what} yet — the telemetry agent has never reported from this server.`}
+          : server.lastIngestError
+            ? `No ${what} yet. The last report was rejected: ${server.lastIngestError.reason}`
+            : `No ${what} yet — the telemetry agent has never reported from this server. CPU, memory and disk stay unknown. This is not an application failure.`}
       </div>
       {!reported && (
         <button onClick={goSetup} className="px-3 py-1 rounded text-xs font-mono font-semibold bg-blue-600 hover:bg-blue-700 text-white cursor-pointer">
@@ -547,9 +550,9 @@ export const InfrastructureView: React.FC = () => {
                             {app?.name ?? <span className={muted}>Unassigned</span>}
                           </td>
                           <td className="py-2.5 px-3.5">
-                            <div className={`font-semibold ${agentColor(s.agentStatus)}`}>{s.agentStatus}</div>
-                            <div className={`text-[10px] ${muted}`}>
-                              {hasReported(s) ? fmtAgo(s.lastSeen) : 'never reported'}{s.agentVersion ? ` · v${s.agentVersion.replace(/^v/, '')}` : ''}
+                            <div className={`font-semibold ${hasReported(s) ? agentColor(s.agentStatus) : 'text-slate-400'}`} title={explainVps(s).detail}>{hasReported(s) ? s.agentStatus : 'NOT CONNECTED'}</div>
+                            <div className={`text-[10px] ${muted}`} title={explainVps(s).detail}>
+                              {hasReported(s) ? fmtAgo(s.lastSeen) : s.lastIngestError ? 'report rejected — metrics unknown' : 'no accepted report — metrics unknown'}{s.agentVersion ? ` · v${s.agentVersion.replace(/^v/, '')}` : ''}
                             </div>
                           </td>
                           <td className="py-2.5 px-3.5 tabular-nums">{bar(s, s.telemetry.cpuPercent, THRESHOLDS.cpuPercent.warning, 'bg-blue-500')}</td>

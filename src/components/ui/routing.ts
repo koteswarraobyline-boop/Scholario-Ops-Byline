@@ -1,4 +1,5 @@
 import { Application, LbRouting, LoadBalancerState } from '../../types';
+import { effectiveRoutingMethod } from '../../lib/trafficHealth';
 
 export type RouteState = 'PRD' | 'DR' | 'SPLIT' | 'MOVING' | 'UNKNOWN';
 
@@ -57,7 +58,11 @@ export function visualTraffic(
   lb: LoadBalancerState | null,
   pointsAt: 'PRD' | 'DR' | 'OTHER' | null,
 ): VisualTraffic {
-  if (app.loadBalancer) {
+  const method = effectiveRoutingMethod(app);
+  if (method === 'cloudflare_worker' || method === 'cloudflare_worker_failover' || method === 'custom' || method === 'unknown') {
+    return { kind: 'unknown' };
+  }
+  if (method === 'cloudflare_lb') {
     const f = originFlows(app, lb);
     if (!f.known) return { kind: 'unknown' };
     if (f.prd.receiving && f.dr.receiving) return { kind: 'split', prd: f.prd.percent, dr: f.dr.percent };
@@ -76,7 +81,9 @@ export function visualTraffic(
  * - DNS-record apps: the failover state Scholario Ops itself applied.
  */
 export function routeState(app: Application, lb: LoadBalancerState | null): RouteState {
-  if (app.loadBalancer) {
+  const method = effectiveRoutingMethod(app);
+  if (method === 'cloudflare_worker' || method === 'cloudflare_worker_failover' || method === 'custom' || method === 'unknown') return 'UNKNOWN';
+  if (method === 'cloudflare_lb') {
     const f = originFlows(app, lb);
     if (!f.known) return 'UNKNOWN';
     if (f.prd.receiving && f.dr.receiving) return 'SPLIT';

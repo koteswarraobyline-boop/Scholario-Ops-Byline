@@ -93,6 +93,12 @@ export interface Application {
   healthCheck?: AppHealthCheck;
   /** Per-environment inventory; unset fields are unknown / pending confirmation */
   environments?: Partial<Record<Environment, EnvironmentInventory>>;
+  /**
+   * How public traffic reaches this application. Independent per application.
+   * Absent on older rows: a saved Load Balancer mapping means Cloudflare Load Balancer;
+   * anything else means the method is not configured.
+   */
+  trafficRouting?: TrafficRoutingConfig;
 }
 
 /** Facts about one environment of an application. null = not confirmed (shown as UNKNOWN / PENDING). */
@@ -258,6 +264,104 @@ export interface AppLoadBalancerMapping {
   hostname: string;
   prdPoolId: string;
   drPoolId: string;
+}
+
+export type TrafficRoutingMethod =
+  | 'direct_dns'
+  | 'cloudflare_lb'
+  | 'cloudflare_worker'
+  | 'cloudflare_worker_failover'
+  | 'custom'
+  | 'unknown';
+
+export type DimensionStatus = 'HEALTHY' | 'WARNING' | 'CRITICAL' | 'UNKNOWN' | 'NOT_CONFIGURED' | 'NOT_CONNECTED';
+
+export interface HealthDimension {
+  status: DimensionStatus;
+  /** Why this state was chosen. Missing data stays here instead of being called healthy. */
+  detail: string;
+  observedAt: string | null;
+  source: string;
+}
+
+export interface DirectRoutingConfig {
+  prdHostname: string;
+  drHostname: string;
+  prdUrl: string;
+  drUrl: string;
+  dnsRecordName: string;
+  currentTarget: string;
+  manualFailoverStatus: 'UNKNOWN' | 'PRIMARY' | 'DR';
+  /** Operator-recorded verification time. Live DNS sync is a separate timestamp. */
+  lastVerifiedAt: string | null;
+}
+
+export interface WorkerRoutingConfig {
+  name: string;
+  route: string;
+  accountId: string;
+  environment: string;
+  prdOriginHostname: string;
+  drOriginHostname: string;
+  failoverStrategy: string;
+  healthCheckSource: string;
+  /** What the operator says the Worker does. Scholario Ops does not perform failback. */
+  failback: 'automatic' | 'manual' | 'unknown';
+}
+
+export interface CustomRoutingConfig {
+  description: string;
+  endpoint: string;
+  notes: string;
+}
+
+/** All method blobs are kept when the selected method changes. */
+export interface TrafficRoutingConfig {
+  method: TrafficRoutingMethod;
+  direct: DirectRoutingConfig;
+  worker: WorkerRoutingConfig;
+  custom: CustomRoutingConfig;
+}
+
+export type WorkerEventKind = 'origin_selected' | 'failover' | 'failback' | 'origin_error' | 'health';
+
+/** A fact posted by an instrumented Worker. Never invented by the dashboard. */
+export interface WorkerRoutingEvent {
+  id: string;
+  applicationId: string;
+  kind: WorkerEventKind;
+  origin: string | null;
+  prdHealth: 'healthy' | 'unhealthy' | 'unknown' | null;
+  drHealth: 'healthy' | 'unhealthy' | 'unknown' | null;
+  detail: string;
+  observedAt: string;
+  receivedAt: string;
+  source: 'worker_event';
+}
+
+export interface WorkerAppSnapshot {
+  applicationId: string;
+  connection: 'configured' | 'verified' | 'unavailable' | 'unknown' | 'not_connected';
+  detail: string;
+  observedAt: string | null;
+  scriptFound: boolean | null;
+  lastDeployedAt: string | null;
+  /** Always null until a Workers analytics API is connected. */
+  requests: null;
+  errors: null;
+  analytics: 'NOT_CONNECTED';
+}
+
+export interface WorkerMonitorState {
+  status: 'NOT_CONNECTED' | 'NOT_CONFIGURED' | 'OK' | 'PERMISSION_REQUIRED' | 'ERROR' | 'PENDING';
+  detail: string;
+  lastSyncAt: string | null;
+  lastSuccessAt: string | null;
+  eventsConnected: boolean;
+  permissionHint: string;
+  apps: WorkerAppSnapshot[];
+  /** Posted Worker events. Empty when ingest is disconnected or nothing has arrived. */
+  events: WorkerRoutingEvent[];
 }
 
 export interface VpsTelemetry {
@@ -522,6 +626,8 @@ export interface VpsServer {
   uptimeDays: number;
   /** Last agent report time; empty string when the agent has never reported */
   lastSeen: string;
+  /** Set when a report from this server was refused. Cleared on the next accepted report. */
+  lastIngestError?: { at: string; reason: string } | null;
   notes?: string;
   /** Purchased plan capacity (from configuration or the Hostinger API), separate from agent-measured values */
   planSpec?: { name: string; cpuCores: number; ramGb: number; diskGb: number; source: 'manual' | 'config' | 'hostinger' };

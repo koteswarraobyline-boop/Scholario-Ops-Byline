@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
+import { effectiveRoutingMethod } from '../../lib/trafficHealth';
 import { useAuth } from '../../context/AuthContext';
 import {
   Search,
@@ -216,7 +217,7 @@ export const CommandPalette: React.FC = () => {
       });
 
       // Load-Balancer apps: traffic is switched in Cloudflare after the pre-flight review — open that console
-      if (canFailover && app.loadBalancer) {
+      if (canFailover && effectiveRoutingMethod(app) === 'cloudflare_lb' && app.loadBalancer) {
         items.push({
           id: `action-lb-failover-${app.id}`,
           category: 'ACTIONS',
@@ -231,7 +232,7 @@ export const CommandPalette: React.FC = () => {
         });
       }
       // DNS failover / failback (super_admin, requires DNS failover configuration; never for Load-Balancer apps)
-      if (canFailover && !app.loadBalancer && app.dnsRecordName && app.prdServerId && app.drServerId && app.failoverState !== 'FAILING_OVER') {
+      if (canFailover && (effectiveRoutingMethod(app) === 'direct_dns' || (effectiveRoutingMethod(app) === 'unknown' && !app.loadBalancer)) && app.dnsRecordName && app.prdServerId && app.drServerId && app.failoverState !== 'FAILING_OVER') {
         const target: 'DR' | 'PRIMARY' = isDr ? 'PRIMARY' : 'DR';
         const targetServer = isDr ? prd : dr;
         items.push({
