@@ -154,6 +154,14 @@ export const HostingerView: React.FC = () => {
                       {c.syncEnabled ? 'Disable sync' : 'Enable sync'}
                     </button>
                   )}
+                  {canManage && !c.legacy && (
+                    <button className={btn} disabled={busy !== null} onClick={() => {
+                      if (!window.confirm(`Delete the ${c.name} connection? Saved VM rows for it are removed. The token in the environment file is not changed.`)) return;
+                      void run(`del:${c.id}`, () => api.deleteProviderConnection(c.id)).then(() => load());
+                    }}>
+                      Delete
+                    </button>
+                  )}
                 </div>
               </div>
               <div className={isDark ? 'text-slate-500' : 'text-slate-500'}>

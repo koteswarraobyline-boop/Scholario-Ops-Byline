@@ -4,6 +4,7 @@ import React, {
 } from 'react';
 import { AuthService } from '../services/auth';
 import { ApiError, SafeUser, setLogoutHandler, tokenStore } from '../services/api';
+import { canPerform, hasMinRole } from '../lib/roles';
 
 interface AuthContextType {
   user: SafeUser | null;
@@ -15,13 +16,6 @@ interface AuthContextType {
   hasRole: (minRole: 'viewer' | 'operator' | 'it_administrator' | 'super_admin') => boolean;
   canDo: (action: string) => boolean;
 }
-
-const ROLE_LEVEL: Record<string, number> = {
-  viewer: 1,
-  operator: 2,
-  it_administrator: 3,
-  super_admin: 4,
-};
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -75,35 +69,10 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   }, []);
 
   const hasRole = useCallback((minRole: 'viewer' | 'operator' | 'it_administrator' | 'super_admin'): boolean => {
-    if (!user) return false;
-    return (ROLE_LEVEL[user.roleName] ?? 0) >= (ROLE_LEVEL[minRole] ?? 999);
+    return hasMinRole(user?.roleName, minRole);
   }, [user]);
 
-  // Simple action-based permission check for common operations
-  const canDo = useCallback((action: string): boolean => {
-    if (!user) return false;
-    const role = user.roleName;
-    const level = ROLE_LEVEL[role] ?? 0;
-
-    // Mirrors the role checks enforced by the API (server/routes.ts)
-    const operatorActions = [
-      'acknowledge_incident', 'resolve_incident', 'add_note', 'assign_incident', 'declare_incident',
-      'run_probe', 'execute_runbook', 'create_maintenance', 'test_channel', 'sync_providers',
-    ];
-    const adminActions = [
-      'create_monitor', 'update_monitor', 'delete_monitor',
-      'create_server', 'update_server', 'delete_server',
-      'create_application', 'update_application', 'delete_application',
-      'manage_users', 'manage_communications', 'manage_runbooks', 'delete_maintenance',
-    ];
-    const superAdminActions = ['trigger_failover', 'manage_roles', 'delete_user'];
-
-    if (superAdminActions.includes(action)) return level >= 4;
-    if (adminActions.includes(action)) return level >= 3;
-    if (operatorActions.includes(action)) return level >= 2;
-    if (action === 'view' || action === 'read') return level >= 1;
-    return false; // unknown action: deny (a typo must never grant access)
-  }, [user]);
+  const canDo = useCallback((action: string): boolean => canPerform(user?.roleName, action), [user]);
 
   return (
     <AuthContext.Provider value={{

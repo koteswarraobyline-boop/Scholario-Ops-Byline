@@ -6,6 +6,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
@@ -28,6 +29,7 @@ async function startServer() {
       ...process.env, DATABASE_URL, PORT: String(PORT), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR,
       NODE_ENV: 'production', ADMIN_EMAIL: ADMIN.email, ADMIN_PASSWORD: ADMIN.password,
       CLOUDFLARE_API_TOKEN: '', HOSTINGER_API_TOKEN: '', DEADMAN_HEARTBEAT_URL: '', RESOURCE_STALE_SEC: '1',
+      NOTIFY_ALLOWED_PRIVATE_TARGETS: '127.0.0.1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -291,4 +293,180 @@ test('severity steps down on one incident, disable resolves, delete closes, and 
   assert.equal(gone?.status, 'CLOSED');
   const leftover = await one(`select count(*)::int n from ${SCHEMA}.resource_measurements where resource_id = $1`, [doomedId]);
   assert.equal(leftover.n, 0);
+});
+
+test('the agent sample fills CPU, RAM, disk, load, and PostgreSQL size and connections; storage, seats, users, and API quota come from their endpoints', async () => {
+  const srv = await api('POST', '/api/v1/servers', {
+    hostname: 'cap-agent', ip: '192.0.2.77', environment: 'PRD', plan: 'Sample', planCpuCores: 4, planRamGb: 8, planDiskGb: 100,
+  });
+  assert.equal(srv.status, 201, srv.raw);
+  const serverId = srv.body.data.id as string;
+  const agentToken = (await one(`select agent_token from ${SCHEMA}.servers where id = $1`, [serverId])).agent_token as string;
+  const ingest = await fetch(`${BASE}/api/v1/agent/ingest`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${agentToken}` },
+    body: JSON.stringify({
+      observedAt: new Date().toISOString(),
+      cpuPercent: 50, ramPercent: 40, diskPercent: 55, load: [1.5, 1.2, 0.9], cpuCores: 4,
+      memUsedMb: 2048, diskUsedGb: 40,
+      databases: [{
+        engine: 'postgresql', name: 'lms', available: true, latencyMs: 3, version: '16.4',
+        sizeBytes: 1073741824, connections: 12, maxConnections: 100, longRunningQueries: 0, replication: null, error: null,
+      }],
+    }),
+  });
+  const ingestRaw = await ingest.text();
+  assert.equal(ingest.status, 200, ingestRaw);
+  const live = await api('GET', `/api/v1/servers/${serverId}`);
+  assert.deepEqual(live.body.data.telemetry.loadAvg, [1.5, 1.2, 0.9]);
+  assert.equal(live.body.data.telemetry.cpuPercent, 50);
+  assert.equal(live.body.data.telemetry.ramPercent, 40);
+  assert.equal(live.body.data.telemetry.diskPercent, 55);
+
+  const listed = await api('GET', `/api/v1/resources?serverId=${serverId}&pageSize=50`);
+  const rows = listed.body.data as Array<{ kind: string; name: string; usage: number | null; capacity: number | null; unit: string }>;
+  const of = (kind: string) => rows.find(r => r.kind === kind);
+  assert.equal(of('CPU')?.usage, 2);
+  assert.equal(of('CPU')?.unit, 'cores');
+  assert.ok(Math.abs((of('MEMORY')?.usage ?? 0) - (2048 * 1024 * 1024) / 1e9) < 0.001);
+  assert.equal(of('SERVER_DISK')?.usage, 40);
+  assert.equal(of('DATABASE_SIZE')?.usage, 1073741824);
+  assert.equal(of('DATABASE_SIZE')?.unit, 'bytes');
+  assert.equal(of('DATABASE_CONNECTIONS')?.usage, 12);
+  assert.equal(of('DATABASE_CONNECTIONS')?.capacity, 100);
+  assert.equal(of('LOAD')?.unit, 'load');
+  assert.equal(of('LOAD')?.usage, 0.375);
+  assert.equal(of('LOAD')?.capacity, null);
+  const loadRow = (await api('GET', `/api/v1/resources?serverId=${serverId}&kind=LOAD`)).body.data[0];
+  assert.equal(loadRow.evaluation.state, 'NORMAL');
+  const hot = await fetch(`${BASE}/api/v1/agent/ingest`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${agentToken}` },
+    body: JSON.stringify({
+      observedAt: new Date().toISOString(),
+      cpuPercent: 50, ramPercent: 40, diskPercent: 55, load: [8, 8, 8], cpuCores: 4,
+      memUsedMb: 2048, diskUsedGb: 40,
+    }),
+  });
+  assert.equal(hot.status, 200, await hot.text());
+  const hotLoad = (await api('GET', `/api/v1/resources?serverId=${serverId}&kind=LOAD`)).body.data[0];
+  assert.equal(hotLoad.usage, 2);
+  assert.equal(hotLoad.evaluation.state, 'CRITICAL');
+  assert.equal((await api('GET', `/api/v1/resources?serverId=${serverId}&kind=LOAD`)).body.data.length, 1);
+
+  const viewer = await api('POST', '/api/v1/users', { email: 'connector-viewer@example.com', password: 'ViewerPassw0rd!', fullName: 'Connector Viewer', roleName: 'viewer' });
+  assert.equal(viewer.status, 201, viewer.raw);
+  const viewerToken = (await api('POST', '/api/auth/login', { email: 'connector-viewer@example.com', password: 'ViewerPassw0rd!' }, '')).body.data.tokens.accessToken as string;
+  const sample = {
+    storage: { name: 'Course media', owner: 'Academic IT', usedGb: 40, capacityGb: 100 },
+    seats: { name: 'LMS seats', owner: 'Academic IT', used: 90, capacity: 100 },
+    users: { name: 'LMS active users', owner: 'Academic IT', count: 80 },
+    apiQuota: { name: 'Public API', owner: 'Platform', requests: 1000, limit: 10000, window: 'hour' },
+  };
+  assert.equal((await api('POST', '/api/v1/resources/connectors', sample, viewerToken)).status, 403);
+  assert.equal((await api('POST', '/api/v1/resources/connectors', {})).status, 400);
+  const reported = await api('POST', '/api/v1/resources/connectors', sample);
+  assert.equal(reported.status, 200, reported.raw);
+  const got = reported.body.data as Array<{ kind: string; usage: number; capacity: number | null; unit: string; quotaWindow: string | null; evaluation: { state: string } }>;
+  const pick = (kind: string) => got.find(r => r.kind === kind)!;
+  assert.equal(pick('STORAGE').usage, 40);
+  assert.equal(pick('STORAGE').capacity, 100);
+  assert.equal(pick('STORAGE').evaluation.state, 'NORMAL');
+  assert.equal(pick('SEATS').usage, 90);
+  assert.equal(pick('SEATS').evaluation.state, 'WARNING');
+  assert.equal(pick('ACTIVE_USERS').usage, 80);
+  assert.equal(pick('ACTIVE_USERS').capacity, null);
+  assert.equal(pick('ACTIVE_USERS').evaluation.state, 'NORMAL');
+  assert.equal(pick('API_QUOTA').usage, 1000);
+  assert.equal(pick('API_QUOTA').quotaWindow, 'hour');
+  assert.equal(pick('API_QUOTA').evaluation.state, 'NORMAL');
+  const seatsBefore = (await api('GET', '/api/v1/resources?kind=SEATS&pageSize=50')).body.data.length;
+  const again = await api('POST', '/api/v1/resources/connectors', { ...sample, seats: { ...sample.seats, used: 91 } });
+  assert.equal(again.status, 200, again.raw);
+  assert.equal((again.body.data as Array<{ kind: string; usage: number }>).find(r => r.kind === 'SEATS')?.usage, 91);
+  assert.equal((await api('GET', '/api/v1/resources?kind=SEATS&pageSize=50')).body.data.length, seatsBefore, 'the same endpoint updates the seat record');
+  const wrongWindow = await api('POST', '/api/v1/resources/connectors', { apiQuota: { ...sample.apiQuota, window: 'day', requests: 10 } });
+  assert.equal(wrongWindow.status, 400, wrongWindow.raw);
+  const seatsAfterUsers = (await api('GET', '/api/v1/resources?kind=SEATS&pageSize=50')).body.data as Array<{ name: string }>;
+  assert.equal(seatsAfterUsers.some(r => r.name === 'LMS active users'), false, 'a user count does not become a seat limit');
+
+  const pages: Record<string, unknown> = {
+    '/storage': { name: 'Course media', owner: 'Academic IT', usedGb: 41, capacityGb: 100 },
+    '/seats': { name: 'LMS seats', owner: 'Academic IT', used: 92, capacity: 100 },
+    '/users': { name: 'LMS active users', owner: 'Academic IT', count: 81 },
+    '/quota': { name: 'Public API', owner: 'Platform', requests: 1100, limit: 10000, window: 'hour' },
+  };
+  const endpoint = http.createServer((req, res) => {
+    const page = pages[req.url ?? ''];
+    if (!page) { res.statusCode = 404; res.end('missing'); return; }
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify(page));
+  });
+  await new Promise<void>(resolve => endpoint.listen(0, '127.0.0.1', () => resolve()));
+  try {
+    const endpointBase = `http://127.0.0.1:${(endpoint.address() as { port: number }).port}`;
+    const blocked = await api('POST', '/api/v1/resources/connectors', { endpoints: { storage: 'http://169.254.169.254/latest/meta-data' } });
+    assert.equal(blocked.status, 400, blocked.raw);
+    const pulled = await api('POST', '/api/v1/resources/connectors', {
+      endpoints: {
+        storage: `${endpointBase}/storage`, seats: `${endpointBase}/seats`, users: `${endpointBase}/users`, apiQuota: `${endpointBase}/quota`,
+      },
+    });
+    assert.equal(pulled.status, 200, pulled.raw);
+    const fromEndpoint = pulled.body.data as Array<{ kind: string; usage: number }>;
+    assert.equal(fromEndpoint.find(r => r.kind === 'STORAGE')?.usage, 41);
+    assert.equal(fromEndpoint.find(r => r.kind === 'SEATS')?.usage, 92);
+    assert.equal(fromEndpoint.find(r => r.kind === 'ACTIVE_USERS')?.usage, 81);
+    assert.equal(fromEndpoint.find(r => r.kind === 'API_QUOTA')?.usage, 1100);
+    assert.equal((await api('GET', '/api/v1/resources?kind=SEATS&pageSize=50')).body.data.length, seatsBefore, 'reading the endpoint updates the same seat record');
+  } finally {
+    endpoint.close();
+  }
+});
+
+test('the agent sample is stored when the server has no purchased plan', async () => {
+  const srv = await api('POST', '/api/v1/servers', { hostname: 'cap-noplan', ip: '192.0.2.78', environment: 'PRD' });
+  assert.equal(srv.status, 201, srv.raw);
+  const serverId = srv.body.data.id as string;
+  const agentToken = (await one(`select agent_token from ${SCHEMA}.servers where id = $1`, [serverId])).agent_token as string;
+  const ingest = await fetch(`${BASE}/api/v1/agent/ingest`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${agentToken}` },
+    body: JSON.stringify({
+      observedAt: new Date().toISOString(),
+      cpuPercent: 50, ramPercent: 40, diskPercent: 55, load: [1.5, 1.2, 0.9], cpuCores: 4,
+      memUsedMb: 2048, diskUsedGb: 40,
+    }),
+  });
+  assert.equal(ingest.status, 200, await ingest.text());
+  const listed = await api('GET', `/api/v1/resources?serverId=${serverId}&pageSize=50`);
+  const rows = listed.body.data as Array<{ kind: string; usage: number | null; capacity: number | null }>;
+  const of = (kind: string) => rows.find(r => r.kind === kind);
+  assert.equal(of('CPU')?.usage, 2);
+  assert.equal(of('CPU')?.capacity, null);
+  assert.ok(Math.abs((of('MEMORY')?.usage ?? 0) - (2048 * 1024 * 1024) / 1e9) < 0.001);
+  assert.equal(of('MEMORY')?.capacity, null);
+  assert.equal(of('SERVER_DISK')?.usage, 40);
+  assert.equal(of('SERVER_DISK')?.capacity, null);
+  assert.equal(of('LOAD')?.usage, 0.375);
+  assert.equal(of('LOAD')?.capacity, null);
+});
+
+test('a load limit uses 1 and 2 per core when no thresholds are sent', async () => {
+  const created = await api('POST', '/api/v1/resources', {
+    kind: 'LOAD', name: 'Edge load', owner: 'Platform', unit: 'load', capacity: null,
+  });
+  assert.equal(created.status, 201, created.raw);
+  const row = created.body.data;
+  assert.equal(row.thresholdMode, 'absolute');
+  assert.equal(row.warningValue, 1);
+  assert.equal(row.criticalValue, 2);
+  assert.equal(row.recoveryMargin, 0.2);
+  assert.equal(row.capacity, null);
+  const warn = await api('POST', `/api/v1/resources/${row.id}/measure`, { usage: 1.5, measurementId: 'load-warn' });
+  assert.equal(warn.status, 200, warn.raw);
+  assert.equal(warn.body.data.evaluation.state, 'WARNING');
+  const critical = await api('POST', `/api/v1/resources/${row.id}/measure`, { usage: 2, measurementId: 'load-critical' });
+  assert.equal(critical.status, 200, critical.raw);
+  assert.equal(critical.body.data.evaluation.state, 'CRITICAL');
 });

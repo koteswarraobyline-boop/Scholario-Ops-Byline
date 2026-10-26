@@ -175,7 +175,7 @@ Tables: `meta`, `users`, `refresh_tokens`, `servers`, `applications`, `applicati
 | Database | Agent probe on the DB server (MySQL/MariaDB/PostgreSQL, set per environment): availability, latency, version, size, connections, long queries, replication role/state/lag | HEALTHY · DEGRADED · DOWN · UNKNOWN · NOT_CONFIGURED |
 | Backups | Backup jobs report each run: last backup, age vs threshold, status | HEALTHY · STALE · FAILED · UNKNOWN |
 | Provider | Hostinger API: plan, CPU, RAM, disk, OS, state, region | HEALTHY · DEGRADED · UNAVAILABLE · UNKNOWN |
-| DR readiness | 13 checks (PRD/DR reachable, PRD/DR app, PRD/DR database, replication healthy and lag, recent backup, DR pool, DR origin, DR SSL, DR URL), each PASS · FAIL · UNKNOWN · NOT_CONFIGURED | READY · PARTIALLY_READY · NOT_READY · UNKNOWN |
+| DR readiness | 13 checks (PRD/DR reachable, PRD/DR app, PRD/DR database, replication healthy and lag, recent backup, DR pool, DR origin, DR SSL, DR URL), each PASS · FAIL · WARNING · UNKNOWN | READY · DEGRADED · NOT_READY · UNKNOWN |
 | Dead-man heartbeat | Per monitored server (PRD / DR), from the agent reports: server heartbeat (age, delivery latency, missed reports), local application checks (HTTP status, latency, last success, consecutive failures), watched systemd services, database probes. No external watchdog. | HEALTHY · DEGRADED · FAILING · UNKNOWN |
 
 **Telemetry agent (v3.2.0):** a Python 3 script that uses only the standard library. It reads `/proc`, `df`, `ps`, `systemctl` and `journalctl`, and is configured in `/etc/scholario-agent.conf`. Install it with the one-line command shown in Setup (`/api/v1/agent/install/:serverId`). Tokens are per server and can be rotated. The installer never contains database credentials.

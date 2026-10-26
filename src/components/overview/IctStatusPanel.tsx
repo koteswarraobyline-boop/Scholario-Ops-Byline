@@ -5,6 +5,7 @@ import { api, ApplicationAvailability, DatabaseHealthRow, DrReadiness } from '..
 import { Application, Monitor, OperationalStatus, VpsServer, LbPool } from '../../types';
 import { Ago, triText, triColor, verdictColor } from '../ui/Freshness';
 import { originHealthy, originRtt } from '../providers/LoadBalancerPanel';
+import { effectiveRoutingMethod, ROUTING_METHOD_LABELS } from '../../lib/trafficHealth';
 
 type Env = 'PRD' | 'DR';
 
@@ -15,10 +16,11 @@ type Env = 'PRD' | 'DR';
  */
 export const IctStatusPanel: React.FC = () => {
   const { applications } = useOps();
-  const apps = applications.filter(a => a.loadBalancer);
-  if (apps.length === 0) return null;
-  return <>{apps.map(app => <AppPanel key={app.id} app={app} />)}</>;
+  if (applications.length === 0) return null;
+  return <>{applications.map(app => <AppPanel key={app.id} app={app} />)}</>;
 };
+
+const drConfigured = (app: Application) => Boolean(app.drServerId || app.drUrl || app.loadBalancer?.drPoolId);
 
 function envVerdict(http: Monitor | undefined, pool: LbPool | undefined, srv: VpsServer | undefined): { status: OperationalStatus; why: string } {
   const origin = pool?.origins.find(o => o.address === srv?.ip) ?? pool?.origins[0];
@@ -59,17 +61,20 @@ const AppPanel: React.FC<{ app: Application }> = ({ app }) => {
   const env = (e: Env) => {
     const srv = servers.find(s => s.id === (e === 'PRD' ? app.prdServerId : app.drServerId));
     const http = monitors.find(m => m.enabled && m.applicationId === app.id && m.environment === e && ['HTTP', 'HTTPS', 'APP_HEALTH'].includes(m.type));
-    const poolId = e === 'PRD' ? app.loadBalancer!.prdPoolId : app.loadBalancer!.drPoolId;
-    const pool = loadBalancer?.pools.find(p => p.id === poolId && p.applicationId === app.id);
+    const poolId = !app.loadBalancer ? '' : e === 'PRD' ? app.loadBalancer.prdPoolId : app.loadBalancer.drPoolId;
+    const pool = poolId ? loadBalancer?.pools.find(p => p.id === poolId && p.applicationId === app.id) : undefined;
     return { srv, http, pool, verdict: envVerdict(http, pool, srv), stats: avail?.environments.find(x => x.environment === e) };
   };
   const prd = env('PRD');
   const dr = env('DR');
-  const answer = prd.verdict.status === 'HEALTHY' && dr.verdict.status === 'HEALTHY' ? 'Yes — Production and DR are up'
-    : prd.verdict.status === 'CRITICAL' ? 'No — Production is DOWN'
-      : dr.verdict.status === 'CRITICAL' ? 'Production is up · DR is DOWN'
-        : prd.verdict.status === 'UNKNOWN' || dr.verdict.status === 'UNKNOWN' ? 'Not enough live data to say'
-          : 'Degraded';
+  const hasDr = drConfigured(app);
+  const answer = prd.verdict.status === 'CRITICAL' ? 'No — Production is DOWN'
+    : !hasDr
+      ? (prd.verdict.status === 'HEALTHY' ? 'Yes — Production is up' : prd.verdict.status === 'UNKNOWN' ? 'Not enough live data to say' : 'Degraded')
+      : prd.verdict.status === 'HEALTHY' && dr.verdict.status === 'HEALTHY' ? 'Yes — Production and DR are up'
+        : dr.verdict.status === 'CRITICAL' ? 'Production is up · DR is DOWN'
+          : prd.verdict.status === 'UNKNOWN' || dr.verdict.status === 'UNKNOWN' ? 'Not enough live data to say'
+            : 'Degraded';
 
   const card = (label: string, e: ReturnType<typeof env>) => {
     const { srv, http, pool, verdict, stats } = e;
@@ -160,16 +165,16 @@ const AppPanel: React.FC<{ app: Application }> = ({ app }) => {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 className="text-xs font-bold font-mono uppercase tracking-wider">{app.name} application — live</h2>
-          <p className={`text-[11px] font-mono ${muted}`}>{app.loadBalancer!.hostname} · Cloudflare Load Balancer · {app.prdUrl ?? ''}</p>
+          <p className={`text-[11px] font-mono ${muted}`}>{ROUTING_METHOD_LABELS[effectiveRoutingMethod(app)]}{app.loadBalancer ? ` · ${app.loadBalancer.hostname}` : ''}{app.prdUrl ? ` · ${app.prdUrl}` : ''}</p>
         </div>
         <div className="text-right">
           <div className={`text-[10px] font-mono ${muted}`}>Is {app.name} healthy right now?</div>
-          <div className={`text-sm font-bold font-mono ${prd.verdict.status === 'HEALTHY' && dr.verdict.status === 'HEALTHY' ? 'text-emerald-500' : prd.verdict.status === 'CRITICAL' ? 'text-rose-500' : 'text-amber-500'}`}>{answer}</div>
+          <div className={`text-sm font-bold font-mono ${prd.verdict.status === 'HEALTHY' && (!hasDr || dr.verdict.status === 'HEALTHY') ? 'text-emerald-500' : prd.verdict.status === 'CRITICAL' ? 'text-rose-500' : 'text-amber-500'}`}>{answer}</div>
         </div>
       </div>
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 [&>*]:min-w-0">
+      <div className={`grid grid-cols-1 ${hasDr ? 'xl:grid-cols-2' : ''} gap-3 [&>*]:min-w-0`}>
         {card('Production / Primary', prd)}
-        {card('Disaster Recovery / Standby', dr)}
+        {hasDr && card('Disaster Recovery / Standby', dr)}
       </div>
       <div className="flex flex-wrap gap-3 text-[11px] font-mono">
         <button onClick={() => navigate('/resilience')} className="text-blue-400 hover:underline cursor-pointer">PRD / DR Readiness & failover pre-flight →</button>

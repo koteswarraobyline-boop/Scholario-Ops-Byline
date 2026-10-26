@@ -58,6 +58,7 @@ export function refusedInstallScript(reason: string): string {
 
 export interface AgentInstallPayload {
   installCommand: string;
+  updateCommand: string;
   uninstallCommand: string;
   ingestUrl: string;
   agentVersion: string;
@@ -73,6 +74,7 @@ export function agentInstallInfo(
   if (!base.ok) {
     return {
       installCommand: '',
+      updateCommand: '',
       uninstallCommand: '',
       ingestUrl: '',
       agentVersion: opts.agentVersion,
@@ -83,6 +85,7 @@ export function agentInstallInfo(
   const url = `${base.base}/api/v1/agent/install/${server.id}?key=${server.agentToken}`;
   return {
     installCommand: `curl -fsSL '${url}' | sudo bash`,
+    updateCommand: `curl -fsSL '${base.base}/api/v1/agent/update/${server.id}?key=${server.agentToken}' | sudo bash`,
     uninstallCommand: `curl -fsSL '${base.base}/api/v1/agent/uninstall' | sudo bash`,
     ingestUrl: `${base.base}/api/v1/agent/ingest`,
     agentVersion: opts.agentVersion,

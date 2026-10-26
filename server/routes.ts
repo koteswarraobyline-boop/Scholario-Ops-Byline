@@ -27,11 +27,11 @@ import { httpProbe, tcpProbe, dnsProbe, sslProbe, parseHostPort, normalizeUrl } 
 import { sendToChannel, notifyIncident, notifyTargetPolicy, deliveryRuntime, pendingGroupedAlerts, CHANNEL_FAILING_AFTER, verifySmtp, smtpConfigProblem, smtpEndpoint, smtpServerLabel, teamsTargetProblem } from './notify.ts';
 import { cfState, syncCloudflare, CloudflareError, listCloudflareAccounts, listLoadBalancerPools } from './cloudflare.ts';
 import { HostingerError, hostingerState, syncHostinger } from './hostinger.ts';
-import { ensureLegacyHostingerConnection, createProviderConnection, renameProviderConnection, setProviderSyncEnabled, viewConnection } from './providers/connections.ts';
+import { ensureLegacyHostingerConnection, createProviderConnection, deleteProviderConnection, renameProviderConnection, setProviderSyncEnabled, viewConnection } from './providers/connections.ts';
 import { instancesForApi, syncConnection, testProviderConnection, ProviderSyncError } from './providers/sync.ts';
 import { redactSecrets } from './providers/env.ts';
 import { filterProviderInstances } from '../src/lib/providerInventory.ts';
-import { buildInstaller, buildUninstaller, AGENT_VERSION } from './agent.ts';
+import { buildInstaller, buildUninstaller, buildUpdater, AGENT_VERSION } from './agent.ts';
 import { resolveAgentBaseUrl, agentInstallInfo, refusedInstallScript } from '../src/lib/agentEndpoint.ts';
 import { appChecksFor, LIST_KEYS, NULLABLE_LIST_KEYS, NULLABLE_OBJECT_KEYS } from './telemetry.ts';
 import { agentHealth, serverHealth } from './telemetryHealth.ts';
@@ -45,6 +45,8 @@ import { readChecks } from './history.ts';
 import { backupStatus, databaseHealth, agentState } from './health.ts';
 import { reliabilityInsights } from './insights.ts';
 import { opsBackupHealth } from './opsBackup.ts';
+import { authorizationRedirect, completeLogin, consumeSsoTicket, issueSsoTicket, oidcConfigured, redirectUri } from './oidc.ts';
+import { hostJobAvailability, startHostJob } from './hostJobs.ts';
 import { assertSafeTarget, UnsafeTargetError } from './netguard.ts';
 import { secretsKeyStatus, SecretsKeyMissingError, isSealed, keyFingerprintMismatch } from './secrets.ts';
 import { quietHoursProblem, type QuietHours } from '../src/lib/quietHours.ts';
@@ -52,7 +54,7 @@ import { listDeliveries, getDelivery, getDeliveryForUser, deliveryChain, deliver
 import { workerState } from './leader.ts';
 import { notificationStatus, evaluateResourceAlerts } from './alerts.ts';
 import { buildComponent, buildLink, removeComponent, forgetRegistryReferences, registryImpact, RegistryConflict, kindLabel } from './registry.ts';
-import { applyMeasurement, applyServerTelemetry, buildResource, detachServerResources, MeasurementConflict, presentResource, syncServerPlan, unlinkApplicationResources } from './resources.ts';
+import { applyConnectorReport, applyMeasurement, applyServerTelemetry, buildResource, detachServerResources, MeasurementConflict, presentResource, pullUsageEndpoints, syncServerPlan, unlinkApplicationResources } from './resources.ts';
 import { readResourceMeasurements, recordResourceMeasurement } from './resourceHistory.ts';
 import { log } from './logger.ts';
 
@@ -84,6 +86,23 @@ async function isLinkLocalTarget(rawUrl: string): Promise<boolean> {
 
 const ok = (res: Response, data: unknown, status = 200) => res.status(status).json({ success: true, data });
 const fail = (res: Response, status: number, message: string) => res.status(status).json({ success: false, message });
+const METADATA_REFUSED = 'Link-local / cloud metadata addresses (169.254.0.0/16, fe80::/10) cannot be probed';
+
+/** A CI or agent report is accepted only after PostgreSQL has the row. A 201 is then safe to retry from. */
+async function commitOrFail(res: Response): Promise<boolean> {
+  if (await flush()) return true;
+  const failure = saveFailureClient();
+  fail(res, failure?.status ?? 503, failure?.message ?? 'The report was accepted but is not in the database yet. Send it again once PostgreSQL is reachable.');
+  return false;
+}
+
+async function isMetadataHost(host: string): Promise<boolean> {
+  const bare = host.trim().replace(/^\[|\]$/g, '');
+  if (!bare) return false;
+  const literal = net.isIP(bare) === 6 ? `[${bare}]` : bare;
+  return isLinkLocalTarget(`http://${literal}/`);
+}
+
 const newToken = () => crypto.randomBytes(24).toString('hex');
 const nowIso = () => new Date().toISOString();
 
@@ -581,6 +600,43 @@ export function buildRouter(): Router {
     ok(res, { loggedOut: true });
   }));
 
+  r.get('/auth/oidc/status', (_req, res) => {
+    ok(res, { configured: oidcConfigured() });
+  });
+  r.get('/auth/oidc/start', h(async (_req, res) => {
+    if (!oidcConfigured()) return fail(res, 404, 'SSO is not configured');
+    if (!redirectUri().startsWith('https://') && !config.oidcAllowInsecure) return fail(res, 503, 'Set PUBLIC_URL to the https address of this server before using SSO');
+    res.redirect(await authorizationRedirect());
+  }));
+  r.get('/auth/oidc/callback', h(async (req, res) => {
+    const failTo = (code: string) => res.redirect(`/login?sso_error=${code}`);
+    if (!oidcConfigured()) return failTo('not_configured');
+    const code = String(req.query.code ?? '');
+    const state = String(req.query.state ?? '');
+    if (!code || !state || req.query.error) return failTo('denied');
+    try {
+      const { email } = await completeLogin(code, state);
+      const user = db.users.find(u => u.email === email && u.isActive);
+      if (!user) {
+        audit(email, 'SSO_DENIED', 'AUTH', '', 'SSO email has no active account');
+        return failTo('no_account');
+      }
+      user.lastLoginAt = nowIso();
+      const ticket = issueSsoTicket(user.id);
+      audit(user.displayName || user.email, 'LOGIN', 'AUTH', user.id, 'Signed in with SSO');
+      res.redirect(`/login?sso=${ticket}`);
+    } catch (err) {
+      log.warn('auth', `SSO sign-in failed: ${(err as Error).message}`);
+      failTo('denied');
+    }
+  }));
+  r.post('/auth/oidc/exchange', h((req, res) => {
+    const userId = consumeSsoTicket(String(body(req).ticket ?? ''));
+    const user = userId ? db.users.find(u => u.id === userId && u.isActive) : undefined;
+    if (!user) return fail(res, 401, 'The sign-in link expired. Start again.');
+    ok(res, { user: safeUser(user), tokens: issueTokens(user) });
+  }));
+
   // ── Public (token-authenticated): agent, heartbeats, CI reports ────────────
   const agentServer = (req: Request): ServerRecord | undefined => {
     const header = req.headers.authorization;
@@ -648,6 +704,15 @@ export function buildRouter(): Router {
     res.type('text/plain').send(buildInstaller({ serverUrl: base.base, agentToken: srv.agentToken, hostname: srv.hostname, services }));
   }));
 
+  r.get('/v1/agent/update/:serverId', h((req, res) => {
+    const srv = db.servers.find(s => s.id === req.params.serverId);
+    const key = String(req.query.key ?? '');
+    if (!srv || !safeEqual(key, srv.agentToken)) {
+      return res.status(404).type('text/plain').send('echo "Unknown server or invalid key" >&2; exit 1\n');
+    }
+    res.type('text/plain').send(buildUpdater({ hostname: srv.hostname }));
+  }));
+
   r.get('/v1/agent/uninstall', (_req, res) => { res.type('text/plain').send(buildUninstaller()); });
 
   const heartbeat = h((req, res) => {
@@ -668,7 +733,7 @@ export function buildRouter(): Router {
   r.get('/v1/heartbeat/:token', heartbeat);
   r.post('/v1/heartbeat/:token', heartbeat);
 
-  r.post('/v1/deployments/report', h((req, res) => {
+  r.post('/v1/deployments/report', h(async (req, res) => {
     const header = req.headers.authorization ?? '';
     const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
     if (!config.deployReportToken || !safeEqual(token, config.deployReportToken)) {
@@ -699,13 +764,14 @@ export function buildRouter(): Router {
     if (existing) Object.assign(existing, dep); else db.deployments.unshift(dep);
     if (db.deployments.length > 1000) db.deployments.length = 1000;
     persist();
+    if (!(await commitOrFail(res))) return;
     audit(dep.author, `DEPLOYMENT_${status}`, 'DEPLOYMENT', dep.id, `${app.name} ${dep.version} → ${dep.environment}: ${status}`);
     broadcast('deployments_changed', null);
     recomputeDerived();
     ok(res, dep, existing ? 200 : 201);
   }));
 
-  r.post('/v1/backups/report', h((req, res) => {
+  r.post('/v1/backups/report', h(async (req, res) => {
     const srv = agentServer(req);
     if (!srv) return fail(res, 401, 'Invalid agent token');
     const b = body(req);
@@ -732,6 +798,7 @@ export function buildRouter(): Router {
     db.backups.unshift(rec);
     if (db.backups.length > 2000) db.backups.length = 2000;
     persist();
+    if (!(await commitOrFail(res))) return;
     audit(`Agent ${srv.hostname}`, `BACKUP_${rec.status}`, 'BACKUP', rec.id, `${rec.type} ${rec.sizeGb}GB → ${rec.destination || 'unknown destination'}`);
     broadcast('backups_changed', null);
     ok(res, rec, 201);
@@ -754,6 +821,8 @@ export function buildRouter(): Router {
         drHealth: optStr(b, 'drHealth', 'drHealth', 20) ?? null,
         detail: optStr(b, 'detail', 'detail', 500) ?? '',
         observedAt: optStr(b, 'observedAt', 'observedAt', 40),
+        requests: b.requests === undefined || b.requests === null || b.requests === '' ? null : optInt(b, 'requests', 'requests', 0, 1_000_000_000),
+        errors: b.errors === undefined || b.errors === null || b.errors === '' ? null : optInt(b, 'errors', 'errors', 0, 1_000_000_000),
       });
       audit('Worker', `WORKER_${event.kind.toUpperCase()}`, 'CLOUDFLARE', app.id, `${app.name}: ${event.detail || event.origin || event.kind}`);
       ok(res, { accepted: true, id: event.id });
@@ -923,6 +992,15 @@ export function buildRouter(): Router {
     evaluateResourceAlerts();
     if (!result.idempotent) recordResourceMeasurement(row);
     ok(res, { ...presentResource(row), idempotent: result.idempotent });
+  }));
+  r.post('/v1/resources/connectors', requireRole('operator'), h(async (req, res) => {
+    const report = body(req).endpoints !== undefined ? await pullUsageEndpoints(req.body) : req.body;
+    const rows = applyConnectorReport(report);
+    persist();
+    evaluateResourceAlerts();
+    for (const row of rows) recordResourceMeasurement(row);
+    audit(operatorName(req), 'RESOURCE_MEASURED', 'CAPACITY', rows[0]?.id ?? 'connectors', rows.map(r => `${r.kind} ${r.name}: ${r.usage} ${r.unit}`).join('; '));
+    ok(res, rows.map(r => presentResource(r)));
   }));
   r.post('/v1/resources/evaluate', requireRole('operator'), h((_req, res) => {
     evaluateResourceAlerts();
@@ -1235,7 +1313,7 @@ export function buildRouter(): Router {
     const url = reqStr(b, 'url', 'URL', 2000);
     const method = oneOf(b, 'method', 'Method', ['GET', 'HEAD', 'POST', 'PUT'] as const, 'GET');
     const timeoutSec = optInt(b, 'timeoutSec', 'Timeout', 1, 60) ?? 10;
-    if (await isLinkLocalTarget(url)) return fail(res, 400, 'Link-local / cloud metadata addresses (169.254.0.0/16, fe80::/10) cannot be probed');
+    if (await isLinkLocalTarget(url)) return fail(res, 400, METADATA_REFUSED);
     const result = await httpProbe(url, { timeoutMs: timeoutSec * 1000, method, body: optStr(b, 'body', 'Body', 100_000) });
     const { body: respBody, ...rest } = result;
     const expectedStatus = optInt(b, 'expectedStatus', 'Expected status', 100, 599);
@@ -1251,13 +1329,21 @@ export function buildRouter(): Router {
     if (!net.isIP(host) && !isHostname(host)) return fail(res, 400, 'Host must be an IP address or hostname');
     const port = optInt(b, 'port', 'Port', 1, 65535);
     if (!port) return fail(res, 400, 'Port is required');
+    if (await isMetadataHost(host)) return fail(res, 400, METADATA_REFUSED);
     ok(res, await tcpProbe(host, port, (optInt(b, 'timeoutSec', 'Timeout', 1, 30) ?? 5) * 1000));
   }));
   r.post('/v1/tools/dns', requireRole('operator'), h(async (req, res) => {
-    ok(res, await dnsProbe(reqStr(body(req), 'host', 'Host', 253), 5000));
+    const host = reqStr(body(req), 'host', 'Host', 253);
+    if (!net.isIP(host) && !isHostname(host)) return fail(res, 400, 'Host must be an IP address or hostname');
+    if (await isMetadataHost(host)) return fail(res, 400, METADATA_REFUSED);
+    ok(res, await dnsProbe(host, 5000));
   }));
   r.post('/v1/tools/ssl', requireRole('operator'), h(async (req, res) => {
-    ok(res, await sslProbe(reqStr(body(req), 'host', 'Host', 260), 8000));
+    const target = reqStr(body(req), 'host', 'Host', 260);
+    const hp = parseHostPort(target, 443);
+    if (!hp || (!net.isIP(hp.host) && !isHostname(hp.host))) return fail(res, 400, 'Host must be a hostname or host:port');
+    if (await isMetadataHost(hp.host)) return fail(res, 400, METADATA_REFUSED);
+    ok(res, await sslProbe(target, 8000));
   }));
 
   // Development-only: simulated HTTP 503 through the real incident and email pipeline.
@@ -1375,7 +1461,7 @@ export function buildRouter(): Router {
     const user = req.user!;
     const note = { id: crypto.randomUUID(), author: operatorName(req), role: user.roleName, timestamp: nowIso(), content };
     inc.notes.push(note);
-    inc.timeline.push(event(note.author, 'INFO', `Note added: ${content.slice(0, 80)}${content.length > 80 ? '…' : ''}`));
+    inc.timeline.push(event(note.author, 'INFO', `Note added: ${content}`));
     saveIncident(inc);
     ok(res, inc);
   }));
@@ -1703,6 +1789,34 @@ export function buildRouter(): Router {
     broadcast('maintenance_update', w);
     ok(res, w, 201);
   }));
+  r.patch('/v1/maintenance/:id', requireRole('operator'), h((req, res) => {
+    const w = db.maintenanceWindows.find(x => x.id === req.params.id);
+    if (!w) return fail(res, 404, 'Maintenance window not found');
+    if (w.status === 'COMPLETED') return fail(res, 400, 'A completed window cannot be edited. Schedule a new one.');
+    const b = body(req);
+    const startTime = b.startTime !== undefined ? optDate(b, 'startTime', 'Start time') : w.startTime;
+    const endTime = b.endTime !== undefined ? optDate(b, 'endTime', 'End time') : w.endTime;
+    if (!startTime || !endTime) return fail(res, 400, 'Start and end time are required');
+    if (Date.parse(endTime) <= Date.parse(startTime)) return fail(res, 400, 'End time must be after start time');
+    const applicationId = b.applicationId !== undefined ? (optStr(b, 'applicationId', 'Application', 64) ?? '') : w.applicationId;
+    if (applicationId && !db.applications.some(a => a.id === applicationId)) return fail(res, 400, 'Application does not exist');
+    const suppress = b.suppressMonitors !== undefined ? (strArray(b, 'suppressMonitors', 'Monitors') ?? []) : w.suppressMonitors;
+    if (suppress.some(id => !db.monitors.some(m => m.id === id))) return fail(res, 400, 'Unknown monitor in suppression list');
+    if (!applicationId && suppress.length === 0) return fail(res, 400, 'Choose an application or specific monitors to suppress');
+    w.title = b.title !== undefined ? reqStr(b, 'title', 'Title', 200) : w.title;
+    w.applicationId = applicationId;
+    w.environment = b.environment !== undefined ? oneOf(b, 'environment', 'Environment', ENVS, w.environment) : w.environment;
+    w.startTime = startTime;
+    w.endTime = endTime;
+    w.expectedImpact = b.expectedImpact !== undefined ? (optStr(b, 'expectedImpact', 'Expected impact', 1000) ?? '') : w.expectedImpact;
+    w.reason = b.reason !== undefined ? (optStr(b, 'reason', 'Reason', 1000) ?? '') : w.reason;
+    w.suppressMonitors = suppress;
+    w.status = Date.now() < Date.parse(startTime) ? 'SCHEDULED' : Date.now() < Date.parse(endTime) ? 'IN_PROGRESS' : 'EXPIRED';
+    persist();
+    audit(operatorName(req), 'MAINTENANCE_UPDATED', 'MAINTENANCE', w.id, `${w.title} ${w.startTime} → ${w.endTime}`);
+    broadcast('maintenance_update', w);
+    ok(res, w);
+  }));
   r.post('/v1/maintenance/:id/complete', requireRole('operator'), (req, res) => {
     const w = db.maintenanceWindows.find(x => x.id === req.params.id);
     if (!w) return fail(res, 404, 'Maintenance window not found');
@@ -1795,7 +1909,7 @@ export function buildRouter(): Router {
   });
 
   // ── Dependency register ────────────────────────────────────────────────────
-  const registryChanged = () => { persist(); broadcast('registry_changed', null); };
+  const registryChanged = () => { persist(); recomputeDerived(); broadcast('registry_changed', null); };
   r.get('/v1/registry', (_req, res) => { ok(res, { components: db.registry, links: db.dependencyLinks }); });
   r.get('/v1/registry/:id/impact', (req, res) => {
     const impact = registryImpact(req.params.id);
@@ -1863,6 +1977,14 @@ export function buildRouter(): Router {
   r.get('/v1/backups/status', (_req, res) => { ok(res, db.applications.map(a => backupStatus(a))); });
   // Scholario Ops' own database backup + restore test (status files written by deploy/backup-db.sh / verify-backup.sh)
   r.get('/v1/ops-backup', (_req, res) => { ok(res, opsBackupHealth()); });
+  r.post('/v1/ops-backup/run', requireRole('it_administrator'), h((req, res) => {
+    const action = String(body(req).action ?? '');
+    const check = hostJobAvailability(action);
+    if (!check.ok) return fail(res, check.status, check.message);
+    startHostJob(action as 'backup' | 'restore-test');
+    audit(operatorName(req), action === 'backup' ? 'OPS_BACKUP_STARTED' : 'OPS_RESTORE_TEST_STARTED', 'BACKUP', action, action === 'backup' ? 'Host backup script started' : 'Restore test started against the scratch database');
+    ok(res, { started: true, action }, 202);
+  }));
   // `data` keeps its original shape (a list); `summary` is an additive sibling
   r.get('/v1/health/databases', (_req, res) => {
     const rows = db.applications.flatMap(a => (['PRD', 'DR'] as const).map(env => {
@@ -2018,6 +2140,13 @@ export function buildRouter(): Router {
     const updated = db.providerConnections.find(c => c.id === row.id)!;
     audit(operatorName(req), 'PROVIDER_CONNECTION_UPDATED', 'INFRASTRUCTURE', updated.id, `${updated.name} · sync ${updated.syncEnabled ? 'enabled' : 'disabled'} · ${updated.tokenEnv}`);
     ok(res, viewConnection(updated));
+  }));
+  r.delete('/v1/providers/connections/:id', requireRole('it_administrator'), h((req, res) => {
+    const row = connectionOr404(res, req.params.id);
+    if (!row) return;
+    const removed = deleteProviderConnection(row.id);
+    audit(operatorName(req), 'PROVIDER_CONNECTION_DELETED', 'INFRASTRUCTURE', removed.id, `${removed.name} · ${removed.tokenEnv}`);
+    ok(res, { deleted: true });
   }));
   r.post('/v1/providers/connections/:id/test', requireRole('operator'), h(async (req, res) => {
     const row = connectionOr404(res, req.params.id);

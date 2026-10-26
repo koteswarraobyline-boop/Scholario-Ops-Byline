@@ -343,6 +343,8 @@ const AgentPanel: React.FC<{ server: VpsServer; onClose: () => void }> = ({ serv
                 service states (nginx, mysql, …) and warning/error logs every 10 seconds. Check it with <code className={st.code}>journalctl -u scholario-agent -f</code>.
               </p>
               <p className={`text-[11px] ${st.muted}`}>2. Status here switches to <b className="text-emerald-500">CONNECTED</b> within ~15 seconds. Current: <b className={statusColor(server.agentStatus)}>{server.agentStatus}</b> (last report {timeAgo(server.lastSeen)}).</p>
+              <p className={`text-[11px] ${st.muted}`}>To replace an agent that is already installed, run this instead. It keeps the token and config, and restores the previous script if version {info.agentVersion} does not report within 40 seconds.</p>
+              <CopyBox value={info.updateCommand} />
               <details className={`text-[11px] ${st.muted}`}>
                 <summary className="cursor-pointer">Uninstall</summary>
                 <div className="mt-2"><CopyBox value={info.uninstallCommand} /></div>

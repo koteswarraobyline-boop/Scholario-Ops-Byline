@@ -18,6 +18,7 @@ import { TelemetryAreaGraph } from '../visuals/TelemetryAreaGraph';
 import { EmptyState } from '../ui/EmptyState';
 import { IctStatusPanel } from './IctStatusPanel';
 import { dnsPointsAt, originFlows, routeState, servingLabel } from '../ui/routing';
+import { statusCause } from '../../lib/statusCause';
 import { Ago } from '../ui/Freshness';
 import { deadManLabel, lastServerHeartbeat } from '../ui/deadman';
 
@@ -815,6 +816,7 @@ export const OverviewView: React.FC = () => {
                   const prdServer = servers.find(s => s.id === app.prdServerId);
                   const drServer  = servers.find(s => s.id === app.drServerId);
                   const dot = dotFor(app.status);
+                  const cause = statusCause(app.status, app.dependencies);
                   const route = routeState(app, loadBalancer, dnsPointsAt(app, servers, cloudflareZones));
                   const lag       = app.currentReplicationLagSec;
                   const lagWarn   = lag !== null && lag > app.rpoTargetMin * 60;
@@ -836,6 +838,7 @@ export const OverviewView: React.FC = () => {
                             {app.status}
                           </span>
                         </div>
+                        {cause && <div className={`text-[10px] mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{cause}</div>}
                         <div className={`text-[10px] mt-0.5 font-bold ${route === 'DR' ? 'text-amber-400' : route === 'UNKNOWN' ? 'text-slate-400' : isDark ? 'text-slate-500' : 'text-slate-400'}`}>
                           {route === 'UNKNOWN' ? 'ROUTING UNKNOWN' : servingLabel(route).toUpperCase()}
                         </div>

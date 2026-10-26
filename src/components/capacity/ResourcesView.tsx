@@ -6,7 +6,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useOps } from '../../context/OpsContext';
 import { EmptyState } from '../ui/EmptyState';
 
-const KINDS: ResourceKind[] = ['CPU', 'MEMORY', 'SERVER_DISK', 'STORAGE', 'SEATS', 'ACTIVE_USERS', 'DATABASE_SIZE', 'DATABASE_CONNECTIONS', 'API_QUOTA'];
+const KINDS: ResourceKind[] = ['CPU', 'MEMORY', 'SERVER_DISK', 'STORAGE', 'SEATS', 'ACTIVE_USERS', 'DATABASE_SIZE', 'DATABASE_CONNECTIONS', 'API_QUOTA', 'LOAD'];
 const UNITS: Record<ResourceKind, ResourceUnit[]> = {
   CPU: ['cores', 'millicores', 'percent'],
   MEMORY: ['bytes', 'GiB', 'GB'],
@@ -17,6 +17,7 @@ const UNITS: Record<ResourceKind, ResourceUnit[]> = {
   SEATS: ['seats'],
   ACTIVE_USERS: ['users'],
   API_QUOTA: ['requests'],
+  LOAD: ['load'],
 };
 
 const STATE_CLASS: Record<string, string> = {
@@ -110,7 +111,8 @@ export const ResourcesView: React.FC = () => {
         warningValue: draft.warningValue === '' ? null : Number(draft.warningValue),
         criticalValue: draft.criticalValue === '' ? null : Number(draft.criticalValue),
         quotaWindow: draft.kind === 'API_QUOTA' ? draft.quotaWindow : null,
-        thresholdMode: 'percent',
+        thresholdMode: draft.kind === 'LOAD' ? 'absolute' : 'percent',
+        recoveryMargin: draft.kind === 'LOAD' ? 0.2 : undefined,
         source: 'manual',
       });
       setCreating(false);
@@ -193,7 +195,8 @@ export const ResourcesView: React.FC = () => {
           <label className="text-[10px] font-mono">Type
             <select aria-label="Resource type" className={input} value={draft.kind} onChange={e => {
               const next = e.target.value as ResourceKind;
-              setDraft({ ...draft, kind: next, unit: UNITS[next][0] });
+              if (next === 'LOAD') setDraft({ ...draft, kind: next, unit: 'load', capacity: '', warningValue: '1', criticalValue: '2' });
+              else setDraft({ ...draft, kind: next, unit: UNITS[next][0], warningValue: draft.kind === 'LOAD' ? '85' : draft.warningValue, criticalValue: draft.kind === 'LOAD' ? '95' : draft.criticalValue });
             }}>{KINDS.map(k => <option key={k}>{k}</option>)}</select>
           </label>
           <label className="text-[10px] font-mono">Name
@@ -219,11 +222,11 @@ export const ResourcesView: React.FC = () => {
               </select>
             </label>
           )}
-          <label className="text-[10px] font-mono">Warning %
-            <input aria-label="Warning percent" className={input} value={draft.warningValue} onChange={e => setDraft({ ...draft, warningValue: e.target.value })} />
+          <label className="text-[10px] font-mono">{draft.kind === 'LOAD' ? 'Warning (per core)' : 'Warning %'}
+            <input aria-label={draft.kind === 'LOAD' ? 'Warning per core' : 'Warning percent'} className={input} value={draft.warningValue} onChange={e => setDraft({ ...draft, warningValue: e.target.value })} />
           </label>
-          <label className="text-[10px] font-mono">Critical %
-            <input aria-label="Critical percent" className={input} value={draft.criticalValue} onChange={e => setDraft({ ...draft, criticalValue: e.target.value })} />
+          <label className="text-[10px] font-mono">{draft.kind === 'LOAD' ? 'Critical (per core)' : 'Critical %'}
+            <input aria-label={draft.kind === 'LOAD' ? 'Critical per core' : 'Critical percent'} className={input} value={draft.criticalValue} onChange={e => setDraft({ ...draft, criticalValue: e.target.value })} />
           </label>
           <div className="md:col-span-3 flex items-center gap-3">
             <button type="submit" className="px-3 py-1 text-xs font-mono text-white bg-blue-600 rounded cursor-pointer">Save</button>

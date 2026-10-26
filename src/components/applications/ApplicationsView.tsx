@@ -8,6 +8,7 @@ import { X, AlertTriangle, ArrowRight, Plus, Layers, Loader2, Pencil, Trash2 } f
 import { AppEditor } from '../setup/SetupView';
 import { HealthDimensions } from './HealthDimensions';
 import { effectiveRoutingMethod, explainVps, ROUTING_METHOD_LABELS } from '../../lib/trafficHealth';
+import { registerLinks, statusCause } from '../../lib/statusCause';
 import { dnsPointsAt, routeState, servingLabel } from '../ui/routing';
 import { MonitorFormModal } from '../monitors/CreateMonitorModal';
 import { EmptyState } from '../ui/EmptyState';
@@ -487,7 +488,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
               <p className={`text-[11px] font-sans ${muted}`}>
                 Each monitor attached to this application represents a dependency the system actually checks (endpoints, databases, workers, backups).
               </p>
-              {appMonitors.length === 0 ? (
+              {appMonitors.length === 0 && registerLinks(application.dependencies).length === 0 ? (
                 <div className={emptyText}>No monitored dependencies. Add monitors for databases, workers and endpoints.</div>
               ) : (
                 <div className="space-y-2">
@@ -521,6 +522,15 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                           }}
                         />
                       </div>
+                    </div>
+                  ))}
+                  {registerLinks(application.dependencies).map(d => (
+                    <div key={d.id} className={`p-3 rounded border flex items-center justify-between ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                      <div className="min-w-0">
+                        <div className={`font-semibold font-sans truncate ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{d.name}</div>
+                        <div className={`text-[11px] ${muted}`}>Register link with a real check</div>
+                      </div>
+                      <span className={`font-semibold shrink-0 pl-3 ${statusColor(d.status)}`}>{d.status}</span>
                     </div>
                   ))}
                 </div>
@@ -879,9 +889,9 @@ export const ApplicationsView: React.FC = () => {
         <div className="grid grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] gap-3">
           {filteredApps.map(app => {
             const prdServer = servers.find(s => s.id === app.prdServerId);
-            const appMonitorCount = monitors.filter(m => m.applicationId === app.id).length;
             const isHealthy = app.status === 'HEALTHY';
             const isBad = app.status === 'CRITICAL' || app.status === 'WARNING';
+            const cause = statusCause(app.status, app.dependencies);
             const route = routeState(app, loadBalancer, dnsPointsAt(app, servers, cloudflareZones));
             const lag = app.currentReplicationLagSec;
 
@@ -908,8 +918,8 @@ export const ApplicationsView: React.FC = () => {
                   <p className={`text-[11px] mt-1 line-clamp-2 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                     {app.description || app.dnsRecordName || app.codeName}
                   </p>
-                  {!isHealthy && !isBad && (
-                    <p className={`text-[10px] font-mono mt-1 ${statusColor(app.status)}`}>{app.status}{appMonitorCount === 0 ? ' · no monitors' : ''}</p>
+                  {!isHealthy && (
+                    <p className={`text-[10px] font-mono mt-1 ${statusColor(app.status)}`}>{app.status}{cause ? ` · ${cause}` : ''}</p>
                   )}
                 </div>
 

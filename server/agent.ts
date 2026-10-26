@@ -800,6 +800,12 @@ def main():
             with urllib.request.urlopen(req, timeout=10) as resp:
                 body = resp.read(65536)
             last_rtt_ms = round((time.time() - s0) * 1000, 1)
+            try:
+                os.makedirs("/var/lib/scholario-agent", exist_ok=True)
+                with open("/var/lib/scholario-agent/last-ok", "w") as fh:
+                    fh.write(AGENT_VERSION + "\n")
+            except Exception:
+                pass
             # The server lists the local application health checks for this host (port + health path)
             try:
                 checks = (json.loads(body.decode("utf-8", "replace")).get("data") or {}).get("appChecks")
@@ -819,6 +825,73 @@ def main():
 if __name__ == "__main__":
     main()
 `.replace('__VERSION__', AGENT_VERSION);
+
+/**
+ * Replaces the installed agent script and restarts only scholario-agent.
+ * The token and /etc/scholario-agent.conf are left as they are.
+ * If the new process does not record a successful report of this version, the previous script is restored.
+ */
+export function buildUpdater(opts: { hostname: string }): string {
+  const hostname = opts.hostname.replace(/[^\w.\-]/g, '');
+  return `#!/usr/bin/env bash
+# Scholario Ops agent update — ${hostname}
+# Keeps scholario-agent.conf. The previous script is kept as agent.py.bak.
+# A production run requires root and the fixed install paths.
+# SCHOLARIO_AGENT_TEST=1 is set only by the automated test.
+set -euo pipefail
+WAIT_SEC="\${SCHOLARIO_AGENT_UPDATE_WAIT_SEC:-40}"
+case "$WAIT_SEC" in ''|*[!0-9]*) WAIT_SEC=40 ;; esac
+if [ "$WAIT_SEC" -gt 120 ]; then WAIT_SEC=120; fi
+if [ "\${SCHOLARIO_AGENT_TEST:-}" = "1" ]; then
+  ROOT="\${SCHOLARIO_AGENT_ROOT:-}"
+  case "$ROOT" in
+    *..*|*' '*|*'	'*) echo "Invalid test root." >&2; exit 1 ;;
+    /*) ;;
+    *) echo "SCHOLARIO_AGENT_ROOT must be an absolute path." >&2; exit 1 ;;
+  esac
+  CTL="\${SCHOLARIO_AGENT_SYSTEMCTL:-}"
+  case "$CTL" in
+    /*) ;;
+    *) echo "SCHOLARIO_AGENT_SYSTEMCTL must be an absolute path." >&2; exit 1 ;;
+  esac
+  BIN="$ROOT/opt/scholario-agent/agent.py"
+  CONF="$ROOT/etc/scholario-agent.conf"
+  STATE="$ROOT/var/lib/scholario-agent"
+else
+  if [ "$(id -u)" -ne 0 ]; then echo "Run as root (sudo)." >&2; exit 1; fi
+  BIN=/opt/scholario-agent/agent.py
+  CONF=/etc/scholario-agent.conf
+  STATE=/var/lib/scholario-agent
+  CTL=systemctl
+fi
+if [ ! -f "$BIN" ] || [ ! -f "$CONF" ]; then
+  echo "No installed agent. Use the install command from Setup first." >&2
+  exit 1
+fi
+install -d -m 0755 "$(dirname "$BIN")" "$STATE"
+cp -a "$BIN" "$BIN.bak"
+cat > "$BIN" <<'SCHOLARIO_AGENT_EOF'
+${AGENT_PY}SCHOLARIO_AGENT_EOF
+chmod 0755 "$BIN"
+rm -f "$STATE/last-ok"
+restore() {
+  echo "$1" >&2
+  cp -a "$BIN.bak" "$BIN"
+  "$CTL" restart scholario-agent || true
+  exit 1
+}
+"$CTL" restart scholario-agent || restore "Restart failed. Restoring the previous script."
+deadline=$((SECONDS + WAIT_SEC))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  if [ -f "$STATE/last-ok" ] && grep -qx '${AGENT_VERSION}' "$STATE/last-ok"; then
+    echo "Agent ${AGENT_VERSION} reported successfully."
+    exit 0
+  fi
+  sleep 1
+done
+restore "New agent did not report. Restoring the previous script."
+`;
+}
 
 export function buildInstaller(opts: { serverUrl: string; agentToken: string; hostname: string; services: string }) {
   // Values are written into a quoted heredoc, so they must be single-line and shell-safe.

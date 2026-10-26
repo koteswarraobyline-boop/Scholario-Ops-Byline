@@ -334,7 +334,9 @@ export function explainRouting(args: {
   const detail = [
     connection,
     failover ? (known ? `Latest origin-selection event chose ${origin}.` : 'Origin selection is Unknown — no origin-selection event has been received.') : 'This Worker method does not claim automatic PRD/DR failover.',
-    'Request counts and exceptions are Not connected.',
+    snap?.analytics === 'EVENTS'
+      ? `Worker reported ${snap.requests ?? '—'} requests and ${snap.errors ?? '—'} errors.`
+      : 'Request counts and exceptions are Not connected.',
     args.eventsConnected ? 'Worker event ingest is connected.' : 'Worker event ingest is not connected (WORKER_EVENTS_TOKEN is not set).',
   ].join(' ');
   return finish(status, detail, snap?.observedAt ?? latest?.observedAt ?? null, 'cloudflare worker', {

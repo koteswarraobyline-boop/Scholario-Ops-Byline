@@ -158,6 +158,7 @@ export type HistoryPoint = CheckRecord & { samples?: number; okSamples?: number 
 
 export interface AgentInstallInfo {
   installCommand: string;
+  updateCommand: string;
   uninstallCommand: string;
   ingestUrl: string;
   agentVersion: string;
@@ -356,6 +357,7 @@ export const api = {
   // ── Maintenance / runbooks / deployments / backups ──────────────────────────
   getMaintenance: () => unwrap(api.get<ApiResponse<MaintenanceWindow[]>>('/api/v1/maintenance')),
   createMaintenance: (data: Partial<MaintenanceWindow>) => unwrap(api.post<ApiResponse<MaintenanceWindow>>('/api/v1/maintenance', data)),
+  updateMaintenance: (id: string, data: Partial<MaintenanceWindow>) => unwrap(api.patch<ApiResponse<MaintenanceWindow>>(`/api/v1/maintenance/${encodeURIComponent(id)}`, data)),
   completeMaintenance: (id: string) => unwrap(api.post<ApiResponse<MaintenanceWindow>>(`/api/v1/maintenance/${encodeURIComponent(id)}/complete`)),
   deleteMaintenance: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/maintenance/${encodeURIComponent(id)}`)),
   getRunbooks: () => unwrap(api.get<ApiResponse<Runbook[]>>('/api/v1/runbooks')),
@@ -403,6 +405,7 @@ export const api = {
   getProviderConnections: () => unwrap(api.get<ApiResponse<ProviderConnectionView[]>>('/api/v1/providers/connections')),
   createProviderConnection: (body: { name: string; provider: 'hostinger'; tokenEnv: string }) => unwrap(api.post<ApiResponse<ProviderConnectionView>>('/api/v1/providers/connections', body)),
   updateProviderConnection: (id: string, body: { name?: string; syncEnabled?: boolean }) => unwrap(api.patch<ApiResponse<ProviderConnectionView>>(`/api/v1/providers/connections/${encodeURIComponent(id)}`, body)),
+  deleteProviderConnection: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/providers/connections/${encodeURIComponent(id)}`)),
   testProviderConnection: (id: string) => unwrap(api.post<ApiResponse<{ vmCount: number; connection: ProviderConnectionView }>>(`/api/v1/providers/connections/${encodeURIComponent(id)}/test`)),
   syncProviderConnection: (id: string) => unwrap(api.post<ApiResponse<{ connection: ProviderConnectionView; instances: ProviderInstanceView[] }>>(`/api/v1/providers/connections/${encodeURIComponent(id)}/sync`)),
   getProviderInstances: () => api.get<{ success: boolean; data: ProviderInstanceView[]; connections: ProviderConnectionView[] }>('/api/v1/providers/instances'),
@@ -425,6 +428,7 @@ export const api = {
   getDailyReport: () => unwrap(api.get<ApiResponse<{ report: string; generatedAt: string }>>('/api/v1/reports/daily')),
   getInsights: () => unwrap(api.get<ApiResponse<ReliabilityInsights>>('/api/v1/insights')),
   getOpsBackup: () => unwrap(api.get<ApiResponse<OpsBackupHealth>>('/api/v1/ops-backup')),
+  runOpsBackup: (action: 'backup' | 'restore-test') => unwrap(api.post<ApiResponse<{ started: boolean; action: string }>>('/api/v1/ops-backup/run', { action })),
 
   // ── Notification delivery log ───────────────────────────────────────────────
   getNotificationDeliveries: (params: { page?: number; pageSize?: number; channelId?: string; result?: string; kind?: string; incidentId?: string; q?: string; unread?: boolean; sort?: 'newest' | 'oldest' } = {}) => {

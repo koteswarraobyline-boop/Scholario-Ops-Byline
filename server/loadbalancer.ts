@@ -130,7 +130,7 @@ async function zoneIdFor(hostname: string): Promise<string> {
     const res = await cf<Array<{ id: string; name: string }>>(`/zones?name=${encodeURIComponent(candidate)}`);
     if (res.result[0]) { zoneIdCache.set(candidate, res.result[0].id); return res.result[0].id; }
   }
-  throw new CloudflareError(`No Cloudflare zone found for ${hostname}`);
+  throw new CloudflareError(`No Cloudflare zone found for ${hostname}. The token cannot list zones for that name — it needs Zone › Zone › Read, or the zone is in another account`);
 }
 
 /** true = enabled and healthy, false = known down or disabled, null = not enough data to say. */
@@ -288,6 +288,7 @@ export async function syncLoadBalancers(trigger: 'schedule' | 'manual' = 'schedu
 let lastStatus: LoadBalancerState['status'] | null = null;
 
 async function runSync(trigger: 'schedule' | 'manual'): Promise<LoadBalancerState> {
+  zoneIdCache.clear();
   const apps = mappedApps();
   const now = new Date().toISOString();
   lbState.accountId = apps[0]?.loadBalancer?.accountId ?? null;
@@ -382,7 +383,10 @@ async function runSync(trigger: 'schedule' | 'manual'): Promise<LoadBalancerStat
 
     const routing: LbRouting[] = [];
     for (const app of apps) {
-      if (app.loadBalancer!.hostname) routing.push(await readRouting(app, pools, now));
+      if (!app.loadBalancer!.hostname) continue;
+      const route = await readRouting(app, pools, now);
+      routing.push(route);
+      if (route.error) errors.push(`${route.hostname}: ${route.error}`);
     }
 
     // Record which environment Cloudflare is actually serving (only when routing is known)

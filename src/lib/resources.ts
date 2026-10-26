@@ -11,11 +11,11 @@
 import type { ResourceAlertState, ResourceFreshness, ResourceKind, ResourceUnit, ThresholdMode } from '../types/index.ts';
 
 export const RESOURCE_KINDS: ResourceKind[] = [
-  'CPU', 'MEMORY', 'SERVER_DISK', 'STORAGE', 'SEATS', 'ACTIVE_USERS', 'DATABASE_SIZE', 'DATABASE_CONNECTIONS', 'API_QUOTA',
+  'CPU', 'MEMORY', 'SERVER_DISK', 'STORAGE', 'SEATS', 'ACTIVE_USERS', 'DATABASE_SIZE', 'DATABASE_CONNECTIONS', 'API_QUOTA', 'LOAD',
 ];
 
 export const RESOURCE_UNITS: ResourceUnit[] = [
-  'cores', 'millicores', 'percent', 'bytes', 'GiB', 'GB', 'seats', 'users', 'connections', 'requests',
+  'cores', 'millicores', 'percent', 'bytes', 'GiB', 'GB', 'seats', 'users', 'connections', 'requests', 'load',
 ];
 
 /** Global percent defaults. A null entry means "a measurement with no capacity is not a breach". */
@@ -29,6 +29,8 @@ export const RESOURCE_DEFAULTS: Record<ResourceKind, { warning: number; critical
   SEATS: { warning: 90, critical: 100 },
   API_QUOTA: { warning: 80, critical: 100 },
   ACTIVE_USERS: null,
+  /** Absolute load per core is set on the row (warning 1, critical 2). A percent of an unknown limit is not used. */
+  LOAD: null,
 };
 
 const KIND_UNITS: Record<ResourceKind, ResourceUnit[]> = {
@@ -41,6 +43,7 @@ const KIND_UNITS: Record<ResourceKind, ResourceUnit[]> = {
   SEATS: ['seats'],
   ACTIVE_USERS: ['users'],
   API_QUOTA: ['requests'],
+  LOAD: ['load'],
 };
 
 export function unitsFor(kind: ResourceKind): ResourceUnit[] {

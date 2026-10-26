@@ -15,8 +15,8 @@ export const THRESHOLDS = {
   cpuIowaitPercent: { warning: 20, critical: 40 },
   /** % of CPU time taken by the hypervisor (noisy neighbour on a VPS) */
   cpuStealPercent: { warning: 10, critical: 25 },
-  /** 1-minute load average divided by CPU cores */
-  loadPerCore: { warning: 1, critical: 2 },
+  /** 1-minute load average divided by CPU cores. An incident waits for the same sustained window as CPU. */
+  loadPerCore: { warning: 1, critical: 2, sustainedMinutes: 5 },
   /** Memory used % (total − MemAvailable; reclaimable cache is not "used") */
   memoryPercent: { warning: 85, critical: 95, sustainedMinutes: 5 },
   /** Swap used % — only evaluated when swap is configured */

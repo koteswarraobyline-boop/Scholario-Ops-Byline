@@ -162,6 +162,7 @@ test('worker failover origin stays unknown until an event names it', () => {
   const event: WorkerRoutingEvent = {
     id: 'e1', applicationId: app.id, kind: 'failover', origin: 'DR', prdHealth: 'unhealthy', drHealth: 'healthy',
     detail: 'origin selected', observedAt: '2026-10-22T10:00:00.000Z', receivedAt: '2026-10-22T10:00:01.000Z', source: 'worker_event',
+    requests: null, errors: null,
   };
   const seen = explainRouting({ app, servers: [], cloudflareConfigured: false, zones: [], lb: null, worker: null, events: [event], eventsConnected: true });
   assert.equal(seen.currentOrigin, 'DR');

@@ -101,6 +101,7 @@ interface OpsContextType {
 
   // Maintenance & runbooks
   createMaintenance: (data: Partial<MaintenanceWindow>) => Promise<MaintenanceWindow | null>;
+  updateMaintenance: (id: string, data: Partial<MaintenanceWindow>) => Promise<MaintenanceWindow | null>;
   completeMaintenance: (id: string) => Promise<boolean>;
   deleteMaintenance: (id: string) => Promise<boolean>;
   toggleRunbookStep: (runbookId: string, stepId: number) => Promise<void>;
@@ -634,6 +635,11 @@ Fail over anyway? The override is recorded in the audit log.`)) {
     if (w) setMaintenanceWindows(prev => upsert(prev, w));
     return w;
   }, [run]);
+  const updateMaintenance = useCallback(async (id: string, data: Partial<MaintenanceWindow>) => {
+    const w = await run(() => api.updateMaintenance(id, data), 'Maintenance window updated');
+    if (w) setMaintenanceWindows(prev => upsert(prev, w));
+    return w;
+  }, [run]);
   const completeMaintenance = useCallback(async (id: string) => {
     const w = await run(() => api.completeMaintenance(id), 'Maintenance completed');
     if (w) setMaintenanceWindows(prev => upsert(prev, w));
@@ -737,7 +743,7 @@ Fail over anyway? The override is recorded in the audit log.`)) {
         isAddMonitorModalOpen, setIsAddMonitorModalOpen, addMonitorInitialContext, openAddMonitorWithContext,
         createServer, updateServer, deleteServer, createApplication, updateApplication, deleteApplication,
         sendTestNotification, createChannel, updateChannel, deleteChannel, saveEscalationPolicies,
-        createMaintenance, completeMaintenance, deleteMaintenance,
+        createMaintenance, updateMaintenance, completeMaintenance, deleteMaintenance,
         toggleRunbookStep, resetRunbook, createRunbook, updateRunbook, deleteRunbook,
         saveRegistryComponent, deleteRegistryComponent, saveDependencyLink, deleteDependencyLink,
         syncCloudflare, syncHostinger,

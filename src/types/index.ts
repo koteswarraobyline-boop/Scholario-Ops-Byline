@@ -337,6 +337,9 @@ export interface WorkerRoutingEvent {
   observedAt: string;
   receivedAt: string;
   source: 'worker_event';
+  /** Counts posted by the Worker. Null when that event did not include them. */
+  requests: number | null;
+  errors: number | null;
 }
 
 export interface WorkerAppSnapshot {
@@ -346,10 +349,10 @@ export interface WorkerAppSnapshot {
   observedAt: string | null;
   scriptFound: boolean | null;
   lastDeployedAt: string | null;
-  /** Always null until a Workers analytics API is connected. */
-  requests: null;
-  errors: null;
-  analytics: 'NOT_CONNECTED';
+  /** Counts from the latest Worker event that included them. Null means not reported. */
+  requests: number | null;
+  errors: number | null;
+  analytics: 'NOT_CONNECTED' | 'EVENTS';
 }
 
 export interface WorkerMonitorState {
@@ -1184,7 +1187,7 @@ export interface DrReadinessItem {
   group?: 'core' | 'capacity';
 }
 
-export type DrOverall = 'READY' | 'PARTIALLY_READY' | 'NOT_READY' | 'UNKNOWN';
+export type DrOverall = 'READY' | 'DEGRADED' | 'NOT_READY' | 'UNKNOWN';
 
 // ── Cloudflare Load Balancing (read-only) ────────────────────────────────────
 export interface LbOriginHealth {
@@ -1455,12 +1458,12 @@ export type ResourceKind =
   | 'CPU' | 'MEMORY' | 'SERVER_DISK' | 'STORAGE'
   | 'SEATS' | 'ACTIVE_USERS'
   | 'DATABASE_SIZE' | 'DATABASE_CONNECTIONS'
-  | 'API_QUOTA';
+  | 'API_QUOTA' | 'LOAD';
 
 export type ResourceUnit =
   | 'cores' | 'millicores' | 'percent'
   | 'bytes' | 'GiB' | 'GB'
-  | 'seats' | 'users' | 'connections' | 'requests';
+  | 'seats' | 'users' | 'connections' | 'requests' | 'load';
 
 export type ResourceSource = 'manual' | 'config' | 'provider' | 'discovered';
 export type ThresholdMode = 'percent' | 'absolute';
@@ -1500,8 +1503,8 @@ export interface ResourceLimit {
   enabled: boolean;
   alertState: ResourceAlertState;
   alertSince: string | null;
-  /** server-plan rows follow the server plan. agent-db rows follow a database the agent reported. */
-  managedBy: 'server-plan' | 'agent-db' | null;
+  /** server-plan rows follow the server plan. agent-db rows follow a database the agent reported. agent-load follows the load average. */
+  managedBy: 'server-plan' | 'agent-db' | 'agent-load' | null;
   lastMeasurementId: string | null;
   createdAt: string;
   updatedAt: string;

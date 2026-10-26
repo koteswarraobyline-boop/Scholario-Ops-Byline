@@ -96,6 +96,17 @@ export function createProviderConnection(input: { name: string; provider: string
   return row;
 }
 
+/** Removes a connection the operator added. The built-in Hostinger row follows HOSTINGER_API_TOKEN. */
+export function deleteProviderConnection(id: string): ProviderConnectionRecord {
+  const row = db.providerConnections.find(c => c.id === id);
+  if (!row) throw new ValidationError('Connection not found');
+  if (row.legacy) throw new ValidationError('The built-in Hostinger connection is removed by clearing HOSTINGER_API_TOKEN and restarting. It is not deleted here.');
+  db.providerConnections = db.providerConnections.filter(c => c.id !== id);
+  db.providerInstances = db.providerInstances.filter(i => i.connectionId !== id);
+  persist();
+  return row;
+}
+
 export function renameProviderConnection(id: string, name: string): ProviderConnectionRecord {
   const row = db.providerConnections.find(c => c.id === id);
   if (!row) throw new ValidationError('Connection not found');
