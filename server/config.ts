@@ -109,6 +109,12 @@ export const config = {
   jwtSecret: resolveJwtSecret(),
   accessTokenTtlSec: int('ACCESS_TOKEN_TTL_SEC', 8 * 3600, 60),
   refreshTokenTtlSec: int('REFRESH_TOKEN_TTL_SEC', 7 * 24 * 3600, 300),
+  /** Optional OpenID Connect sign-in. All three must be set or SSO stays off. */
+  oidcIssuer: str('OIDC_ISSUER').replace(/\/+$/, ''),
+  oidcClientId: str('OIDC_CLIENT_ID'),
+  oidcClientSecret: str('OIDC_CLIENT_SECRET'),
+  /** Test-only. Production must leave this unset so the issuer has to be https. */
+  oidcAllowInsecure: str('OIDC_ALLOW_INSECURE') === '1',
 
   adminEmail: str('ADMIN_EMAIL').toLowerCase(),
   adminPassword: str('ADMIN_PASSWORD'),

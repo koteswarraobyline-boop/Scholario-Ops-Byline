@@ -4,7 +4,7 @@ import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
 import { Environment, OperationalStatus, VpsServer } from '../../types';
 import { Globe, ShieldCheck, Server, RefreshCw, Network, Loader2, X } from 'lucide-react';
-import { OriginFlow, routeState, visualTraffic } from '../ui/routing';
+import { dnsPointsAt, OriginFlow, routeState, servingLabel, visualTraffic } from '../ui/routing';
 import { effectiveRoutingMethod, ROUTING_METHOD_LABELS } from '../../lib/trafficHealth';
 
 const parseTs = (iso?: string | null): number | null => {
@@ -91,20 +91,19 @@ export const TrafficFlowChart: React.FC = () => {
     );
   }
 
-  const route = routeState(app, loadBalancer);
   const routingMethod = effectiveRoutingMethod(app);
   const dnsSwitch = routingMethod === 'direct_dns' || (routingMethod === 'unknown' && !app.loadBalancer);
-  const isDrActive = route === 'DR';
-  const isFailingOver = route === 'MOVING';
-  const lbRouting = app.loadBalancer ? loadBalancer?.routing.find(r => r.hostname === app.loadBalancer!.hostname) : undefined;
+  const lbHost = routingMethod === 'cloudflare_lb' ? app.loadBalancer?.hostname : undefined;
+  const lbRouting = lbHost ? loadBalancer?.routing.find(r => r.hostname === lbHost) : undefined;
   const lbPoolName = (id: string) => loadBalancer?.pools.find(x => x.id === id)?.name || id;
   const prdServer = servers.find(s => s.id === app.prdServerId);
   const drServer = servers.find(s => s.id === app.drServerId);
   const zone = cloudflareZones.find(z => app.cloudflareZone && (z.domain === app.cloudflareZone || app.cloudflareZone.endsWith(`.${z.domain}`)));
   const dnsRecord = app.dnsRecordName ? zone?.dnsRecords.find(r => r.name === app.dnsRecordName) : undefined;
-  const pointsAt: 'PRD' | 'DR' | 'OTHER' | null = dnsRecord
-    ? dnsRecord.target === prdServer?.ip ? 'PRD' : dnsRecord.target === drServer?.ip ? 'DR' : 'OTHER'
-    : null;
+  const pointsAt = dnsPointsAt(app, servers, cloudflareZones);
+  const route = routeState(app, loadBalancer, pointsAt);
+  const isDrActive = route === 'DR';
+  const isFailingOver = route === 'MOVING';
   const visual = visualTraffic(app, loadBalancer, pointsAt);
   const flowing = visual.kind === 'single' || visual.kind === 'split';
   const split = visual.kind === 'split';
@@ -245,7 +244,7 @@ export const TrafficFlowChart: React.FC = () => {
           >
             {applications.map(a => (
               <option key={a.id} value={a.id}>
-                {a.name} ({a.failoverState === 'DR_ACTIVE' ? 'DR ACTIVE' : a.status})
+                {a.name} ({servingLabel(routeState(a, loadBalancer, dnsPointsAt(a, servers, cloudflareZones)))})
               </option>
             ))}
           </select>
@@ -323,7 +322,7 @@ export const TrafficFlowChart: React.FC = () => {
                 <Globe className="w-4 h-4" />
               </div>
               <span className="font-semibold text-xs font-mono">Clients</span>
-              <span className={`text-[10px] font-mono mt-0.5 break-all ${muted}`}>{app.loadBalancer?.hostname || app.dnsRecordName || 'No DNS record set'}</span>
+              <span className={`text-[10px] font-mono mt-0.5 break-all ${muted}`}>{routingMethod === 'cloudflare_lb' ? (app.loadBalancer?.hostname || 'Load Balancer hostname not set') : dnsSwitch ? (app.dnsRecordName || 'No DNS record set') : 'Route not reported'}</span>
             </div>
 
             <div className="flex-1 px-1.5">
@@ -361,12 +360,12 @@ export const TrafficFlowChart: React.FC = () => {
               </div>
               <span className="font-semibold text-xs font-mono">{ROUTING_METHOD_LABELS[routingMethod]}</span>
               <span className={`text-[10px] font-mono mt-0.5 break-words ${muted}`}>
-                {app.loadBalancer
+                {routingMethod === 'cloudflare_lb' && app.loadBalancer
                   ? (lbRouting?.found ? `order ${lbRouting.defaultPools.map(lbPoolName).join(' → ')}` : lbRouting?.error ? lbRouting.error : `Cloudflare LB: ${(loadBalancer?.status ?? 'PENDING').replace('_', ' ')}`)
-                  : dnsRecord ? `${dnsRecord.type} → ${dnsRecord.target}` : 'Record not synced'}
+                  : dnsSwitch && dnsRecord ? `${dnsRecord.type} → ${dnsRecord.target}` : 'Not reported'}
               </span>
               <span className={`text-[9px] font-mono mt-1 px-1.5 py-0.5 rounded font-semibold ${
-                app.loadBalancer
+                routingMethod === 'cloudflare_lb' && app.loadBalancer
                   ? (visual.kind === 'split' ? 'bg-violet-500/15 text-violet-300'
                     : visual.kind === 'single' && visual.side === 'PRD' ? 'bg-emerald-500/15 text-emerald-400'
                       : visual.kind === 'single' && visual.side === 'DR' ? 'bg-amber-500/20 text-amber-400'
@@ -375,14 +374,14 @@ export const TrafficFlowChart: React.FC = () => {
                     : pointsAt === 'DR' ? 'bg-amber-500/20 text-amber-400'
                       : 'bg-slate-500/15 text-slate-400'
               }`}>
-                {app.loadBalancer
+                {routingMethod === 'cloudflare_lb' && app.loadBalancer
                   ? (visual.kind === 'split'
                     ? (visual.prd != null && visual.dr != null
                       ? `${lbRouting?.steeringPolicy ?? 'split'} · PRD ${visual.prd}% · DR ${visual.dr}%`
                       : `${lbRouting?.steeringPolicy ?? 'dynamic'} · both pools live`)
                     : visual.kind === 'single' ? `Serving ${visual.side} pool` : 'Serving pool unknown')
-                  : pointsAt === 'PRD' ? 'Points at PRD' : pointsAt === 'DR' ? 'Points at DR' : pointsAt === 'OTHER' ? 'Points at unknown IP' : `State: ${app.failoverState.replace('_', ' ')}`}
-                {!app.loadBalancer && dnsRecord ? (dnsRecord.proxied ? ' · proxied' : ' · DNS only') : ''}
+                  : pointsAt === 'PRD' ? 'Points at PRD' : pointsAt === 'DR' ? 'Points at DR' : pointsAt === 'OTHER' ? 'Points at unknown IP' : dnsSwitch ? 'DNS target unknown' : 'Origin unknown'}
+                {dnsSwitch && dnsRecord ? (dnsRecord.proxied ? ' · proxied' : ' · DNS only') : ''}
               </span>
             </div>
 

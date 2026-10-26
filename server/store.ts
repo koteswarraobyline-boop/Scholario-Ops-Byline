@@ -273,10 +273,10 @@ const TABLES: TableDef<unknown>[] = [
   },
   {
     table: 'worker_events', key: ['id'],
-    columns: ['id', 'application_id', 'kind', 'origin', 'prd_health', 'dr_health', 'detail', 'observed_at', 'received_at'],
+    columns: ['id', 'application_id', 'kind', 'origin', 'prd_health', 'dr_health', 'detail', 'observed_at', 'received_at', 'requests', 'errors'],
     rows: d => d.workerEvents.map(e => ({
       k: e.id,
-      values: [e.id, e.applicationId, e.kind, e.origin, e.prdHealth, e.drHealth, e.detail, e.observedAt, e.receivedAt],
+      values: [e.id, e.applicationId, e.kind, e.origin, e.prdHealth, e.drHealth, e.detail, e.observedAt, e.receivedAt, e.requests, e.errors],
     })),
     load: (rows, d) => {
       d.workerEvents = rows.map(r => ({
@@ -290,6 +290,8 @@ const TABLES: TableDef<unknown>[] = [
         observedAt: iso(r.observed_at),
         receivedAt: iso(r.received_at),
         source: 'worker_event' as const,
+        requests: r.requests === null || r.requests === undefined ? null : Number(r.requests),
+        errors: r.errors === null || r.errors === undefined ? null : Number(r.errors),
       })).sort((a, b) => b.observedAt.localeCompare(a.observedAt));
     },
   },

@@ -7,9 +7,10 @@
 import crypto from 'crypto';
 import type { ResourceKind, ResourceLimit, ResourceSource, ResourceUnit, QuotaWindow, ThresholdMode } from '../src/types/index.ts';
 import {
-  convertUnit, evaluateCapacity, infraMonitorType, monitorBand, roundMeasure, thresholdProblem, unitAllowed, unitsFor, type CapacityResult,
+  convertUnit, evaluateCapacity, infraMonitorType, monitorBand, RESOURCE_KINDS, roundMeasure, thresholdProblem, unitAllowed, unitsFor, type CapacityResult,
 } from '../src/lib/resources.ts';
 import { config } from './config.ts';
+import { assertSafeTarget, policyFromEnv, UnsafeTargetError } from './netguard.ts';
 import { db, ServerRecord } from './store.ts';
 import { ValidationError, body, optBool, optStr, reqStr } from './validate.ts';
 
@@ -129,16 +130,13 @@ function blank(partial: {
 export function buildResource(input: unknown, existing?: ResourceLimit): ResourceLimit {
   const b = body({ body: input });
   const kind = (existing ? (optStr(b, 'kind', 'Kind', 40) ?? existing.kind) : reqStr(b, 'kind', 'Kind', 40)) as ResourceKind;
-  if (!unitsFor(kind)) throw new ValidationError('Kind must be one of: ' + ['CPU', 'MEMORY', 'SERVER_DISK', 'STORAGE', 'SEATS', 'ACTIVE_USERS', 'DATABASE_SIZE', 'DATABASE_CONNECTIONS', 'API_QUOTA'].join(', '));
-  if (!['CPU', 'MEMORY', 'SERVER_DISK', 'STORAGE', 'SEATS', 'ACTIVE_USERS', 'DATABASE_SIZE', 'DATABASE_CONNECTIONS', 'API_QUOTA'].includes(kind)) {
-    throw new ValidationError('Kind must be one of: CPU, MEMORY, SERVER_DISK, STORAGE, SEATS, ACTIVE_USERS, DATABASE_SIZE, DATABASE_CONNECTIONS, API_QUOTA');
-  }
+  if (!RESOURCE_KINDS.includes(kind) || !unitsFor(kind)) throw new ValidationError('Kind must be one of: ' + RESOURCE_KINDS.join(', '));
   const name = existing ? (optStr(b, 'name', 'Name', 160) ?? existing.name) : reqStr(b, 'name', 'Name', 160);
   const owner = existing ? (optStr(b, 'owner', 'Owner', 200) ?? existing.owner) : reqStr(b, 'owner', 'Owner', 200);
   const unit = (existing ? (optStr(b, 'unit', 'Unit', 32) ?? existing.unit) : reqStr(b, 'unit', 'Unit', 32)) as ResourceUnit;
   const source = (optStr(b, 'source', 'Source', 20) ?? existing?.source ?? 'manual') as ResourceSource;
   if (!['manual', 'config', 'provider', 'discovered'].includes(source)) throw new ValidationError('Source must be manual, config, provider or discovered');
-  const mode = (optStr(b, 'thresholdMode', 'Threshold mode', 20) ?? existing?.thresholdMode ?? 'percent') as ThresholdMode;
+  const mode = (optStr(b, 'thresholdMode', 'Threshold mode', 20) ?? existing?.thresholdMode ?? (kind === 'LOAD' && !existing ? 'absolute' : 'percent')) as ThresholdMode;
   if (mode !== 'percent' && mode !== 'absolute') throw new ValidationError('Threshold mode must be percent or absolute');
   const windowRaw = b.quotaWindow === undefined ? existing?.quotaWindow ?? null : (b.quotaWindow === null || b.quotaWindow === '' ? null : optStr(b, 'quotaWindow', 'Quota window', 10));
   if (windowRaw && windowRaw !== 'minute' && windowRaw !== 'hour' && windowRaw !== 'day') throw new ValidationError('Quota window must be minute, hour or day');
@@ -164,6 +162,17 @@ export function buildResource(input: unknown, existing?: ResourceLimit): Resourc
   let nextHard = hardLimit ?? null;
   let nextWarn = warningValue ?? null;
   let nextCrit = criticalValue ?? null;
+  let nextMargin = recoveryMargin ?? 2;
+  // Load is judged per core, not as a percent of a purchased size. Warning 1, critical 2.
+  // The default recovery of 2 is wider than a warning of 1, so a new load row uses 0.2.
+  if (!prev && kind === 'LOAD' && mode === 'absolute') {
+    if (b.warningValue === undefined) nextWarn = 1;
+    if (b.criticalValue === undefined) nextCrit = 2;
+    if (b.recoveryMargin === undefined) nextMargin = 0.2;
+  }
+  if (mode === 'absolute' && nextWarn !== null && b.recoveryMargin === undefined && nextMargin >= nextWarn) {
+    nextMargin = Math.round(nextWarn * 0.2 * 1000) / 1000;
+  }
   if (prev && prev.unit !== nextUnit) {
     try {
       if (usage !== null) usage = roundMeasure(convertUnit(usage, prev.unit, nextUnit));
@@ -180,11 +189,11 @@ export function buildResource(input: unknown, existing?: ResourceLimit): Resourc
   const description = b.description === undefined ? prev?.description ?? '' : (optStr(b, 'description', 'Description', 2000) ?? '');
   const enabled = b.enabled === undefined ? prev?.enabled ?? true : (optBool(b, 'enabled') ?? true);
   const row: ResourceLimit = {
-    ...(prev ?? blank({ resourceKey, kind, name, owner, unit: nextUnit, source, capacity: nextCapacity, unlimited, thresholdMode: mode, warningValue: nextWarn, criticalValue: nextCrit, hardLimit: nextHard, recoveryMargin: recoveryMargin ?? 2, quotaWindow: (windowRaw as QuotaWindow | null) ?? null, serverId, applicationId, description, managedBy: null })),
+    ...(prev ?? blank({ resourceKey, kind, name, owner, unit: nextUnit, source, capacity: nextCapacity, unlimited, thresholdMode: mode, warningValue: nextWarn, criticalValue: nextCrit, hardLimit: nextHard, recoveryMargin: nextMargin, quotaWindow: (windowRaw as QuotaWindow | null) ?? null, serverId, applicationId, description, managedBy: null })),
     resourceKey, kind, name, owner, unit: nextUnit, source, description, serverId, applicationId,
     capacity: nextCapacity, unlimited, usage, thresholdMode: mode,
     warningValue: nextWarn, criticalValue: nextCrit, hardLimit: nextHard,
-    recoveryMargin: recoveryMargin ?? 2,
+    recoveryMargin: nextMargin,
     quotaWindow: (windowRaw as QuotaWindow | null) ?? null,
     enabled,
     updatedAt: nowIso(),
@@ -312,8 +321,22 @@ export function applyServerTelemetry(srv: ServerRecord): { changed: boolean; sam
     row.updatedAt = row.lastSyncAt;
     if (usageChanged) sampled.set(row.id, row);
   };
-  const cpu = db.resources.find(r => r.resourceKey === `server:${srv.id}:cpu`);
-  if (cpu && srv.cpuCores > 0 && Number.isFinite(srv.telemetry.cpuPercent)) {
+  const observed = (kind: ResourceKind, suffix: string, label: string, unit: ResourceUnit) => {
+    const resourceKey = `server:${srv.id}:${suffix}`;
+    let row = db.resources.find(r => r.resourceKey === resourceKey);
+    if (!row) {
+      row = blank({
+        resourceKey, kind, name: `${srv.hostname} ${label}`, owner: 'Infrastructure',
+        unit, source: 'discovered', serverId: srv.id, capacity: null,
+        description: 'Measured by the agent. No purchased limit is invented.',
+      });
+      db.resources.push(row);
+      changed = true;
+    }
+    return row;
+  };
+  if (srv.cpuCores > 0 && Number.isFinite(srv.telemetry.cpuPercent)) {
+    const cpu = observed('CPU', 'cpu', 'CPU', 'cores');
     const cores = (srv.telemetry.cpuPercent / 100) * srv.cpuCores;
     try {
       const usage = cpu.unit === 'percent' ? srv.telemetry.cpuPercent : convertUnit(cores, 'cores', cpu.unit);
@@ -325,8 +348,8 @@ export function applyServerTelemetry(srv: ServerRecord): { changed: boolean; sam
       changed = true;
     }
   }
-  const memory = db.resources.find(r => r.resourceKey === `server:${srv.id}:memory`);
-  if (memory && srv.telemetry.memUsedMb != null) {
+  if (srv.telemetry.memUsedMb != null) {
+    const memory = observed('MEMORY', 'memory', 'memory', 'GB');
     try {
       const bytes = srv.telemetry.memUsedMb * 1024 * 1024;
       setUsage(memory, convertUnit(bytes, 'bytes', memory.unit), measuredAt);
@@ -337,14 +360,45 @@ export function applyServerTelemetry(srv: ServerRecord): { changed: boolean; sam
       changed = true;
     }
   }
-  const disk = db.resources.find(r => r.resourceKey === `server:${srv.id}:disk`);
-  if (disk && srv.telemetry.diskUsedGb != null) {
+  if (srv.telemetry.diskUsedGb != null) {
+    const disk = observed('SERVER_DISK', 'disk', 'disk', 'GB');
     try {
       setUsage(disk, convertUnit(srv.telemetry.diskUsedGb, 'GB', disk.unit), measuredAt);
       changed = true;
     } catch (err) {
       disk.syncError = (err as Error).message;
       disk.updatedAt = nowIso();
+      changed = true;
+    }
+  }
+  if (srv.cpuCores > 0 && Number.isFinite(srv.telemetry.loadAvg?.[0])) {
+    const perCore = srv.telemetry.loadAvg[0] / srv.cpuCores;
+    const resourceKey = `server:${srv.id}:load`;
+    changed = upsertManaged(
+      r => r.resourceKey === resourceKey,
+      () => {
+        const row = blank({
+          resourceKey, kind: 'LOAD', name: `${srv.hostname} load`, owner: 'Infrastructure',
+          unit: 'load', source: 'discovered', serverId: srv.id, managedBy: 'agent-load',
+          thresholdMode: 'absolute', warningValue: 1, criticalValue: 2, recoveryMargin: 0.2,
+          description: '1-minute load average per CPU core, from the agent. Warning at 1, critical at 2. No capacity is invented.',
+        });
+        setUsage(row, perCore, measuredAt);
+        return row;
+      },
+      row => {
+        row.thresholdMode = 'absolute';
+        row.warningValue = row.warningValue ?? 1;
+        row.criticalValue = row.criticalValue ?? 2;
+        setUsage(row, perCore, measuredAt);
+      },
+    ) || changed;
+  } else if (Number.isFinite(srv.telemetry.loadAvg?.[0])) {
+    const existing = db.resources.find(r => r.resourceKey === `server:${srv.id}:load`);
+    if (existing) {
+      existing.syncError = 'Core count was not reported, so load per core was not updated.';
+      existing.measuredAt = null;
+      existing.updatedAt = nowIso();
       changed = true;
     }
   }
@@ -394,6 +448,150 @@ export function applyServerTelemetry(srv: ServerRecord): { changed: boolean; sam
     }
   }
   return { changed, sampled: [...sampled.values()] };
+}
+
+function connectorRecord(v: unknown, label: string): Obj {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new ValidationError(`${label} must be an object`);
+  return v as Obj;
+}
+
+function connectorNumber(v: unknown, label: string): number {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n) || n < 0 || n > 1e15) throw new ValidationError(`${label} must be a number from 0 to 1e15`);
+  return n;
+}
+
+function connectorCapacity(v: unknown, label: string): number | null {
+  if (v === undefined || v === null || v === '') return null;
+  const n = connectorNumber(v, label);
+  if (n <= 0) throw new ValidationError(`${label} must be greater than zero. Leave it empty when it is unknown.`);
+  return n;
+}
+
+function connectorSlug(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'sample';
+}
+
+/**
+ * Writes usage reported by a storage, seat, user, or API-quota endpoint.
+ * A user count is stored as ACTIVE_USERS and is never written onto a seat limit.
+ */
+export function applyConnectorReport(input: unknown): ResourceLimit[] {
+  const b = body({ body: input });
+  if (b.storage === undefined && b.seats === undefined && b.users === undefined && b.apiQuota === undefined) {
+    throw new ValidationError('Send storage, seats, users, or apiQuota from the endpoint');
+  }
+  const touched: ResourceLimit[] = [];
+  const write = (
+    resourceKey: string,
+    usage: number,
+    capacity: number | null,
+    create: () => ResourceLimit,
+  ) => {
+    let row = db.resources.find(r => r.resourceKey === resourceKey);
+    if (!row) {
+      row = create();
+      db.resources.push(row);
+    } else if (row.managedBy === 'server-plan' || row.managedBy === 'agent-db' || row.managedBy === 'agent-load') {
+      throw new ValidationError(`${row.name} is filled by the agent or the server plan`);
+    }
+    row.usage = roundMeasure(usage);
+    if (capacity !== null) { row.capacity = capacity; row.unlimited = false; }
+    row.measuredAt = nowIso();
+    row.lastSyncAt = row.measuredAt;
+    row.updatedAt = row.measuredAt;
+    row.syncError = '';
+    row.source = 'discovered';
+    checkRecord(row);
+    touched.push(row);
+  };
+
+  if (b.storage !== undefined) {
+    const s = connectorRecord(b.storage, 'Storage');
+    const name = reqStr(s, 'name', 'Storage name', 160);
+    const owner = reqStr(s, 'owner', 'Storage owner', 200);
+    const key = `connector:storage:${connectorSlug(name)}`;
+    const capacity = connectorCapacity(s.capacityGb, 'Storage capacity');
+    write(key, connectorNumber(s.usedGb, 'Storage used'), capacity, () => blank({
+      resourceKey: key, kind: 'STORAGE', name, owner, unit: 'GB', source: 'discovered', capacity,
+      description: 'Storage use reported by the storage connector.',
+    }));
+  }
+  if (b.seats !== undefined) {
+    const s = connectorRecord(b.seats, 'Seats');
+    const name = reqStr(s, 'name', 'Seat name', 160);
+    const owner = reqStr(s, 'owner', 'Seat owner', 200);
+    const key = `connector:seats:${connectorSlug(name)}`;
+    const capacity = connectorCapacity(s.capacity, 'Seat capacity');
+    write(key, connectorNumber(s.used, 'Seats used'), capacity, () => blank({
+      resourceKey: key, kind: 'SEATS', name, owner, unit: 'seats', source: 'discovered', capacity,
+      description: 'Seat count reported by the seat connector. A user headcount is a different record.',
+    }));
+  }
+  if (b.users !== undefined) {
+    const s = connectorRecord(b.users, 'Users');
+    const name = reqStr(s, 'name', 'User count name', 160);
+    const owner = reqStr(s, 'owner', 'User count owner', 200);
+    const key = `connector:users:${connectorSlug(name)}`;
+    write(key, connectorNumber(s.count, 'User count'), null, () => blank({
+      resourceKey: key, kind: 'ACTIVE_USERS', name, owner, unit: 'users', source: 'discovered', capacity: null,
+      description: 'Active users reported by the user connector. This is not a seat limit.',
+    }));
+  }
+  if (b.apiQuota !== undefined) {
+    const s = connectorRecord(b.apiQuota, 'API quota');
+    const name = reqStr(s, 'name', 'API name', 160);
+    const owner = reqStr(s, 'owner', 'API owner', 200);
+    const window = reqStr(s, 'window', 'API window', 10);
+    if (window !== 'minute' && window !== 'hour' && window !== 'day') throw new ValidationError('API window must be minute, hour or day');
+    const key = `connector:api:${connectorSlug(name)}`;
+    const existing = db.resources.find(r => r.resourceKey === key);
+    if (existing && existing.quotaWindow !== window) throw new ValidationError(`This quota is ${existing.quotaWindow}. Send usage already counted for that window.`);
+    const capacity = connectorCapacity(s.limit, 'API limit');
+    write(key, connectorNumber(s.requests, 'API requests'), capacity, () => blank({
+      resourceKey: key, kind: 'API_QUOTA', name, owner, unit: 'requests', source: 'discovered', capacity, quotaWindow: window,
+      description: 'API usage reported by the quota endpoint. The count is already for this window.',
+    }));
+  }
+  return touched;
+}
+
+/** Reads storage, seat, user, and API-quota endpoints and returns the report those endpoints sent. */
+export async function pullUsageEndpoints(input: unknown): Promise<Record<string, unknown>> {
+  const b = body({ body: input });
+  const endpoints = connectorRecord(b.endpoints, 'Endpoints');
+  const out: Record<string, unknown> = {};
+  const keys = ['storage', 'seats', 'users', 'apiQuota'] as const;
+  const labels = { storage: 'Storage', seats: 'Seats', users: 'Users', apiQuota: 'API quota' };
+  let any = false;
+  for (const key of keys) {
+    if (endpoints[key] === undefined || endpoints[key] === null || endpoints[key] === '') continue;
+    any = true;
+    const url = reqStr(endpoints, key, `${labels[key]} endpoint`, 2000);
+    try {
+      await assertSafeTarget(url, policyFromEnv(config.notifyAllowedPrivateTargets));
+    } catch (err) {
+      if (err instanceof UnsafeTargetError) throw new ValidationError(err.message);
+      throw err;
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 4000);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal, redirect: 'manual' });
+      if (res.status >= 300 && res.status < 400) throw new ValidationError(`${labels[key]} endpoint redirected. Send the final URL.`);
+      if (!res.ok) throw new ValidationError(`${labels[key]} endpoint returned HTTP ${res.status}`);
+      const json = await res.json() as unknown;
+      if (!json || typeof json !== 'object' || Array.isArray(json)) throw new ValidationError(`${labels[key]} endpoint did not return an object`);
+      out[key] = json;
+    } catch (err) {
+      if (err instanceof ValidationError) throw err;
+      throw new ValidationError(`${labels[key]} endpoint could not be read`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (!any) throw new ValidationError('Give a storage, seats, users, or apiQuota endpoint');
+  return out;
 }
 
 export function detachServerResources(serverId: string): string[] {

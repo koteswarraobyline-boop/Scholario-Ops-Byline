@@ -6,6 +6,17 @@ This document records what the code does. It does not change application behavio
 
 **Facts** are what the files and previous test runs show. **Recommendations** are separate and are not implemented.
 
+## Status after this audit (26 October 2026)
+
+The sections below are the 17 October record. This has landed since then:
+
+- The agent update script is `buildUpdater` in `server/agent.ts`. It keeps the installed config and restores `agent.py.bak` when the new process does not report. The loose `agent-3.3.1.py` file has been removed. Setup is the only copy.
+- Cloudflare sync is an error when the token cannot list zones, including when the account load-balancer list is empty.
+- CI posts the deployment after a success, a rollback, or a failure. Missing `OPS_REPORT_URL`, `OPS_DEPLOY_REPORT_TOKEN`, or `OPS_APPLICATION_CODE` fails that step.
+- A HARD dependency with a real check changes application status. A Hostinger connection can be deleted.
+- DR overall is READY, DEGRADED, NOT READY, or UNKNOWN. Core checks are PASS, FAIL, WARNING, or UNKNOWN. The UI no longer treats `PARTIALLY_READY` as a current overall.
+- Load is a capacity type (warning 1 per core, critical 2). An incident waits for 5 sustained minutes. A missing core count stays unknown and does not count as a healthy load.
+
 ---
 
 ## 1. Executive summary
@@ -195,7 +206,7 @@ Migrations `001`–`009`. Important tables:
 | Deployments and backups | Reports pushed in by a script or CI token. Empty until something reports. |
 | Mock incident | `server/mockIncident.ts`. Disabled monitor, fake HTTP 503, only when not production. It must not be treated as a customer outage. |
 | `IctStatusPanel` | Not hard-coded IPs. It looks at the application’s PRD and DR. The README’s ICT addresses are documentation of what was stored, not values compiled into the UI. |
-| `agent-3.3.1.py` | An untracked copy of the agent. The server generates the script from `server/agent.ts`. |
+| Agent script | Generated from `server/agent.ts` by Setup. The separate `agent-3.3.1.py` copy was removed on 26 October 2026. |
 
 `README.md` says “All data is real.” That is true for the dashboard’s live objects. It is not true for the dependency graph (manual) or for backup restore (a reported status, not a restore this app performs).
 
@@ -292,15 +303,15 @@ Priority is for the next build, not a judgement of the people who wrote the curr
 
 | Item | Priority | Why |
 |---|---|---|
-| Make CI green and deploy only after that | High | `main` did not deploy. |
-| Finish the Cloudflare zone match for routing | High | Pools can look “Live” while routing is unknown. |
-| Decide health from monitors **and** HARD dependencies, or label the register as documentation | High | Otherwise the map and the status disagree. |
-| Agent update path that is the install script, with rollback | High | Manual copies drift from `AGENT_VERSION`. |
+| Make CI green and deploy only after that | High | `main` did not deploy. Still a live check of GitHub Actions, not a code gap. |
+| Finish the Cloudflare zone match for routing | Done (26 Oct 2026) | An empty zone list is an error that says the token cannot list zones. |
+| Decide health from monitors **and** HARD dependencies, or label the register as documentation | Done (26 Oct 2026) | A HARD link with a real check changes status. A SOFT link can only degrade it. |
+| Agent update path that is the install script, with rollback | Done (26 Oct 2026) | `buildUpdater` keeps the config and restores the previous script. The loose `agent-3.3.1.py` was removed. |
 | Applications with only PRD, or with extra servers | Medium | The two-column model will not fit every product. |
 | Do not treat ICT as the only application in overview | Medium | `IctStatusPanel` is a pair. |
 | Hostinger connection delete | Low | Create and rename exist; delete does not. |
-| Call `POST /api/v1/deployments/report` from CI if deployments should show Scholario Ops releases | Low | The endpoint exists; the workflow does not use it. |
-| Remove or ignore untracked `agent-3.3.1.py` once install-from-Setup is the only copy | Low | Two copies of the agent will drift. |
+| Call `POST /api/v1/deployments/report` from CI if deployments should show Scholario Ops releases | Done (26 Oct 2026) | The workflow reports SUCCESS, ROLLED_BACK, or FAILED. Missing report secrets fail the step. |
+| Remove or ignore untracked `agent-3.3.1.py` once install-from-Setup is the only copy | Done (26 Oct 2026) | The file was removed. Install and update use `server/agent.ts`. |
 
 ---
 

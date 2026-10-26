@@ -16,7 +16,8 @@
  */
 import crypto from 'crypto';
 import { Incident, IncidentSeverity } from '../src/types/index.ts';
-import { db, persist } from './store.ts';
+import { db, minuteMetrics, persist } from './store.ts';
+import { THRESHOLDS } from '../src/lib/thresholds.ts';
 import { broadcast, audit } from './events.ts';
 import { notifyIncident, CHANNEL_FAILING_AFTER } from './notify.ts';
 import { MOCK_INCIDENT_MONITOR_ID } from '../src/lib/mockIncident.ts';
@@ -202,8 +203,18 @@ export function evaluateResourceAlerts(): void {
     if (ev.state === 'NORMAL') {
       resolveAlert(fp, 'Capacity', `${r.name} is back within its limit (${resourceDetail(r)})`);
     } else if (alerting) {
-      const severity: IncidentSeverity = ev.state === 'EXCEEDED' ? 'CRITICAL' : ev.state === 'CRITICAL' ? 'HIGH' : 'WARNING';
-      const title = ev.state === 'EXCEEDED' ? `${r.name} is over capacity` : ev.state === 'CRITICAL' ? `${r.name} is critical` : `${r.name} is near capacity`;
+      let severity: IncidentSeverity = ev.state === 'EXCEEDED' ? 'CRITICAL' : ev.state === 'CRITICAL' ? 'HIGH' : 'WARNING';
+      let title = ev.state === 'EXCEEDED' ? `${r.name} is over capacity` : ev.state === 'CRITICAL' ? `${r.name} is critical` : `${r.name} is near capacity`;
+      // Agent load pages at the level that has held for 5 minutes. A single spike updates the row only.
+      if (r.kind === 'LOAD' && r.managedBy === 'agent-load') {
+        const criticalHeld = agentLoadHeld(r.serverId, 'critical');
+        const warningHeld = criticalHeld || agentLoadHeld(r.serverId, 'warning');
+        if (!warningHeld) continue;
+        if (!criticalHeld) {
+          severity = 'WARNING';
+          title = `${r.name} is near capacity`;
+        }
+      }
       const detail = resourceDetail(r);
       const rank: Record<IncidentSeverity, number> = { INFO: 0, WARNING: 1, HIGH: 2, CRITICAL: 3, EMERGENCY: 4 };
       const existing = openFor(fp);
@@ -226,6 +237,21 @@ export function evaluateResourceAlerts(): void {
     }
   }
   if (changed) persist();
+}
+
+/** True when every recent 1-minute rollup is at or above the load-per-core line. A missing core count never counts as held. */
+function agentLoadHeld(serverId: string | null, level: 'warning' | 'critical'): boolean {
+  if (!serverId) return false;
+  const srv = db.servers.find(s => s.id === serverId);
+  const cores = srv?.cpuCores ?? 0;
+  if (cores <= 0) return false;
+  const minutes = THRESHOLDS.loadPerCore.sustainedMinutes;
+  const threshold = level === 'critical' ? THRESHOLDS.loadPerCore.critical : THRESHOLDS.loadPerCore.warning;
+  const series = minuteMetrics[serverId] ?? [];
+  const since = Date.now() - (minutes + 1.5) * 60_000;
+  const recent = series.filter(p => Date.parse(p.t) >= since).slice(-minutes);
+  if (recent.length < minutes) return false;
+  return recent.every(p => typeof p.load1 === 'number' && p.load1 / cores >= threshold);
 }
 
 /** Derives alerts from current state. Unknown / not-configured states never open or close alerts. */
@@ -302,7 +328,7 @@ export function evaluateAlerts() {
       if (r.overall === 'NOT_READY') {
         const failing = r.checks.filter(c => c.group === 'core' && c.status === 'FAIL');
         openAlert({ fingerprint: dfp, title: `${app.name} DR is NOT READY`, severity: 'HIGH', detail: failing.map(c => `${c.label}: ${c.detail}`).join(' · '), applicationId: app.id, environment: 'DR', source: 'DR Readiness', affected: [app.name] });
-      } else if (r.overall === 'READY' || r.overall === 'PARTIALLY_READY') resolveAlert(dfp, 'DR Readiness', `DR readiness is ${r.overall}`);
+      } else if (r.overall === 'READY' || r.overall === 'DEGRADED') resolveAlert(dfp, 'DR Readiness', `DR readiness is ${r.overall}`);
     }
 
     evaluateInsightAlerts();

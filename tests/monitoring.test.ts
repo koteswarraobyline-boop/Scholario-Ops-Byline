@@ -64,19 +64,25 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
       { id: PRD_POOL, name: 'app-production', enabled: true, healthy: true, origins: [{ name: 'p', address: PRD_IP, enabled: true, weight: 1, healthy: true }] },
       { id: DR_POOL, name: 'app-dr', enabled: true, healthy: true, origins: [{ name: 'd', address: DR_IP, enabled: true, weight: 1, healthy: true }] },
     ]);
+    if (u.includes('/zones?name=')) return env([{ id: 'zone1', name: 'example.com' }]);
+    if (u.includes('/zones/zone1/load_balancers')) return env([{
+      id: 'lb1', name: 'app.example.com', enabled: true, proxied: true,
+      steering_policy: 'off', default_pools: [PRD_POOL, DR_POOL], fallback_pool: DR_POOL,
+    }]);
     return Response.json({ success: false, errors: [{ code: 7003, message: 'not found' }], result: null }, { status: 404 });
   }
   return realFetch(input, init);
 }) as typeof fetch;
 
-const { initStore, db, persist, flush } = await import('../server/store.ts');
+const { initStore, db, persist, flush, minuteMetrics } = await import('../server/store.ts');
 const { query, closePool, SCHEMA } = await import('../server/db.ts');
 const { syncHostinger, hostingerState, vmStatus } = await import('../server/hostinger.ts');
 const { syncLoadBalancers } = await import('../server/loadbalancer.ts');
 const { ingestAgentReport, recomputeDerived, runMonitorNow } = await import('../server/engine.ts');
 const { databaseHealth, backupStatus, agentState, appHealth } = await import('../server/health.ts');
 const { readiness } = await import('../server/readiness.ts');
-const { openAlert, resolveAlert, evaluateAlerts, notificationStatus } = await import('../server/alerts.ts');
+const { openAlert, resolveAlert, evaluateAlerts, evaluateResourceAlerts, notificationStatus } = await import('../server/alerts.ts');
+const { applyServerTelemetry } = await import('../server/resources.ts');
 const { httpProbe, sslProbe, dnsProbe, normalizeUrl } = await import('../server/probes.ts');
 const { flushChecks, readChecks } = await import('../server/history.ts');
 type ServerRecord = import('../server/store.ts').ServerRecord;
@@ -136,6 +142,15 @@ test('Hostinger: success → normalised VM data attached to the matching server'
   assert.equal(dr.hostinger?.status, 'UNAVAILABLE', 'stopped VM is UNAVAILABLE');
   assert.equal(dr.hostinger?.region, null, 'unknown data center → no invented region');
   assert.equal(prd.planSpec?.source, 'hostinger');
+  const planLimits = db.resources.filter(r => r.serverId === prd.id && r.managedBy === 'server-plan');
+  assert.deepEqual(planLimits.map(r => r.kind).sort(), ['CPU', 'MEMORY', 'SERVER_DISK']);
+  assert.equal(planLimits.every(r => r.source === 'provider' && r.owner === 'Infrastructure' && r.usage === null), true);
+  assert.equal(planLimits.find(r => r.kind === 'CPU')?.capacity, 8);
+  assert.equal(planLimits.find(r => r.kind === 'CPU')?.unit, 'cores');
+  assert.equal(planLimits.find(r => r.kind === 'MEMORY')?.capacity, 32);
+  assert.equal(planLimits.find(r => r.kind === 'MEMORY')?.unit, 'GiB');
+  assert.equal(planLimits.find(r => r.kind === 'SERVER_DISK')?.capacity, 400);
+  assert.equal(planLimits.find(r => r.kind === 'SERVER_DISK')?.unit, 'GiB');
   const saved = db.backups.filter(b => b.id === 'hostinger-backup:1001:325');
   assert.equal(saved.length, 1);
   assert.equal(saved[0].serverId, prd.id);
@@ -433,10 +448,12 @@ test('DR readiness: UNKNOWN without evidence; never counts UNKNOWN / NOT_CONFIGU
   db.applications.push(app);
   db.monitors.push(mkMonitor(app.id, 'DR', 'HTTPS', 'https://dr.example.invalid/', 'app-url'));
   const r = readiness(app);
-  assert.equal(r.total, 11, 'no load balancer: the 2 Cloudflare pool / origin checks do not apply');
+  assert.equal(r.total, 4, 'no DR server, URL, or pool, and no load balancer: those checks are not scored');
+  assert.equal(r.checks.find(c => c.key === 'dr_url')!.status, 'UNKNOWN');
+  assert.match(r.checks.find(c => c.key === 'dr_url')!.detail, /not configured/);
   assert.equal(r.passed, 0);
   assert.equal(r.overall, 'UNKNOWN');
-  assert.ok(r.checks.filter(c => c.group === 'core').every(c => c.status === 'UNKNOWN' || c.status === 'NOT_CONFIGURED'));
+  assert.ok(r.checks.filter(c => c.group === 'core').every(c => c.status === 'PASS' || c.status === 'FAIL' || c.status === 'WARNING' || c.status === 'UNKNOWN'));
   db.applications.pop();
 });
 
@@ -458,9 +475,66 @@ test('DR readiness: READY (13/13) only when every check has passing evidence', a
   assert.deepEqual(core.filter(c => c.status !== 'PASS').map(c => `${c.key}:${c.status}:${c.detail}`), []);
   assert.equal(r.passed, 13);
   assert.equal(r.overall, 'READY');
+  const urlMon = db.monitors.find(m => m.applicationId === app.id && m.environment === 'DR' && m.type === 'HTTPS')!;
+  urlMon.history[0].responseTimeMs = 2000;
+  assert.equal(readiness(app).checks.find(c => c.key === 'dr_url')!.status, 'PASS', '2000 ms is the warning line and is still a pass');
+  urlMon.history[0].responseTimeMs = 2001;
+  const slow = readiness(app);
+  assert.equal(slow.checks.find(c => c.key === 'dr_url')!.status, 'WARNING');
+  assert.match(slow.checks.find(c => c.key === 'dr_url')!.detail, /2001 ms/);
+  assert.equal(slow.overall, 'DEGRADED', 'a warning with no failing check is DEGRADED');
+  urlMon.history[0].responseTimeMs = 120;
+  assert.equal(readiness(app).overall, 'READY');
   // one failing piece of evidence → NOT_READY
   ingestAgentReport(dr, agentReport({ databases: [{ ...dbOk, replication: { role: 'replica', state: 'stopped', lagSec: null, lastSuccessAt: null, error: 'stopped by admin' } }] }));
   assert.equal(readiness(app).overall, 'NOT_READY');
+});
+
+test('a missing core count is not a healthy load, and one hot report does not open a load incident', () => {
+  const app = { ...db.applications[0], id: crypto.randomUUID(), codeName: 'load-gap', loadBalancer: undefined } as import('../src/types/index.ts').Application;
+  const dr = mkServer('DR', '198.51.100.77');
+  dr.hostname = 'load-gap-dr';
+  const now = new Date().toISOString();
+  dr.cpuCores = 0;
+  dr.lastSeen = now;
+  dr.agentStatus = 'CONNECTED';
+  dr.telemetry = { ...dr.telemetry, cpuPercent: 10, ramPercent: 20, diskPercent: 30, loadAvg: [8, 8, 8], observedAt: now, receivedAt: now };
+  app.drServerId = dr.id;
+  db.servers.push(dr);
+  db.applications.push(app);
+  const unknown = readiness(app).checks.find(c => c.key === 'cpu' && c.group === 'capacity');
+  assert.equal(unknown?.status, 'UNKNOWN');
+  assert.match(unknown?.detail ?? '', /no core count/);
+  dr.cpuCores = 4;
+  const hot = readiness(app).checks.find(c => c.key === 'cpu' && c.group === 'capacity');
+  assert.equal(hot?.status, 'FAIL');
+
+  const srv = mkServer('PRD', '198.51.100.78');
+  srv.hostname = 'load-gap-prd';
+  db.servers.push(srv);
+  ingestAgentReport(srv, agentReport({ cpuPercent: 10, load: [8, 8, 8], cpuCores: 4 }));
+  applyServerTelemetry(srv);
+  const row = db.resources.find(r => r.resourceKey === `server:${srv.id}:load`);
+  assert.ok(row, 'the agent load is stored');
+  assert.equal(row!.usage, 2);
+  delete minuteMetrics[srv.id];
+  evaluateResourceAlerts();
+  const fp = `resource-limit:${row!.id}`;
+  assert.equal(db.incidents.some(i => i.fingerprint === fp && i.status !== 'RESOLVED'), false, 'one report does not page');
+  const minutes = 5;
+  minuteMetrics[srv.id] = Array.from({ length: minutes }, (_, i) => ({
+    t: new Date(Date.now() - (minutes - 1 - i) * 60_000).toISOString(),
+    cpu: 10, ram: 30, disk: 40, load1: 8, netIn: 0, netOut: 0,
+    swap: null, iowait: null, steal: null, diskRead: null, diskWrite: null, diskUtil: null,
+  }));
+  evaluateResourceAlerts();
+  assert.equal(db.incidents.some(i => i.fingerprint === fp && i.status !== 'RESOLVED' && i.status !== 'CLOSED'), true, 'five sustained minutes page');
+  srv.cpuCores = 0;
+  const kept = row!.usage;
+  applyServerTelemetry(srv);
+  assert.equal(row!.usage, kept);
+  assert.equal(row!.measuredAt, null, 'a missing core count is not a fresh measurement');
+  assert.match(row!.syncError, /Core count was not reported/);
 });
 
 // ── Notifications ────────────────────────────────────────────────────────────

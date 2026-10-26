@@ -212,7 +212,7 @@ async function findZoneId(domain: string): Promise<string> {
     const res = await cf<RawZone[]>(`/zones?name=${encodeURIComponent(candidate)}`);
     if (res.result[0]) return res.result[0].id;
   }
-  throw new CloudflareError(`No Cloudflare zone found for ${domain} — check the domain and that the token has Zone:Read access`);
+  throw new CloudflareError(`No Cloudflare zone found for ${domain}. The token cannot list zones — it needs Zone:Read, or the zone is in another account`);
 }
 
 /**

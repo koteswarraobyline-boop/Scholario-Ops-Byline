@@ -8,6 +8,8 @@ import { X, AlertTriangle, ArrowRight, Plus, Layers, Loader2, Pencil, Trash2 } f
 import { AppEditor } from '../setup/SetupView';
 import { HealthDimensions } from './HealthDimensions';
 import { effectiveRoutingMethod, explainVps, ROUTING_METHOD_LABELS } from '../../lib/trafficHealth';
+import { registerLinks, statusCause } from '../../lib/statusCause';
+import { dnsPointsAt, routeState, servingLabel } from '../ui/routing';
 import { MonitorFormModal } from '../monitors/CreateMonitorModal';
 import { EmptyState } from '../ui/EmptyState';
 import { useDialog } from '../ui/useDialog';
@@ -90,8 +92,9 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
   const appDeployments = deployments.filter(d => d.applicationId === application.id);
   const appAudits = auditLogs.filter(a => a.targetId === application.id);
 
-  const isDrActive = application.failoverState === 'DR_ACTIVE';
-  const isFailingOver = application.failoverState === 'FAILING_OVER';
+  const route = routeState(application, loadBalancer, dnsPointsAt(application, servers, cloudflareZones));
+  const isDrActive = route === 'DR';
+  const isFailingOver = route === 'MOVING' || application.failoverState === 'FAILING_OVER';
   const failoverTarget: 'DR' | 'PRIMARY' = isDrActive ? 'PRIMARY' : 'DR';
   const targetServer = failoverTarget === 'DR' ? drServer : prdServer;
   const failoverBlockers: string[] = [];
@@ -303,9 +306,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                   <div>
                     <span className={label}>Active routing target:</span>
                     <div className={`font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
-                      {effectiveRoutingMethod(application) === 'direct_dns'
-                        ? (isFailingOver ? 'Failover in progress' : isDrActive ? 'DR server' : 'Primary (PRD) server')
-                        : 'Shown under Health dimensions. Unknown until the selected integration reports it.'}
+                      {servingLabel(route)}
                     </div>
                   </div>
                   <div>
@@ -487,7 +488,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
               <p className={`text-[11px] font-sans ${muted}`}>
                 Each monitor attached to this application represents a dependency the system actually checks (endpoints, databases, workers, backups).
               </p>
-              {appMonitors.length === 0 ? (
+              {appMonitors.length === 0 && registerLinks(application.dependencies).length === 0 ? (
                 <div className={emptyText}>No monitored dependencies. Add monitors for databases, workers and endpoints.</div>
               ) : (
                 <div className="space-y-2">
@@ -521,6 +522,15 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                           }}
                         />
                       </div>
+                    </div>
+                  ))}
+                  {registerLinks(application.dependencies).map(d => (
+                    <div key={d.id} className={`p-3 rounded border flex items-center justify-between ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                      <div className="min-w-0">
+                        <div className={`font-semibold font-sans truncate ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{d.name}</div>
+                        <div className={`text-[11px] ${muted}`}>Register link with a real check</div>
+                      </div>
+                      <span className={`font-semibold shrink-0 pl-3 ${statusColor(d.status)}`}>{d.status}</span>
                     </div>
                   ))}
                 </div>
@@ -800,7 +810,7 @@ const MonitorActions: React.FC<{
 };
 
 export const ApplicationsView: React.FC = () => {
-  const { applications, servers, monitors, setSelectedAppId, selectedAppId, deleteApplication, theme, isLoading } = useOps();
+  const { applications, servers, monitors, cloudflareZones, loadBalancer, setSelectedAppId, selectedAppId, deleteApplication, theme, isLoading } = useOps();
   const { canDo } = useAuth();
   const navigate = useNavigate();
   const isDark = theme === 'dark';
@@ -879,10 +889,10 @@ export const ApplicationsView: React.FC = () => {
         <div className="grid grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] gap-3">
           {filteredApps.map(app => {
             const prdServer = servers.find(s => s.id === app.prdServerId);
-            const appMonitorCount = monitors.filter(m => m.applicationId === app.id).length;
             const isHealthy = app.status === 'HEALTHY';
             const isBad = app.status === 'CRITICAL' || app.status === 'WARNING';
-            const isDr = app.failoverState === 'DR_ACTIVE';
+            const cause = statusCause(app.status, app.dependencies);
+            const route = routeState(app, loadBalancer, dnsPointsAt(app, servers, cloudflareZones));
             const lag = app.currentReplicationLagSec;
 
             return (
@@ -908,8 +918,8 @@ export const ApplicationsView: React.FC = () => {
                   <p className={`text-[11px] mt-1 line-clamp-2 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                     {app.description || app.dnsRecordName || app.codeName}
                   </p>
-                  {!isHealthy && !isBad && (
-                    <p className={`text-[10px] font-mono mt-1 ${statusColor(app.status)}`}>{app.status}{appMonitorCount === 0 ? ' · no monitors' : ''}</p>
+                  {!isHealthy && (
+                    <p className={`text-[10px] font-mono mt-1 ${statusColor(app.status)}`}>{app.status}{cause ? ` · ${cause}` : ''}</p>
                   )}
                 </div>
 
@@ -929,8 +939,8 @@ export const ApplicationsView: React.FC = () => {
                   </div>
                   <div className={`flex justify-between items-center ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                     <span className="text-[10px] uppercase">Routing Target</span>
-                    <span className={app.failoverState === 'FAILING_OVER' ? 'text-amber-500 font-bold' : isDr ? 'text-rose-500 font-bold' : 'text-emerald-500 font-semibold'}>
-                      {app.failoverState === 'FAILING_OVER' ? 'Switching…' : isDr ? 'DR' : 'Primary'}
+                    <span className={route === 'DR' ? 'text-rose-500 font-bold' : route === 'PRD' ? 'text-emerald-500 font-semibold' : route === 'MOVING' || route === 'SPLIT' ? 'text-amber-500 font-bold' : (isDark ? 'text-slate-400' : 'text-slate-500')}>
+                      {servingLabel(route)}
                     </span>
                   </div>
                   <div className={`flex justify-between items-center ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>

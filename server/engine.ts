@@ -893,6 +893,50 @@ const DEP_TYPE: Partial<Record<Monitor['type'], AppDependency['type']>> = {
   DB_CONN: 'DATABASE', DB_REPLICATION: 'DATABASE', WORKER_HEARTBEAT: 'WORKER', CRON_HEARTBEAT: 'WORKER', BACKUP_FRESHNESS: 'STORAGE',
 };
 
+/** Status of a register component that has its own evidence. null means there is no check to use. */
+function evidenceFor(componentId: string, selfAppId: string): { status: OperationalStatus; lastChecked: string } | null {
+  const component = db.registry.find(c => c.id === componentId);
+  if (!component) return null;
+  if (component.kind === 'SERVER' && component.serverId) {
+    const srv = db.servers.find(s => s.id === component.serverId);
+    if (!srv?.lastSeen) return null;
+    const status = vpsOperationalStatus(srv);
+    return status === 'UNKNOWN' ? null : { status, lastChecked: srv.lastSeen };
+  }
+  const otherApp = component.applicationId && component.applicationId !== selfAppId ? component.applicationId : null;
+  if (!otherApp) return null;
+  const checked = db.monitors.filter(m => m.enabled && m.applicationId === otherApp && m.lastCheck);
+  if (checked.length === 0) return null;
+  const known = checked.map(m => m.status).filter(s => s !== 'UNKNOWN');
+  if (known.length === 0) return null;
+  const lastChecked = checked.map(m => m.lastCheck).sort().at(-1) ?? '';
+  return { status: worst(known), lastChecked };
+}
+
+function registrySignals(app: Application): Array<{ id: string; name: string; hard: boolean; status: OperationalStatus; type: AppDependency['type']; lastChecked: string; target: string }> {
+  const roots = db.registry.filter(c => c.applicationId === app.id && (c.kind === 'APPLICATION' || c.kind === 'BUSINESS_FEATURE'));
+  if (roots.length === 0) return [];
+  const rootIds = new Set(roots.map(c => c.id));
+  const out: Array<{ id: string; name: string; hard: boolean; status: OperationalStatus; type: AppDependency['type']; lastChecked: string; target: string }> = [];
+  for (const link of db.dependencyLinks) {
+    if (!rootIds.has(link.fromId)) continue;
+    const found = evidenceFor(link.toId, app.id);
+    if (!found) continue;
+    const target = db.registry.find(c => c.id === link.toId);
+    const type: AppDependency['type'] = target?.kind === 'DATABASE' ? 'DATABASE' : target?.kind === 'STORAGE' ? 'STORAGE' : 'EXTERNAL_API';
+    out.push({
+      id: link.id,
+      name: `${target?.name ?? 'Dependency'} (${link.type})`,
+      hard: link.type === 'HARD',
+      status: found.status,
+      type,
+      lastChecked: found.lastChecked,
+      target: target?.kind ?? 'dependency',
+    });
+  }
+  return out;
+}
+
 function recomputeApplication(app: Application): boolean {
   const before = JSON.stringify([app.status, app.uptime24h, app.p95Ms, app.dependencies.length, app.currentReplicationLagSec, app.recentDeploymentVersion]);
   const activeEnv = app.failoverState === 'DR_ACTIVE' ? 'DR' : 'PRD';
@@ -900,12 +944,16 @@ function recomputeApplication(app: Application): boolean {
   const active = appMonitors.filter(m => m.environment === activeEnv);
   const activeIds = active.map(m => m.id);
 
-  if (active.length > 0) {
-    app.status = worst(active.map(m => m.status).filter(s => s !== 'UNKNOWN'), 'UNKNOWN');
-  } else {
-    // No application monitors. Do not copy VPS status onto the application.
-    app.status = 'UNKNOWN';
-  }
+  const monitorStatus = active.length > 0
+    ? worst(active.map(m => m.status).filter(s => s !== 'UNKNOWN'), 'UNKNOWN')
+    : 'UNKNOWN';
+  const linked = registrySignals(app);
+  // A HARD dependency with a real check can take the application down. A SOFT one can only degrade it.
+  // A dependency with no check is omitted, so a register row alone never looks healthy or failed.
+  const hard = linked.filter(s => s.hard && s.status !== 'HEALTHY' && s.status !== 'UNKNOWN').map(s => s.status);
+  const soft = linked.filter(s => !s.hard && (s.status === 'CRITICAL' || s.status === 'WARNING' || s.status === 'STALE')).map(() => 'WARNING' as const);
+  // A healthy dependency does not make an unmonitored application look up. It can only worsen a status.
+  app.status = worst([monitorStatus, ...hard, ...soft].filter(s => s !== 'UNKNOWN'), 'UNKNOWN');
   if (app.failoverState === 'FAILING_OVER') app.status = worst([app.status, 'WARNING']);
 
   app.uptime24h = uptimeFor(activeIds, 24);
@@ -922,15 +970,26 @@ function recomputeApplication(app: Application): boolean {
   const repl = appMonitors.find(m => m.type === 'DB_REPLICATION' && typeof m.lastValue === 'number');
   app.currentReplicationLagSec = repl ? (repl.lastValue as number) : null;
 
-  app.dependencies = appMonitors.map(m => ({
-    id: m.id,
-    name: `${m.name} [${m.environment}]`,
-    type: DEP_TYPE[m.type] ?? 'EXTERNAL_API',
-    status: m.status,
-    latencyMs: m.responseTimeMs,
-    lastChecked: m.lastCheck,
-    target: m.target,
-  }));
+  app.dependencies = [
+    ...appMonitors.map(m => ({
+      id: m.id,
+      name: `${m.name} [${m.environment}]`,
+      type: DEP_TYPE[m.type] ?? 'EXTERNAL_API' as AppDependency['type'],
+      status: m.status,
+      latencyMs: m.responseTimeMs,
+      lastChecked: m.lastCheck,
+      target: m.target,
+    })),
+    ...linked.map(s => ({
+      id: s.id,
+      name: s.name,
+      type: s.type,
+      status: s.status,
+      latencyMs: 0,
+      lastChecked: s.lastChecked,
+      target: s.target,
+    })),
+  ];
   const checks = appMonitors.map(m => m.lastCheck).filter(Boolean).sort();
   if (checks.length) app.lastChecked = checks[checks.length - 1];
 

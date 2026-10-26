@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { DatabaseBackup, ShieldCheck, ShieldAlert, RefreshCw } from 'lucide-react';
 import { useOps } from '../../context/OpsContext';
+import { useAuth } from '../../context/AuthContext';
 import { api } from '../../services/api';
 import { Ago } from '../ui/Freshness';
 import type { OpsBackupHealth } from '../../types';
@@ -16,7 +17,9 @@ const fmtBytes = (n: number | null) =>
 
 /** Scholario Ops' own PostgreSQL backup: last run, encryption, off-server copy, restore test */
 export const OpsBackupPanel: React.FC = () => {
-  const { theme } = useOps();
+  const { theme, notify } = useOps();
+  const { hasRole } = useAuth();
+  const canRun = hasRole('it_administrator');
   const isDark = theme === 'dark';
   const muted = isDark ? 'text-slate-400' : 'text-slate-500';
   const [data, setData] = useState<OpsBackupHealth | null>(null);
@@ -27,6 +30,24 @@ export const OpsBackupPanel: React.FC = () => {
     setLoading(true);
     try { setData(await api.getOpsBackup()); setError(null); } catch (e) { setError((e as Error).message); } finally { setLoading(false); }
   }, []);
+
+  const run = async (action: 'backup' | 'restore-test') => {
+    const question = action === 'backup'
+      ? 'Start a backup of the Scholario Ops database on this server?'
+      : 'Start a restore test? It uses a separate scratch database and does not replace the live database.';
+    if (!window.confirm(question)) return;
+    setLoading(true);
+    try {
+      await api.runOpsBackup(action);
+      notify('success', action === 'backup' ? 'Backup started' : 'Restore test started');
+      await load();
+    } catch (e) {
+      notify('error', (e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
     void load();
     const t = setInterval(() => { void load(); }, POLL_MS);
@@ -48,6 +69,12 @@ export const OpsBackupPanel: React.FC = () => {
           <span className="font-bold uppercase tracking-wider text-[11px]">Scholario Ops database backup</span>
           {data && <span className={`font-bold ${statusTone(data.status)}`}>{data.status.replace('_', ' ')}</span>}
         </div>
+        {canRun && (
+          <div className="flex flex-wrap gap-2">
+            <button type="button" disabled={loading} onClick={() => void run('backup')} className="px-2 py-1 rounded border border-blue-800 text-blue-400 cursor-pointer disabled:opacity-50">Run backup</button>
+            <button type="button" disabled={loading} onClick={() => void run('restore-test')} className="px-2 py-1 rounded border border-blue-800 text-blue-400 cursor-pointer disabled:opacity-50">Run restore test</button>
+          </div>
+        )}
         <button onClick={() => void load()} disabled={loading} aria-label="Refresh Ops backup status"
           className={`p-1 rounded cursor-pointer disabled:opacity-50 ${isDark ? 'hover:bg-slate-800' : 'hover:bg-slate-100'}`}>
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />

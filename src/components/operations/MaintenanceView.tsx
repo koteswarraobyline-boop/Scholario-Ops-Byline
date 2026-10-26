@@ -26,18 +26,18 @@ const localInputToIso = (v: string): string | null => {
 const statusColor = (s: MaintenanceWindow['status']) =>
   s === 'IN_PROGRESS' ? 'text-amber-500' : s === 'SCHEDULED' ? 'text-blue-500' : 'text-slate-500';
 
-const CreateMaintenanceForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
-  const { applications, monitors, createMaintenance, theme } = useOps();
+const CreateMaintenanceForm: React.FC<{ onClose: () => void; existing?: MaintenanceWindow }> = ({ onClose, existing }) => {
+  const { applications, monitors, createMaintenance, updateMaintenance, theme } = useOps();
   const isDark = theme === 'dark';
 
-  const [title, setTitle] = useState('');
-  const [applicationId, setApplicationId] = useState(applications[0]?.id ?? '');
-  const [environment, setEnvironment] = useState<'PRD' | 'DR'>('PRD');
-  const [start, setStart] = useState(() => toLocalInput(new Date()));
-  const [end, setEnd] = useState(() => toLocalInput(new Date(Date.now() + 60 * 60 * 1000)));
-  const [reason, setReason] = useState('');
-  const [expectedImpact, setExpectedImpact] = useState('');
-  const [suppress, setSuppress] = useState<string[]>([]);
+  const [title, setTitle] = useState(existing?.title ?? '');
+  const [applicationId, setApplicationId] = useState(existing?.applicationId || applications[0]?.id || '');
+  const [environment, setEnvironment] = useState<'PRD' | 'DR'>(existing?.environment ?? 'PRD');
+  const [start, setStart] = useState(() => toLocalInput(existing ? new Date(existing.startTime) : new Date()));
+  const [end, setEnd] = useState(() => toLocalInput(existing ? new Date(existing.endTime) : new Date(Date.now() + 60 * 60 * 1000)));
+  const [reason, setReason] = useState(existing?.reason ?? '');
+  const [expectedImpact, setExpectedImpact] = useState(existing?.expectedImpact ?? '');
+  const [suppress, setSuppress] = useState<string[]>(existing?.suppressMonitors ?? []);
   const [saving, setSaving] = useState(false);
 
   const appMonitors = useMemo(
@@ -61,7 +61,7 @@ const CreateMaintenanceForm: React.FC<{ onClose: () => void }> = ({ onClose }) =
     if (!valid || !startIso || !endIso) return;
     setSaving(true);
     try {
-      const w = await createMaintenance({
+      const payload = {
         title: title.trim(),
         applicationId,
         environment,
@@ -70,7 +70,8 @@ const CreateMaintenanceForm: React.FC<{ onClose: () => void }> = ({ onClose }) =
         reason: reason.trim(),
         expectedImpact: expectedImpact.trim(),
         suppressMonitors: suppress.filter(id => appMonitors.some(m => m.id === id)),
-      });
+      };
+      const w = existing ? await updateMaintenance(existing.id, payload) : await createMaintenance(payload);
       if (w) onClose();
     } finally {
       setSaving(false);
@@ -82,7 +83,7 @@ const CreateMaintenanceForm: React.FC<{ onClose: () => void }> = ({ onClose }) =
       isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
     }`}>
       <div className="flex items-center justify-between">
-        <span className="font-bold text-sm">Schedule maintenance window</span>
+        <span className="font-bold text-sm">{existing ? 'Edit maintenance window' : 'Schedule maintenance window'}</span>
         <button type="button" onClick={onClose} aria-label="Close schedule maintenance" title="Close" className="p-1 text-slate-400 hover:text-slate-200 cursor-pointer"><X className="w-4 h-4" aria-hidden="true" /></button>
       </div>
 
@@ -166,7 +167,7 @@ const CreateMaintenanceForm: React.FC<{ onClose: () => void }> = ({ onClose }) =
           disabled={!valid || saving}
           className="px-3 py-1 rounded text-[11px] font-semibold bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white cursor-pointer"
         >
-          {saving ? 'Scheduling…' : 'Schedule window'}
+          {saving ? 'Saving…' : existing ? 'Save changes' : 'Schedule window'}
         </button>
       </div>
     </form>
@@ -181,6 +182,7 @@ export const MaintenanceView: React.FC = () => {
   const isAdmin = hasRole('it_administrator');
 
   const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState<MaintenanceWindow | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
@@ -229,7 +231,7 @@ export const MaintenanceView: React.FC = () => {
         </span>
       </div>
 
-      {showForm && <CreateMaintenanceForm onClose={() => setShowForm(false)} />}
+      {(showForm || editing) && <CreateMaintenanceForm existing={editing ?? undefined} onClose={() => { setShowForm(false); setEditing(null); }} />}
 
       {maintenanceWindows.length === 0 ? (
         <EmptyState
@@ -279,6 +281,11 @@ export const MaintenanceView: React.FC = () => {
                     <span className={`font-bold text-[10px] uppercase ${statusColor(m.status)}`}>
                       {m.status.replace('_', ' ')}
                     </span>
+                    {isOperator && active && !confirming && (
+                      <button onClick={() => { setEditing(m); setShowForm(false); }} disabled={busy !== null} className={secondaryBtn}>
+                        <span>Edit</span>
+                      </button>
+                    )}
                     {isOperator && active && !confirming && (
                       <button
                         onClick={() => withBusy(`complete:${m.id}`, () => completeMaintenance(m.id))}

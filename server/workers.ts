@@ -37,6 +37,12 @@ export function eventsFor(applicationId: string): WorkerRoutingEvent[] {
   return db.workerEvents.filter(e => e.applicationId === applicationId).sort((a, b) => b.observedAt.localeCompare(a.observedAt)).slice(0, 50);
 }
 
+function postedCount(value: number | null | undefined, label: string): number | null {
+  if (value === undefined || value === null) return null;
+  if (!Number.isInteger(value) || value < 0 || value > 1_000_000_000) throw new Error(`${label} must be a whole number from 0`);
+  return value;
+}
+
 export function recordWorkerEvent(input: {
   applicationId: string;
   kind: string;
@@ -45,6 +51,8 @@ export function recordWorkerEvent(input: {
   drHealth?: string | null;
   detail?: string;
   observedAt?: string;
+  requests?: number | null;
+  errors?: number | null;
 }): WorkerRoutingEvent {
   if (!EVENT_KINDS.includes(input.kind as WorkerEventKind)) throw new Error(`kind must be one of: ${EVENT_KINDS.join(', ')}`);
   const health = (v: string | null | undefined) => {
@@ -64,6 +72,8 @@ export function recordWorkerEvent(input: {
     observedAt: input.observedAt && !Number.isNaN(Date.parse(input.observedAt)) ? new Date(input.observedAt).toISOString() : now,
     receivedAt: now,
     source: 'worker_event',
+    requests: postedCount(input.requests, 'requests'),
+    errors: postedCount(input.errors, 'errors'),
   };
   db.workerEvents.unshift(event);
   const mine = db.workerEvents.filter(e => e.applicationId === event.applicationId);
@@ -77,16 +87,26 @@ export function recordWorkerEvent(input: {
   return event;
 }
 
+function countsFor(applicationId: string): { requests: number | null; errors: number | null; analytics: WorkerAppSnapshot['analytics'] } {
+  const hit = db.workerEvents.find(e => e.applicationId === applicationId && (e.requests !== null || e.errors !== null));
+  if (!hit) return { requests: null, errors: null, analytics: 'NOT_CONNECTED' };
+  return { requests: hit.requests, errors: hit.errors, analytics: 'EVENTS' };
+}
+
+function withCounts(applicationId: string, snap: Omit<WorkerAppSnapshot, 'requests' | 'errors' | 'analytics'>): WorkerAppSnapshot {
+  return { ...snap, ...countsFor(applicationId) };
+}
+
 function snapshotFor(applicationId: string, name: string, accountId: string): WorkerAppSnapshot {
   const saved = snapshots.get(applicationId);
   if (saved) return saved;
   if (!isCloudflareConfigured() || !accountId) {
-    return { applicationId, connection: 'not_connected', detail: 'Cloudflare API is not connected for this Worker, or the account ID is empty.', observedAt: null, scriptFound: null, lastDeployedAt: null, requests: null, errors: null, analytics: 'NOT_CONNECTED' };
+    return withCounts(applicationId, { applicationId, connection: 'not_connected', detail: 'Cloudflare API is not connected for this Worker, or the account ID is empty.', observedAt: null, scriptFound: null, lastDeployedAt: null });
   }
   if (!name) {
-    return { applicationId, connection: 'configured', detail: 'Worker name is empty.', observedAt: null, scriptFound: null, lastDeployedAt: null, requests: null, errors: null, analytics: 'NOT_CONNECTED' };
+    return withCounts(applicationId, { applicationId, connection: 'configured', detail: 'Worker name is empty.', observedAt: null, scriptFound: null, lastDeployedAt: null });
   }
-  return { applicationId, connection: 'unknown', detail: 'Worker configuration has not been verified yet.', observedAt: null, scriptFound: null, lastDeployedAt: null, requests: null, errors: null, analytics: 'NOT_CONNECTED' };
+  return withCounts(applicationId, { applicationId, connection: 'unknown', detail: 'Worker configuration has not been verified yet.', observedAt: null, scriptFound: null, lastDeployedAt: null });
 }
 
 export function workerMonitorState(): WorkerMonitorState {
@@ -141,7 +161,7 @@ export async function syncWorkers(): Promise<WorkerMonitorState> {
   for (const app of wanted) {
     const accountId = normalizeRouting(app).worker.accountId;
     if (!accountId) {
-      snapshots.set(app.id, { applicationId: app.id, connection: 'not_connected', detail: 'Worker account ID is empty, so the script list was not requested.', observedAt: lastSyncAt, scriptFound: null, lastDeployedAt: null, requests: null, errors: null, analytics: 'NOT_CONNECTED' });
+      snapshots.set(app.id, withCounts(app.id, { applicationId: app.id, connection: 'not_connected', detail: 'Worker account ID is empty, so the script list was not requested.', observedAt: lastSyncAt, scriptFound: null, lastDeployedAt: null }));
       continue;
     }
     const list = byAccount.get(accountId) ?? [];
@@ -172,9 +192,7 @@ export async function syncWorkers(): Promise<WorkerMonitorState> {
           observedAt: lastSuccessAt,
           scriptFound: name ? Boolean(hit) : null,
           lastDeployedAt: hit?.modified_on ?? null,
-          requests: null,
-          errors: null,
-          analytics: 'NOT_CONNECTED',
+          ...countsFor(app.id),
         });
       }
     } catch (err) {
@@ -190,9 +208,7 @@ export async function syncWorkers(): Promise<WorkerMonitorState> {
           observedAt: lastSyncAt,
           scriptFound: null,
           lastDeployedAt: null,
-          requests: null,
-          errors: null,
-          analytics: 'NOT_CONNECTED',
+          ...countsFor(app.id),
         });
       }
     }

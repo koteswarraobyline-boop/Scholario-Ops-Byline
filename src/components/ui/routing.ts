@@ -1,4 +1,4 @@
-import { Application, LbRouting, LoadBalancerState } from '../../types';
+import { Application, CloudflareZone, LbRouting, LoadBalancerState, VpsServer } from '../../types';
 import { effectiveRoutingMethod } from '../../lib/trafficHealth';
 
 export type RouteState = 'PRD' | 'DR' | 'SPLIT' | 'MOVING' | 'UNKNOWN';
@@ -75,12 +75,32 @@ export function visualTraffic(
   return { kind: 'unknown' };
 }
 
+export type DnsSide = 'PRD' | 'DR' | 'OTHER' | null;
+
+/** Live A/AAAA target, when a synced zone contains the record. Null when the record was not read. */
+export function dnsPointsAt(
+  app: Application,
+  servers: Array<Pick<VpsServer, 'id' | 'ip'>>,
+  zones: Array<Pick<CloudflareZone, 'domain' | 'dnsRecords'>>,
+): DnsSide {
+  const name = app.trafficRouting?.direct.dnsRecordName || app.dnsRecordName || '';
+  if (!name || !app.cloudflareZone) return null;
+  const zone = zones.find(z => z.domain === app.cloudflareZone || app.cloudflareZone.endsWith(`.${z.domain}`));
+  const record = zone?.dnsRecords.find(r => r.name === name && (r.type === 'A' || r.type === 'AAAA'));
+  if (!record) return null;
+  const prd = servers.find(s => s.id === app.prdServerId);
+  const dr = servers.find(s => s.id === app.drServerId);
+  if (prd?.ip && record.target === prd.ip) return 'PRD';
+  if (dr?.ip && record.target === dr.ip) return 'DR';
+  return 'OTHER';
+}
+
 /**
  * Which environment is serving traffic.
- * - Load-Balancer apps: Cloudflare's serving set. SPLIT when both pools receive traffic.
- * - DNS-record apps: the failover state Scholario Ops itself applied.
+ * Worker, custom, and unconfigured methods stay UNKNOWN.
+ * Load Balancer apps follow Cloudflare. Direct DNS follows the synced record, then a recorded failover.
  */
-export function routeState(app: Application, lb: LoadBalancerState | null): RouteState {
+export function routeState(app: Application, lb: LoadBalancerState | null, pointsAt?: DnsSide): RouteState {
   const method = effectiveRoutingMethod(app);
   if (method === 'cloudflare_worker' || method === 'cloudflare_worker_failover' || method === 'custom' || method === 'unknown') return 'UNKNOWN';
   if (method === 'cloudflare_lb') {
@@ -91,5 +111,17 @@ export function routeState(app: Application, lb: LoadBalancerState | null): Rout
     if (f.prd.receiving) return 'PRD';
     return 'UNKNOWN';
   }
-  return app.failoverState === 'FAILING_OVER' ? 'MOVING' : app.failoverState === 'DR_ACTIVE' ? 'DR' : 'PRD';
+  if (app.failoverState === 'FAILING_OVER') return 'MOVING';
+  if (pointsAt === 'PRD' || pointsAt === 'DR') return pointsAt;
+  if (pointsAt === 'OTHER') return 'UNKNOWN';
+  if (app.lastFailoverAt) return app.failoverState === 'DR_ACTIVE' ? 'DR' : 'PRD';
+  return 'UNKNOWN';
+}
+
+export function servingLabel(state: RouteState): string {
+  if (state === 'PRD') return 'PRD';
+  if (state === 'DR') return 'DR';
+  if (state === 'SPLIT') return 'Split';
+  if (state === 'MOVING') return 'Switching';
+  return 'Unknown';
 }

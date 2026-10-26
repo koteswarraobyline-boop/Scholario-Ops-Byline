@@ -144,11 +144,17 @@ function checkUrl(app: Application, env: Env, key: string): DrReadinessItem {
   // One timeout is not an outage: FAIL only once the monitor has confirmed it (failure confirmation threshold)
   if (m.lastStatusCode == null) return item(key, L, m.status === 'CRITICAL' ? 'FAIL' : 'WARNING', `No HTTP response (${m.lastProbeStatus}) from ${m.target}${m.status === 'CRITICAL' ? '' : ' — not yet confirmed'}`, m.lastCheck);
   const good = m.expectedStatusCode ? m.lastStatusCode === m.expectedStatusCode : m.lastStatusCode < 400;
-  return item(key, L, good ? 'PASS' : 'FAIL', `${m.target} → HTTP ${m.lastStatusCode}${m.expectedStatusCode ? ` (expected ${m.expectedStatusCode})` : ''} in ${m.history[0]?.responseTimeMs ?? '?'} ms`, m.lastCheck);
+  const latency = m.history[0]?.responseTimeMs;
+  const detail = `${m.target} → HTTP ${m.lastStatusCode}${m.expectedStatusCode ? ` (expected ${m.expectedStatusCode})` : ''} in ${latency ?? '?'} ms`;
+  if (good && typeof latency === 'number' && latency > config.drLatencyThresholdMs) {
+    return item(key, L, 'WARNING', `${detail} (warning above ${config.drLatencyThresholdMs} ms)`, m.lastCheck);
+  }
+  return item(key, L, good ? 'PASS' : 'FAIL', detail, m.lastCheck);
 }
 
 /** Resource checks of the DR server (agent). Shown separately; not part of the 13 core checks. */
 function capacityChecks(app: Application): DrReadinessItem[] {
+  if (!app.drServerId && !app.drUrl && !app.loadBalancer?.drPoolId) return [];
   const srv = serverFor(app, 'DR');
   const state = agentState(srv);
   const out: DrReadinessItem[] = [];
@@ -179,8 +185,14 @@ function capacityChecks(app: Application): DrReadinessItem[] {
     fullest ? `fullest ${fullest.mountPoint} ${fullest.usedPercent}% used (${fss!.length} filesystem(s))` : `${t.diskPercent}% used (${gb(t.diskUsedGb)} of ${gb(t.diskTotalGb)})`, at, 'capacity'));
   out.push(item('memory', 'Memory capacity', t.ramPercent >= cap.memoryPercent.critical ? 'FAIL' : t.ramPercent >= cap.memoryPercent.warning ? 'WARNING' : 'PASS', `${t.ramPercent}% used${t.swapPercent != null ? ` · swap ${t.swapPercent}%` : ''}`, at, 'capacity'));
   const cores = srv.cpuCores || srv.planSpec?.cpuCores || 0;
-  const perCore = cores ? t.loadAvg[0] / cores : 0;
-  out.push(item('cpu', 'CPU / load', t.cpuPercent >= cap.cpuPercent.critical || perCore >= THRESHOLDS.loadPerCore.critical ? 'FAIL' : t.cpuPercent >= cap.cpuPercent.warning || perCore >= THRESHOLDS.loadPerCore.warning ? 'WARNING' : 'PASS', `CPU ${t.cpuPercent}% · load ${t.loadAvg.map(l => l.toFixed(2)).join(' / ')}${cores ? ` on ${cores} cores` : ''}`, at, 'capacity'));
+  const loadText = `CPU ${t.cpuPercent}% · load ${t.loadAvg.map(l => l.toFixed(2)).join(' / ')}`;
+  if (!cores) {
+    const cpuOnly = t.cpuPercent >= cap.cpuPercent.critical ? 'FAIL' : t.cpuPercent >= cap.cpuPercent.warning ? 'WARNING' : 'UNKNOWN';
+    out.push(item('cpu', 'CPU / load', cpuOnly, `${loadText} · load per core unknown (no core count)`, at, 'capacity'));
+  } else {
+    const perCore = t.loadAvg[0] / cores;
+    out.push(item('cpu', 'CPU / load', t.cpuPercent >= cap.cpuPercent.critical || perCore >= THRESHOLDS.loadPerCore.critical ? 'FAIL' : t.cpuPercent >= cap.cpuPercent.warning || perCore >= THRESHOLDS.loadPerCore.warning ? 'WARNING' : 'PASS', `${loadText} on ${cores} cores`, at, 'capacity'));
+  }
 
   // Agent >= 3.3 categories, judged by the same rules as the server health summary
   const health = serverHealth(srv).health;
@@ -221,15 +233,28 @@ export function readiness(app: Application): ReadinessResult {
   ];
   // Cloudflare pool / origin checks only apply to Load-Balancer-routed applications; DNS-failover
   // applications are judged on the other checks (they could otherwise never be READY)
+  const drConfigured = Boolean(app.drServerId || app.drUrl || app.loadBalancer?.drPoolId);
+  const DR_KEYS = new Set(['dr_reachable', 'dr_app', 'dr_db', 'replication_healthy', 'replication_lag', 'dr_pool', 'dr_origin', 'dr_ssl', 'dr_url']);
+  if (!drConfigured) {
+    for (const check of core) {
+      if (!DR_KEYS.has(check.key)) continue;
+      check.status = 'NOT_CONFIGURED';
+      check.detail = 'DR is not configured for this application';
+    }
+  }
   const LB_ONLY = new Set(['dr_pool', 'dr_origin']);
-  const applicable = core.filter(c => app.loadBalancer || !LB_ONLY.has(c.key));
+  const applicable = core.filter(c => (drConfigured || !DR_KEYS.has(c.key)) && (app.loadBalancer || !LB_ONLY.has(c.key)));
+  for (const check of core) {
+    if (check.status === 'NOT_CONFIGURED') check.status = 'UNKNOWN';
+  }
   const passed = applicable.filter(c => c.status === 'PASS').length;
-  // DR cannot be judged at all without evidence that the DR application answers
-  const essential = core.filter(c => ['dr_app', 'dr_url'].includes(c.key));
-  const overall: DrOverall = core.some(c => c.status === 'FAIL') ? 'NOT_READY'
-    : passed === applicable.length ? 'READY'
+  // DR cannot be judged at all without evidence that the DR application answers.
+  // An application with no DR server, URL, or pool is not failed for lacking one.
+  const essential = drConfigured ? core.filter(c => ['dr_app', 'dr_url'].includes(c.key)) : core.filter(c => ['prd_app', 'prd_reachable'].includes(c.key));
+  const overall: DrOverall = applicable.some(c => c.status === 'FAIL') ? 'NOT_READY'
+    : passed === applicable.length && applicable.length > 0 ? 'READY'
       : essential.every(c => c.status !== 'PASS') ? 'UNKNOWN'
-        : 'PARTIALLY_READY';
+        : 'DEGRADED';
   return { checks: [...core, ...capacityChecks(app)], overall, passed, total: applicable.length, evaluatedAt: new Date().toISOString() };
 }
 
@@ -284,7 +309,7 @@ export function failoverPreflight(app: Application, target: 'DR' | 'PRIMARY'): F
   if (targetEnv === 'DR') {
     checks.push({
       key: 'readiness', label: 'DR readiness',
-      status: dr.overall === 'READY' ? 'PASS' : dr.overall === 'NOT_READY' ? 'FAIL' : dr.overall === 'PARTIALLY_READY' ? 'WARNING' : 'UNKNOWN',
+      status: dr.overall === 'READY' ? 'PASS' : dr.overall === 'NOT_READY' ? 'FAIL' : dr.overall === 'DEGRADED' ? 'WARNING' : 'UNKNOWN',
       detail: `${dr.overall} — ${dr.passed}/${dr.total} checks pass; not passing: ${dr.checks.filter(c => c.group === 'core' && c.status !== 'PASS').map(c => `${c.label} ${c.status}`).join(', ') || 'none'}`,
       observedAt: dr.evaluatedAt,
     });
