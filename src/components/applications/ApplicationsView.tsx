@@ -905,7 +905,7 @@ export const ApplicationsView: React.FC = () => {
                     : (isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs')
                 }`}
               >
-                <div>
+                <div className="min-w-0">
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-start gap-2 min-w-0">
                       <span className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${statusDot(app.status)}`} />
@@ -915,11 +915,11 @@ export const ApplicationsView: React.FC = () => {
                       {app.tier.replace('_', ' ')}
                     </span>
                   </div>
-                  <p className={`text-[11px] mt-1 line-clamp-2 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                  <p className={`text-[11px] mt-1 line-clamp-2 break-words ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                     {app.description || app.dnsRecordName || app.codeName}
                   </p>
                   {!isHealthy && (
-                    <p className={`text-[10px] font-mono mt-1 ${statusColor(app.status)}`}>{app.status}{cause ? ` · ${cause}` : ''}</p>
+                    <p className={`text-[10px] font-mono mt-1 line-clamp-2 break-words ${statusColor(app.status)}`}>{app.status}{cause ? ` · ${cause}` : ''}</p>
                   )}
                 </div>
 
