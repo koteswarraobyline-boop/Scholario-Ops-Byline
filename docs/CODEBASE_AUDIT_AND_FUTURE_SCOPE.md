@@ -6,7 +6,7 @@ This document records what the code does. It does not change application behavio
 
 **Facts** are what the files and previous test runs show. **Recommendations** are separate and are not implemented.
 
-## Status after this audit (26 October 2026)
+## Status after this audit (26–27 October 2026)
 
 The sections below are the 17 October record. This has landed since then:
 
@@ -16,6 +16,7 @@ The sections below are the 17 October record. This has landed since then:
 - A HARD dependency with a real check changes application status. A Hostinger connection can be deleted.
 - DR overall is READY, DEGRADED, NOT READY, or UNKNOWN. Core checks are PASS, FAIL, WARNING, or UNKNOWN. The UI no longer treats `PARTIALLY_READY` as a current overall.
 - Load is a capacity type (warning 1 per core, critical 2). An incident waits for 5 sustained minutes. A missing core count stays unknown and does not count as a healthy load.
+- Overview lists every application (`ApplicationStatusPanel`); ICT is not the only panel. PRD-only apps are valid (DR optional; new apps do not auto-pick DR). Two applications may share one server (Setup shows “Used by”). Live operator steps: `docs/PRODUCTION_LIVE_CHECKLIST.md`.
 
 ---
 
@@ -95,32 +96,32 @@ Status words:
 
 | Feature | Status | Evidence | Remaining work |
 |---|---|---|---|
-| Dashboard and overview | Partial | `src/components/overview/OverviewView.tsx` reads bootstrap data. `IctStatusPanel.tsx` is written as one Production site plus one DR site. | Make the overview a list of applications, not one ICT pair. Confirm production numbers on the live site. |
-| Application inventory | Partial | `POST/PATCH/DELETE /api/v1/applications` in `server/routes.ts`. Form in `AppEditor` (`src/components/setup/SetupView.tsx`). Each app has `prdServerId` and `drServerId` (DR may be empty). | Support more than two servers per app. Do not treat “no DR” as a broken app. |
-| Infrastructure inventory | Partial | Servers CRUD. Hostinger sync in `server/hostinger.ts` and `server/providers/connections.ts` fills plan, CPU and state for a matching IP. | A shared IP is deliberately not overwritten (`server/hostinger.ts`). There is no first-class Redis, queue or Worker resource. |
+| Dashboard and overview | Complete (code) | `OverviewView` + `ApplicationStatusPanel` list every application; DR cards only when configured. | Confirm production numbers on the live site ([docs/PRODUCTION_LIVE_CHECKLIST.md](PRODUCTION_LIVE_CHECKLIST.md)). |
+| Application inventory | Complete (PRD/DR model) | CRUD + `AppEditor`. PRD-only and shared PRD servers supported; DR optional; auto-failover defaults off. | More than two servers / Redis / queue as child resources → §12 (later). |
+| Infrastructure inventory | Complete (servers) | Servers CRUD + Hostinger sync by IP; shared IP not overwritten. | First-class Redis / queue / Worker rows → §12 (later). |
 | Monitoring and probes | Complete | `server/probes.ts`, `executeCheck` and `schedulerTick` in `server/engine.ts`. Results in `check_results`. Tests: `tests/monitoring.test.ts`. | Confirm the production process is actually running the scheduler (`/api/health` reports `schedulerAgeMs`). |
-| Telemetry agent | Partial | Ingest route above. Install script from `GET /api/v1/agent/install/:serverId`. Metrics in `server/telemetry.ts` and migration `004_extended_server_metrics.sql`. | No auto-update. Reinstall is manual. See section 8. |
+| Telemetry agent | Complete (code) | Ingest, install, and `GET /api/v1/agent/update/:serverId` (`buildUpdater` with config keep + rollback). Setup shows Install and Update commands. | Operator must run Update on each VPS ([PRODUCTION_LIVE_CHECKLIST.md](PRODUCTION_LIVE_CHECKLIST.md)). |
 | Incidents | Complete | Open, acknowledge, assign, note, resolve: `server/routes.ts` around `/v1/incidents`. Auto-open from monitors and `server/alerts.ts`. UI: `src/components/incidents/IncidentsView.tsx`. | Production paging depends on channels, quiet hours and SMTP. Inbox delivery was not checked. |
-| Alerts and email | Partial | `notifyIncident` in `server/notify.ts`. HTML page from `src/lib/incidentMail.ts` and `server/incidentMail.ts`. Dev-only test: `server/mockIncident.ts` (refused when `NODE_ENV=production`). | Last `main` CI run failed five tests in this area; the branch re-run passed. Do not treat SMTP “accepted” as “read in the inbox”. |
+| Alerts and email | Complete (code) | `notifyIncident`, HTML mail, mock refused in production. Tests cover escalation / grouping / subject. | Prove inbox delivery on the live SMTP / channel ([PRODUCTION_LIVE_CHECKLIST.md](PRODUCTION_LIVE_CHECKLIST.md)). |
 | Escalation and quiet hours | Complete | `server/notify.ts` `escalateStep`, `src/lib/quietHours.ts`. Tests: `tests/escalation.test.ts`, `tests/quiet-hours.test.ts`. | Operators must save policies in the UI or the defaults apply. |
-| Disaster recovery readiness | Partial | `server/readiness.ts` builds PASS/FAIL/WARNING/UNKNOWN checks. API `GET /api/v1/applications/:id/dr-readiness`. | Several checks assume a DR server and a DR URL. An app with only PRD should not be scored “not ready”. |
-| Failover | Partial | DNS switch: `switchDnsRecord` in `server/cloudflare.ts`, `POST /api/v1/applications/:id/failover` (super_admin only). Load-balancer apps are blocked from DNS failover (`server/engine.ts` throws 409) and use a decision log instead (`LbFailoverConsole`). Auto-failover stays off unless configured. | Do not enable auto-failover until a restore drill and a zone match exist. The live UI already reported “No Cloudflare zone found for ict.kodeit.digital”. |
-| Backups | Partial | Apps: agent or `POST /api/v1/backups/report` stores a backup row. Ops database: `deploy/backup-db.sh` and `deploy/verify-backup.sh` write status files read by `server/opsBackup.ts`. | The product records a restore result. It does not perform the restore. |
-| Dependencies | Partial | Tables in `007_dependency_register.sql`. Kinds include APPLICATION, SERVER, DATABASE, STORAGE, THIRD_PARTY_API, PROVIDER, BUSINESS_FEATURE. Links are HARD or SOFT. API under `/api/v1/registry` and `/api/v1/dependency-links`. UI: `src/components/resilience/DependencyMapView.tsx`. | `recomputeApplication` (`server/engine.ts`) uses **monitors**, not these links. A HARD database link does not change application health. |
-| Cloudflare Load Balancing | Partial | `server/loadbalancer.ts` `syncLoadBalancers` reads pools and health. Routing calls `zoneIdFor`. Read-only. Tests: `tests/loadbalancer.test.ts`. | Zone lookup failed for `ict.kodeit.digital` in the running UI (account visible, pools can still sync). Needs Zone Read and a zone named `kodeit.digital` or `ict.kodeit.digital` in that account. |
-| Cloudflare DNS zones | Partial | `server/cloudflare.ts` `syncCloudflare` when `CLOUDFLARE_API_TOKEN` is set. | Same token permission gap as routing. |
-| Cloudflare Workers | Missing | No `worker.js`. No Worker resource type. | Add only if a real Worker should be monitored. Do not invent one. |
-| Hostinger | Partial | Connections CRUD is create, rename and enable. No delete route. Sync matches a VPS by IP. | Delete is not implemented. Shared-IP servers are skipped on purpose. |
-| Deployments | Partial | `POST /api/v1/deployments/report` with `DEPLOY_REPORT_TOKEN`. List API and `DeploymentsView`. | `.github/workflows/ci-cd.yml` does **not** call that endpoint. Deploys of Scholario Ops itself are SSH via `deploy/release.sh`, not an in-app pipeline for the other products. |
-| Runbooks | Partial | CRUD and step checkboxes. `src/components/operations/RunbooksView.tsx`. | A runbook is a checklist. It does not execute commands on a VPS. |
-| Maintenance windows | Partial | Create, complete, delete. Tests exist around monitor behaviour during maintenance. | No edit-in-place of an open window. |
-| Audit log | Complete | `audit()` writes rows. UI: `src/components/admin/AuditLogsView.tsx`. | Retention depends on database growth. Confirm a prune job if the table gets large. |
-| Reports and reliability | Partial | `server/insights.ts`, `ReliabilityView`, `ReportsView`. SLO burn and disk forecast open incidents from `evaluateInsightAlerts` in `server/alerts.ts`. | Forecasts need enough metric history. Empty history must stay unknown, which the code comments say it does. |
-| Authentication | Complete | Login, refresh, logout, change password, roles. First boot can write `DATA_DIR/initial-admin-password.txt` (`README.md`). | No SSO. That file must be deleted after the first login. |
+| Disaster recovery readiness | Complete (code) | `server/readiness.ts`. PRD-only apps are not scored NOT_READY for lacking DR. | Confirm live PRD/DR checks after agents and URLs are wired. |
+| Failover | Complete (code, safe default) | DNS failover (super_admin); LB apps use decision log; auto-failover off unless configured and only for direct DNS. | Keep auto-failover off until restore drill + zone match ([PRODUCTION_LIVE_CHECKLIST.md](PRODUCTION_LIVE_CHECKLIST.md)). |
+| Backups | Complete (code, status only) | App backup reports + Ops `deploy/backup-db.sh` / `verify-backup.sh`. | Product records restore results; it does not execute restores (by design). |
+| Dependencies | Complete (code) | Register + HARD/SOFT links. `recomputeApplication` applies HARD (can CRITICAL) and SOFT (can WARNING) when a real check exists. Status line cites cause via `statusCause`. | — |
+| Cloudflare Load Balancing | Complete (code) | Read-only pool sync; empty/unreadable zones surface a clear token error. Tests: `tests/loadbalancer.test.ts`. | Live token must include Zone Read for the real zone. |
+| Cloudflare DNS zones | Complete (code) | `syncCloudflare` when token set; permission gaps are errors, not silent empty data. | Same live token scope as LB. |
+| Cloudflare Workers | Partial | Worker routing + `POST /api/v1/worker-events` for request/error counts. No first-class Worker resource table / `worker.js` in-repo. | Add a Worker resource only when a real Worker must be inventoried (§12). |
+| Hostinger | Complete (code) | Connections CRUD including delete; sync by IP; shared IP not overwritten on purpose. | — |
+| Deployments | Complete (code) | Report API + UI; CI posts SUCCESS / ROLLED_BACK / FAILED after deploy. | Other products still report via their own pipelines / tokens. |
+| Runbooks | Complete (code, checklist) | CRUD and step checkboxes. | Does not SSH/execute on a VPS (by design). |
+| Maintenance windows | Complete (code) | Create, edit, complete, delete; alerts paused for scope. | — |
+| Audit log | Complete | `audit()` writes rows. UI: `src/components/admin/AuditLogsView.tsx`. | Retention prune already configured (`AUDIT_RETENTION_ENTRIES`). |
+| Reports and reliability | Complete (code) | Insights, uptime/daily/summary, SLO/disk alerts; empty history stays unknown. | Needs live metric history for forecasts. |
+| Authentication | Complete | Login, refresh, logout, change password, roles, optional OIDC SSO when configured. | Delete `initial-admin-password.txt` after first login. |
 | Users | Complete | `src/components/admin/UsersView.tsx`. Create, reset password, delete. | Super-admin is required to delete a user. |
 | Notifications channels | Complete | Teams, webhook, email, PagerDuty. Edit and delete for `it_administrator`. Delivery log and resend. | Email needs `PUBLIC_URL` for the incident button. |
-| Agent version display | Partial | `agentHealth` / `agentOutdated` in `server/telemetryHealth.ts`. UI badges in `ServerTabs.tsx` and `InfrastructureView.tsx`. Tests in `tests/telemetry.test.ts`. | See section 8. Not verified on the live VPSs in this audit. |
-| CI/CD | Partial | Workflow tests then deploys. Docs: `docs/CI-CD.md`. | Latest `main` test job failed, so production was not updated by that run. |
+| Agent version display | Complete (code) | Outdated badge + Setup Update command. Tests in `tests/telemetry.test.ts` / agent-update. | Verify on live VPSs after Update. |
+| CI/CD | Complete (code) | Workflow tests then deploys; deploy reports into Ops. | Merge latest branch to `main` so production receives it. |
 | Background scheduler | Complete | `schedulerTick` every 1s; alerts every 60s; Cloudflare and Hostinger on their own intervals. Leader lock in `server/leader.ts` so only one process escalates. | A second copy of the process on the same database must not be left running. |
 
 A page in `src/App.tsx` is not proof of completeness. The routes above load real API data through `OpsContext`. The dev-only mock incident (`server/mockIncident.ts`) is the exception: it is a labelled test monitor and is refused in production.
@@ -205,7 +206,7 @@ Migrations `001`–`009`. Important tables:
 | Dependency map | What an administrator typed. It is real inventory, not a discovery scan. |
 | Deployments and backups | Reports pushed in by a script or CI token. Empty until something reports. |
 | Mock incident | `server/mockIncident.ts`. Disabled monitor, fake HTTP 503, only when not production. It must not be treated as a customer outage. |
-| `IctStatusPanel` | Not hard-coded IPs. It looks at the application’s PRD and DR. The README’s ICT addresses are documentation of what was stored, not values compiled into the UI. |
+| `ApplicationStatusPanel` | Not hard-coded IPs. One panel per application; DR only when configured. The README’s ICT addresses are documentation of what was stored, not values compiled into the UI. |
 | Agent script | Generated from `server/agent.ts` by Setup. The separate `agent-3.3.1.py` copy was removed on 26 October 2026. |
 
 `README.md` says “All data is real.” That is true for the dashboard’s live objects. It is not true for the dependency graph (manual) or for backup restore (a reported status, not a restore this app performs).
@@ -222,7 +223,7 @@ Migrations `001`–`009`. Important tables:
 4. **Storage.** `ingestAgentReport` in `server/engine.ts`: `if (r.agentVersion) srv.agentVersion = text(r.agentVersion, 32)` and `srv.lastSeen = now`. A missing or empty `agentVersion` leaves the old version in place.
 5. **Comparison.** `agentOutdated` in `server/telemetryHealth.ts` is true only when `compareVersions(stored, AGENT_VERSION) < 0`. The expected version is the **running server’s** constant, not a file on the VPS.
 6. **API.** Server detail and the agents list add `expectedVersion: AGENT_VERSION` and `outdated` (`server/routes.ts` around the agent summary).
-7. **UI.** `InfrastructureView.tsx` and `ServerTabs.tsx` show “OUTDATED” when `server.agent.outdated` is true, and they tell the operator to reinstall from Setup.
+7. **UI.** `InfrastructureView.tsx` and `ServerTabs.tsx` show “OUTDATED” when `server.agent.outdated` is true, and they tell the operator to run **Update** from Setup → Agent.
 8. **Freshness.** `agentState` in `server/health.ts` uses `lastSeen`. A rejected report does not move `lastSeen`. The UI then keeps the previous version.
 
 There is **no** component that SSHes to the VPS and reads the Python file. There is **no** auto-update loop.
@@ -290,7 +291,7 @@ What still assumes one shape:
 | A load balancer has exactly two pools | `application_load_balancers` |
 | Redis is only a systemd unit name in the default agent install query | `server/routes.ts` install handler (`redis-server` in the default service list) |
 | Workers, queues and extra databases are not resource types on the application | No tables for them. The register can *name* a database, but the agent’s `databases` array is what is actually probed |
-| Overview copy talks about Production and DR as a pair | `IctStatusPanel.tsx` |
+| Overview is per application (DR optional) | `ApplicationStatusPanel.tsx` (was ICT-pair framed) |
 | Health ignores HARD/SOFT links | `recomputeApplication` uses monitors only |
 
 Adding a new application in Setup does not require a code change. Adding a new **kind** of dependency that should affect health does.
@@ -307,9 +308,9 @@ Priority is for the next build, not a judgement of the people who wrote the curr
 | Finish the Cloudflare zone match for routing | Done (26 Oct 2026) | An empty zone list is an error that says the token cannot list zones. |
 | Decide health from monitors **and** HARD dependencies, or label the register as documentation | Done (26 Oct 2026) | A HARD link with a real check changes status. A SOFT link can only degrade it. |
 | Agent update path that is the install script, with rollback | Done (26 Oct 2026) | `buildUpdater` keeps the config and restores the previous script. The loose `agent-3.3.1.py` was removed. |
-| Applications with only PRD, or with extra servers | Medium | The two-column model will not fit every product. |
-| Do not treat ICT as the only application in overview | Medium | `IctStatusPanel` is a pair. |
-| Hostinger connection delete | Low | Create and rename exist; delete does not. |
+| Applications with only PRD, or with extra servers | Done (27 Oct 2026) | PRD-only saves; DR optional; shared PRD server allowed. Extra servers beyond PRD/DR still need the §12 resource model. |
+| Do not treat ICT as the only application in overview | Done (27 Oct 2026) | `ApplicationStatusPanel` lists every application. |
+| Hostinger connection delete | Done (26 Oct 2026) | Delete route exists for `it_administrator`. |
 | Call `POST /api/v1/deployments/report` from CI if deployments should show Scholario Ops releases | Done (26 Oct 2026) | The workflow reports SUCCESS, ROLLED_BACK, or FAILED. Missing report secrets fail the step. |
 | Remove or ignore untracked `agent-3.3.1.py` once install-from-Setup is the only copy | Done (26 Oct 2026) | The file was removed. Install and update use `server/agent.ts`. |
 
@@ -353,7 +354,7 @@ Do not start these until this report is accepted. Each task lists a rollback tha
 |---|---|
 | Priority | Next |
 | Why | 9–20 apps will not fit two server columns and an ICT overview. |
-| Files | `server/migrations/` (new resource table), `server/routes.ts` application validation, `AppEditor`, `OverviewView.tsx`, `IctStatusPanel.tsx` |
+| Files | `server/migrations/` (new resource table), `server/routes.ts` application validation, `AppEditor`, `OverviewView.tsx`, `ApplicationStatusPanel.tsx` |
 | Depends on | Phase 0 |
 | Tests | Create an app with no DR server; create two apps on one server; API rejects a DR id equal to the PRD id (already tested) |
 | Risk | Medium (data shape) |

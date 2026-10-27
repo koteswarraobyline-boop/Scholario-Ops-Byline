@@ -10,14 +10,24 @@ import { effectiveRoutingMethod, ROUTING_METHOD_LABELS } from '../../lib/traffic
 type Env = 'PRD' | 'DR';
 
 /**
- * Live answer to "is the real Production and DR infrastructure healthy right now?"
- * for every application mapped to a Cloudflare Load Balancer (e.g. the ICT application). Every value
- * comes from the backend; missing data is shown as missing.
+ * Live per-application health (Production, and DR only when configured).
+ * Every application is listed — not a single ICT pair. Missing data stays missing.
  */
-export const IctStatusPanel: React.FC = () => {
-  const { applications } = useOps();
+export const ApplicationStatusPanel: React.FC = () => {
+  const { applications, theme } = useOps();
+  const isDark = theme === 'dark';
   if (applications.length === 0) return null;
-  return <>{applications.map(app => <AppPanel key={app.id} app={app} />)}</>;
+  return (
+    <section className="space-y-3 min-w-0" aria-label="Application health">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className="text-xs font-bold font-mono uppercase tracking-wider">Applications — live</h2>
+        <p className={`text-[11px] font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+          {applications.length} registered · DR shown only when configured
+        </p>
+      </div>
+      {applications.map(app => <AppPanel key={app.id} app={app} />)}
+    </section>
+  );
 };
 
 const drConfigured = (app: Application) => Boolean(app.drServerId || app.drUrl || app.loadBalancer?.drPoolId);

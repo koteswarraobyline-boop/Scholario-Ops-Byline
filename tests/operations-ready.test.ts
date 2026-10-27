@@ -427,12 +427,19 @@ describe('operator checks, SLA buckets, maintenance, runbooks, and backup report
     assert.equal(prd.status, 201, prd.raw);
     const solo = await api('POST', '/api/v1/applications', { name: 'Solo', codeName: 'solo-app', tier: 'TIER_3', prdServerId: prd.body.data.id, drServerId: '' });
     assert.equal(solo.status, 201, solo.raw);
+    assert.equal(solo.body.data.drServerId, '');
+    assert.equal(solo.body.data.autoFailover, false, 'auto-failover stays off without DR');
     const ready = await api('GET', `/api/v1/applications/${solo.body.data.id}/dr-readiness`);
     assert.equal(ready.status, 200, ready.raw);
     assert.notEqual(ready.body.data.overall, 'NOT_READY');
     const drUrl = ready.body.data.checks.find((c: { key: string }) => c.key === 'dr_url');
     assert.equal(drUrl.status, 'UNKNOWN');
     assert.match(drUrl.detail, /not configured/);
+    const avail = await api('GET', `/api/v1/applications/${solo.body.data.id}/availability?range=24h`);
+    assert.equal(avail.status, 200, avail.raw);
+    const drEnv = avail.body.data.environments.find((e: { environment: string }) => e.environment === 'DR');
+    assert.ok(!drEnv || drEnv.monitoring.availabilityPercent === null || drEnv.monitoring.total === 0,
+      'PRD-only apps must not show DR as down');
 
     const { appId: upId } = await appPair('dep-up');
     const { appId: downId } = await appPair('dep-down');
@@ -453,6 +460,31 @@ describe('operator checks, SLA buckets, maintenance, runbooks, and backup report
     const softened = await api('GET', `/api/v1/applications/${upId}`);
     assert.equal(softened.body.data.status, 'WARNING');
     assert.notEqual(softened.body.data.status, 'CRITICAL');
+  });
+
+  test('two applications can share one PRD server; each keeps its own status', async () => {
+    const shared = await api('POST', '/api/v1/servers', { hostname: 'shared-prd', ip: nextIp(), environment: 'PRD' });
+    assert.equal(shared.status, 201, shared.raw);
+    const sid = shared.body.data.id as string;
+    const a = await api('POST', '/api/v1/applications', { name: 'Shared A', codeName: 'share-a', tier: 'TIER_2', prdServerId: sid, drServerId: '' });
+    const b = await api('POST', '/api/v1/applications', { name: 'Shared B', codeName: 'share-b', tier: 'TIER_3', prdServerId: sid, drServerId: '' });
+    assert.equal(a.status, 201, a.raw);
+    assert.equal(b.status, 201, b.raw);
+    assert.equal(a.body.data.prdServerId, sid);
+    assert.equal(b.body.data.prdServerId, sid);
+    const monA = await api('POST', '/api/v1/monitors', monitorBody('Share A up', a.body.data.id, `${sampleBase}/ok`, 'PRD', true));
+    const monB = await api('POST', '/api/v1/monitors', monitorBody('Share B down', b.body.data.id, `${sampleBase}/down`, 'PRD', true));
+    assert.equal((await api('POST', `/api/v1/monitors/${monA.body.data.id}/probe`)).body.data.status === 'CRITICAL', false);
+    assert.equal((await api('POST', `/api/v1/monitors/${monB.body.data.id}/probe`)).body.data.status, 'CRITICAL');
+    const gotA = await api('GET', `/api/v1/applications/${a.body.data.id}`);
+    const gotB = await api('GET', `/api/v1/applications/${b.body.data.id}`);
+    assert.notEqual(gotA.body.data.status, 'CRITICAL');
+    assert.equal(gotB.body.data.status, 'CRITICAL');
+    const srv = await api('GET', `/api/v1/servers/${sid}`);
+    assert.equal(srv.status, 200, srv.raw);
+    const used = srv.body.data.usedBy as Array<{ id: string }>;
+    assert.equal(used.length, 2);
+    assert.deepEqual(used.map(u => u.id).sort(), [a.body.data.id, b.body.data.id].sort());
   });
 
   test('a maintenance window can be edited, and an added Hostinger connection can be deleted', async () => {

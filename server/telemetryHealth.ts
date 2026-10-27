@@ -78,7 +78,7 @@ export function serverHealth(srv: ServerRecord): { health: HealthCategory[]; war
   else if (a.state === 'STALE') { cat('agent', 'Agent', 'WARNING', `Stale — last report ${a.lastSeen}`); warn('agent-stale', 'agent', 'WARNING', `Agent stale (last report ${a.lastSeen})`); }
   else {
     const issues: string[] = [];
-    if (a.outdated) { issues.push(`outdated (v${a.version}, current v${a.expectedVersion})`); warn('agent-outdated', 'agent', 'WARNING', `Outdated agent v${a.version} — current is v${a.expectedVersion}; reinstall from Setup`); }
+    if (a.outdated) { issues.push(`outdated (v${a.version}, current v${a.expectedVersion})`); warn('agent-outdated', 'agent', 'WARNING', `Outdated agent v${a.version} — current is v${a.expectedVersion}; run Update from Setup → Agent`); }
     if (a.errors.length) { issues.push(`${a.errors.length} collector error(s)`); warn('agent-errors', 'agent', 'WARNING', `Agent collector errors: ${a.errors.join(' · ')}`); }
     cat('agent', 'Agent', issues.length ? 'WARNING' : 'HEALTHY', issues.length ? `Connected · ${issues.join(' · ')}` : `Connected · v${a.version ?? '?'}`);
   }

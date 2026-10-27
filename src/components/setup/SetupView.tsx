@@ -336,15 +336,17 @@ const AgentPanel: React.FC<{ server: VpsServer; onClose: () => void }> = ({ serv
                   PUBLIC_URL is not set on the Ops server, so this command uses the address in your browser. Make sure the VPS can reach it, or set PUBLIC_URL in .env.
                 </div>
               )}
-              <p className={`text-[11px] ${st.muted}`}>1. SSH into <b>{server.ip}</b> as root (or a sudo user) and run:</p>
+              <p className={`text-[11px] ${st.muted}`}>SSH into <b>{server.ip}</b> as root (or a sudo user).</p>
+              <p className={`text-[11px] font-semibold ${st.muted}`}>Install <span className="font-normal">(first time only)</span></p>
               <CopyBox value={info.installCommand} />
               <p className={`text-[11px] ${st.muted}`}>
-                It installs a small Python 3 agent as the <code className={st.code}>scholario-agent</code> systemd service. It reports CPU, RAM, disk, load, network, top processes,
-                service states (nginx, mysql, …) and warning/error logs every 10 seconds. Check it with <code className={st.code}>journalctl -u scholario-agent -f</code>.
+                Installs the <code className={st.code}>scholario-agent</code> systemd service (Python 3). It reports CPU, RAM, disk, load, network, top processes,
+                service states and warning/error logs every 10 seconds. Logs: <code className={st.code}>journalctl -u scholario-agent -f</code>.
               </p>
-              <p className={`text-[11px] ${st.muted}`}>2. Status here switches to <b className="text-emerald-500">CONNECTED</b> within ~15 seconds. Current: <b className={statusColor(server.agentStatus)}>{server.agentStatus}</b> (last report {timeAgo(server.lastSeen)}).</p>
-              <p className={`text-[11px] ${st.muted}`}>To replace an agent that is already installed, run this instead. It keeps the token and config, and restores the previous script if version {info.agentVersion} does not report within 40 seconds.</p>
+              <p className={`text-[11px] ${st.muted}`}>Status should become <b className="text-emerald-500">CONNECTED</b> within ~15 seconds. Current: <b className={statusColor(server.agentStatus)}>{server.agentStatus}</b> (last report {timeAgo(server.lastSeen)}).</p>
+              <p className={`text-[11px] font-semibold ${st.muted}`}>Update <span className="font-normal">(already installed — preferred when OUTDATED)</span></p>
               <CopyBox value={info.updateCommand} />
+              <p className={`text-[11px] ${st.muted}`}>Keeps the token and config; restores the previous script if agent {info.agentVersion} does not report within 40 seconds.</p>
               <details className={`text-[11px] ${st.muted}`}>
                 <summary className="cursor-pointer">Uninstall</summary>
                 <div className="mt-2"><CopyBox value={info.uninstallCommand} /></div>
@@ -431,6 +433,7 @@ const ServersSection: React.FC = () => {
               <tr>
                 <th className="py-2 px-3">Server</th>
                 <th className="py-2 px-3">Role</th>
+                <th className="py-2 px-3">Used by</th>
                 <th className="py-2 px-3">Status</th>
                 <th className="py-2 px-3">Agent</th>
                 <th className="py-2 px-3">CPU / RAM / Disk</th>
@@ -439,7 +442,9 @@ const ServersSection: React.FC = () => {
               </tr>
             </thead>
             <tbody className={`divide-y ${st.isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
-              {servers.map(s => (
+              {servers.map(s => {
+                const usedBy = applications.filter(a => a.prdServerId === s.id || a.drServerId === s.id);
+                return (
                 <tr key={s.id}>
                   <td className="py-2 px-3">
                     <div className="font-semibold">{s.hostname}</div>
@@ -447,6 +452,9 @@ const ServersSection: React.FC = () => {
                     {s.planSpec && <div className={st.faint}>{s.planSpec.name || 'Plan'}: {s.planSpec.cpuCores} CPU · {s.planSpec.ramGb} GB · {s.planSpec.diskGb} GB</div>}
                   </td>
                   <td className="py-2 px-3"><span className={s.environment === 'PRD' ? 'text-blue-400 font-bold' : 'text-purple-400 font-bold'}>{s.environment}</span></td>
+                  <td className={`py-2 px-3 ${st.faint}`}>
+                    {usedBy.length === 0 ? '—' : usedBy.map(a => a.name).join(', ')}
+                  </td>
                   <td className={`py-2 px-3 font-bold ${statusColor(s.status)}`}>{s.status}</td>
                   <td className="py-2 px-3">
                     <div className={`font-bold ${statusColor(s.agentStatus)}`}>{s.agentStatus}</div>
@@ -464,7 +472,8 @@ const ServersSection: React.FC = () => {
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -545,7 +554,8 @@ export const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> 
     hcIntervalSec: initial.healthCheck?.intervalSec ?? 30, hcTimeoutSec: initial.healthCheck?.timeoutSec ?? 15, hcSsl: initial.healthCheck?.sslMonitoring ?? true,
   } : {
     name: '', codeName: '', description: '', tier: 'TIER_1', rtoTargetMin: 30, rpoTargetMin: 15,
-    prdServerId: servers.find(s => s.environment === 'PRD')?.id ?? '', drServerId: servers.find(s => s.environment === 'DR')?.id ?? '',
+    // PRD-only is valid: do not auto-pick a DR server. Operators opt in to DR.
+    prdServerId: servers.find(s => s.environment === 'PRD')?.id ?? '', drServerId: '',
     cloudflareZone: '', dnsRecordName: '', autoFailover: false,
     prdUrl: '', drUrl: '',
     ...routingFields(undefined),
@@ -632,13 +642,13 @@ export const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> 
             <option value="TIER_1">Tier 1 — critical</option><option value="TIER_2">Tier 2 — important</option><option value="TIER_3">Tier 3 — internal</option>
           </select>
         </Label>
-        <Label text="PRD (main) server">
+        <Label text="PRD (main) server" hint="Several applications may share the same server">
           <select className={st.input} value={form.prdServerId} onChange={e => set('prdServerId', e.target.value)}>
             <option value="">— none —</option>
             {servers.map(s => <option key={s.id} value={s.id}>{s.hostname} ({s.ip}) {s.environment}</option>)}
           </select>
         </Label>
-        <Label text="DR (standby) server">
+        <Label text="DR (standby) server" hint="Optional — leave none for a Production-only application">
           <select className={st.input} value={form.drServerId} onChange={e => set('drServerId', e.target.value)}>
             <option value="">— none —</option>
             {servers.map(s => <option key={s.id} value={s.id}>{s.hostname} ({s.ip}) {s.environment}</option>)}

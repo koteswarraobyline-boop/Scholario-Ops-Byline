@@ -20,7 +20,7 @@ Status definitions used in this repository:
 |---|---|---|
 | Backend (Node/Express, PostgreSQL) | ✅ Done | All backend code is in `server/`. PostgreSQL schema `ops` is the only source of truth. Mock data, localStorage data and Redis have all been removed. |
 | Dashboard (React) | ✅ Done | 18 protected pages plus login. All data comes from the API. |
-| Realtime | ✅ Done | Server-Sent Events with one-time tickets. There is no WebSocket server, even though the hook file is still named `useWebSocket.ts`. |
+| Realtime | ✅ Done | Server-Sent Events with one-time tickets via `api.subscribeRealtime` in `src/services/api.ts`. There is no WebSocket server. |
 | Monitoring engine | ✅ Done | HTTP/TCP/DNS/SSL probes, incidents, alerts, escalation, dead-man heartbeat |
 | Integrations | ✅ Done (code) | Cloudflare Load Balancer (read-only), Hostinger VPS API (read-only), VPS telemetry agent v3.2.0, backup and deployment reporting |
 | Notifications | ✅ Done | Microsoft Teams, Email (SMTP), Webhook, PagerDuty. Deduplicated, with cooldown and recovery messages. |
@@ -32,7 +32,7 @@ Status definitions used in this repository:
 
 Data migration: the old JSON stores (`data/ops-store.json`, `data/metrics.json`, `data/checks/`) were imported into PostgreSQL on 2026-10-06. Their `*.imported-to-postgres-*` copies are kept in `data/` only as a backup.
 
-> **Note:** [COMPLETION_REPORT.md](COMPLETION_REPORT.md) is out of date. It describes an earlier design that used Redis, WebSockets, bcrypt, port 4000/ws and seeded demo users, and none of that exists in the current code. Trust this overview and the code when they disagree with it.
+> **Note:** An older `COMPLETION_REPORT.md` (Redis / WebSocket / seeded users) was removed — trust this overview and the code.
 
 ### Project history (high level)
 
@@ -98,7 +98,7 @@ CI pipelines ──HTTPS──▶ /api/v1/deployments/report  (Bearer DEPLOY_REP
 | `server/config.ts`, `server/validate.ts`, `server/logger.ts` | Env config, input validation, structured logs with redaction |
 | `server/migrations/` | `001_init.sql`, `002_indexes.sql`, `003_environment_inventory.sql` |
 | `server/scripts/migrate.ts` | `npm run db:migrate` |
-| `src/` | React dashboard: `components/` (by area), `context/` (`AuthContext`, `OpsContext`), `services/api.ts`, `hooks/useWebSocket.ts` (SSE), `types/` |
+| `src/` | React dashboard: `components/` (by area), `context/` (`AuthContext`, `OpsContext`), `services/api.ts` (REST + SSE), `types/` |
 | `tests/` | `agent`, `config-flow`, `loadbalancer`, `monitoring`, `production` test suites plus fixtures |
 | `deploy/` | `release.sh` (release manager), `ecosystem.production.cjs`, `backup-db.sh` |
 | `nginx/scholario-ops.conf`, `ecosystem.config.js` | Reverse proxy and PM2 config |
@@ -258,9 +258,11 @@ npm run build && npm start   # production build: dist/ + dist-server/server.js
 
 | Item | Notes |
 |---|---|
-| Connect real data sources per application | Install agents on PRD and DR servers, configure the DB probe per environment, schedule backup jobs to call `/v1/backups/report`, set `CLOUDFLARE_API_TOKEN` with LB read permissions. Until then the dashboard shows UNKNOWN / NOT CONFIGURED. |
-| Notification channels | Add Teams/Email/Webhook/PagerDuty channels and escalation policies in Communications |
-| Dead-man heartbeat | Built in: stale / disconnected agents, failing application checks, failed services and unavailable databases open incidents |
-| Branch protection | Apply the ruleset from `docs/BRANCH-PROTECTION.md` in GitHub, if it isn't applied yet |
-| Housekeeping | Rename `src/hooks/useWebSocket.ts` (it uses SSE). Refresh or remove the outdated `COMPLETION_REPORT.md`. Remove `.env.legacy-server.bak` and the imported JSON backups in `data/` once they're no longer needed. |
-| Frontend | Code-split the bundle. Finish modal focus traps and mobile modal layouts. |
+| Connect real data sources per application | Operator checklist: [docs/PRODUCTION_LIVE_CHECKLIST.md](docs/PRODUCTION_LIVE_CHECKLIST.md). Install agents on PRD and DR servers, configure the DB probe per environment, schedule backup jobs to call `/v1/backups/report`, set `CLOUDFLARE_API_TOKEN` with LB read permissions. Until then the dashboard shows UNKNOWN / NOT CONFIGURED. |
+| Notification channels | Add Teams/Email/Webhook/PagerDuty channels and escalation policies in Communications; prove inbox delivery. |
+| Dead-man heartbeat | Built in: stale / disconnected agents, failing application checks, failed services and unavailable databases open incidents. |
+| Branch protection | Apply the ruleset from `docs/BRANCH-PROTECTION.md` in GitHub, if it isn't applied yet. |
+| Ship latest branch | Merge current work to `main` so CI can deploy; deploy only after `test` passes. |
+| Later architecture (only remaining large code) | First-class Workers / Redis / queue / extra-server child resources beyond PRD+DR — see `docs/CODEBASE_AUDIT_AND_FUTURE_SCOPE.md` §12. Everything else in the ops product is implemented in code; remaining work is live wiring ([docs/PRODUCTION_LIVE_CHECKLIST.md](docs/PRODUCTION_LIVE_CHECKLIST.md)). |
+
+Realtime uses Server-Sent Events via `api.subscribeRealtime` in `src/services/api.ts` (not a WebSocket). Modal dialogs use `src/components/ui/useDialog.ts` (focus trap, Escape, restore focus); covered by `tests/responsive.test.ts`. The outdated `COMPLETION_REPORT.md` was removed.

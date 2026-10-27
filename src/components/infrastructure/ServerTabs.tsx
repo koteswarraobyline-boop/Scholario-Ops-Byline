@@ -20,7 +20,7 @@ import { ServerMetricsPanel } from './ServerMetrics';
 interface TabProps { server: VpsServer; isDark: boolean }
 
 const reported = (s: VpsServer) => Boolean(s.lastSeen);
-const needsAgent33 = 'Not reported — needs agent 3.3 (reinstall the agent from Setup).';
+const needsAgent33 = 'Not reported — needs agent 3.3 (run Update from Setup → Agent).';
 const agentLevel = (s: VpsServer): TelemetryLevel =>
   !s.lastSeen ? 'UNKNOWN' : s.agentStatus === 'CONNECTED' ? (s.agent?.outdated ? 'WARNING' : 'HEALTHY') : s.agentStatus === 'STALE' ? 'WARNING' : 'CRITICAL';
 const agentLabel = (s: VpsServer) => (!s.lastSeen ? 'Never reported' : s.agentStatus === 'CONNECTED' ? 'Connected' : s.agentStatus === 'STALE' ? 'Stale' : 'Disconnected');
@@ -43,7 +43,7 @@ const AgentBanners: React.FC<{ server: VpsServer }> = ({ server }) => {
     <>
       {server.lastSeen && server.agentStatus === 'DISCONNECTED' && <Banner level="CRITICAL" title="Agent disconnected">No report since {fmtDateTime(server.lastSeen)} — values below are the last known, not live.</Banner>}
       {server.agentStatus === 'STALE' && <Banner level="WARNING" title="Agent stale">Last report {fmtAgo(server.lastSeen)} — values below may be out of date.</Banner>}
-      {a?.outdated && <Banner level="WARNING" title="Outdated agent">This server runs agent v{a.version}; the current version is v{a.expectedVersion}. Reinstall the agent from Setup to collect all telemetry.</Banner>}
+      {a?.outdated && <Banner level="WARNING" title="Outdated agent">This server runs agent v{a.version}; the current version is v{a.expectedVersion}. Run the Update command from Setup → Agent (keeps the token and rolls back if the new process does not report).</Banner>}
       {timeWarnings.length > 0 && (
         <Banner level={timeWarnings.some(w => w.level === 'CRITICAL') ? 'CRITICAL' : 'WARNING'} title="Clock synchronization issue">
           {timeWarnings.map(w => w.message).join(' · ')}
@@ -678,7 +678,7 @@ export const AgentTab: React.FC<TabProps> = ({ server, isDark }) => {
         <KV isDark={isDark} rows={[
           ['Agent version', server.agentVersion || '—'],
           ['Expected version', a?.expectedVersion ?? '—'],
-          ['Update state', a?.outdated == null ? '—' : a.outdated ? <LevelBadge level="WARNING" label="OUTDATED — reinstall from Setup" /> : <LevelBadge level="HEALTHY" label="Up to date" />],
+          ['Update state', a?.outdated == null ? '—' : a.outdated ? <LevelBadge level="WARNING" label="OUTDATED — update from Setup" /> : <LevelBadge level="HEALTHY" label="Up to date" />],
           ['Started', server.agentStartedAt ? fmtDateTime(server.agentStartedAt) : '—'],
           ['Restarts seen', server.lastSeen ? String(server.agentRestartCount ?? 0) : '—'],
           ['Last seen', server.lastSeen ? <Ago iso={server.lastSeen} staleAfterSec={60} /> : 'Never'],
