@@ -56,14 +56,14 @@ All status values come from live sources:
 
 ## First-time setup (in the dashboard → **Setup**)
 
-1. **Add server.** Register the Main VPS (role PRD) and the DR VPS (role DR) with their public IPs.
-2. **Agent.** Run the install command on each VPS as root. Within about 15 seconds the agent shows CONNECTED.
-3. **Add application.** Choose the PRD and DR servers, the Cloudflare zone and the DNS record to switch on failover. Optionally tick the starter health monitors.
+1. **Add server.** Register the Main VPS (role PRD). Add a DR VPS only if the application has standby.
+2. **Agent.** Run **Install** (first time) or **Update** (when OUTDATED) on each VPS as root. Within about 15 seconds the agent shows CONNECTED.
+3. **Add application.** Choose the PRD server (DR is optional). Several applications may share one server. Set Cloudflare zone / DNS only if you use DNS failover.
 4. **Notifications.** Add a Teams, Email, Webhook or PagerDuty channel.
 
 ## Production
 
-See **[DEPLOYMENT.md](DEPLOYMENT.md)** for the step-by-step guide: Ubuntu VPS, PostgreSQL, PM2, nginx + HTTPS, moving your data, agents, backups and a checklist.
+See **[DEPLOYMENT.md](DEPLOYMENT.md)** for the install guide, and **[docs/PRODUCTION_LIVE_CHECKLIST.md](docs/PRODUCTION_LIVE_CHECKLIST.md)** for the post-deploy live wiring checklist (agents, Cloudflare token, channels, backups).
 
 ## Integrations (`.env`)
 

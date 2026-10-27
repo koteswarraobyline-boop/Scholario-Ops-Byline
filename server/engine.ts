@@ -858,7 +858,10 @@ export function ingestAgentReport(srv: ServerRecord, r: AgentReport, meta: { sou
 export function publicServer(s: ServerRecord) {
   const { agentToken: _t, ...rest } = s;
   const { health, warnings } = serverHealth(s);
-  return { ...rest, agent: agentHealth(s), health, warnings, vps: explainVps(s) };
+  const usedBy = db.applications
+    .filter(a => a.prdServerId === s.id || a.drServerId === s.id)
+    .map(a => ({ id: a.id, name: a.name, codeName: a.codeName }));
+  return { ...rest, agent: agentHealth(s), health, warnings, vps: explainVps(s), usedBy };
 }
 
 /** A report reached this server and was refused. Does not update lastSeen or telemetry. */

@@ -94,7 +94,7 @@ function applicationChecks(srv: ServerRecord, online: boolean, heavyInterval: nu
       if (port) {
         out.push(check({
           kind: 'APPLICATION', key: `app:${app.id}:${port}`, name: app.name, state: 'UNKNOWN',
-          detail: srv.lastSeen ? 'Check not reported yet (needs agent 3.3 — reinstall from Setup)' : 'Agent not connected',
+          detail: srv.lastSeen ? 'Check not reported yet (needs agent 3.3 — run Update from Setup → Agent)' : 'Agent not connected',
           target: `127.0.0.1:${port}${app.environments?.[env]?.healthPath ?? '/'}`,
         }));
       } else {

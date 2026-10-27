@@ -16,7 +16,7 @@ import { TrafficFlowChart } from '../visuals/TrafficFlowChart';
 import { IncidentFlowChart } from '../visuals/IncidentFlowChart';
 import { TelemetryAreaGraph } from '../visuals/TelemetryAreaGraph';
 import { EmptyState } from '../ui/EmptyState';
-import { IctStatusPanel } from './IctStatusPanel';
+import { ApplicationStatusPanel } from './ApplicationStatusPanel';
 import { dnsPointsAt, originFlows, routeState, servingLabel } from '../ui/routing';
 import { statusCause } from '../../lib/statusCause';
 import { Ago } from '../ui/Freshness';
@@ -472,8 +472,8 @@ export const OverviewView: React.FC = () => {
       {header}
       {loadErrorBanner}
 
-      {/* ── Load-Balancer-managed applications (e.g. ICT): live PRD / DR answer ── */}
-      <IctStatusPanel />
+      {/* ── Every registered application: live Production (+ DR when set) ── */}
+      <ApplicationStatusPanel />
 
       {/* ── Active route per application ─────────────────────────────────── */}
       <div className={`p-3.5 sm:p-4 rounded-lg border flex flex-col sm:flex-row sm:items-start justify-between gap-3 ${
@@ -487,7 +487,7 @@ export const OverviewView: React.FC = () => {
             <span className="font-bold text-xs font-mono">ACTIVE ROUTES</span>
             {applications.length === 0 ? (
               <div className="text-[11px] font-mono text-slate-400">
-                No applications registered — servers exist but no PRD/DR routing is defined. Add an application in Setup.
+                No applications registered — add one in Setup. DR and routing are optional per application.
               </div>
             ) : applications.map(app => {
               const prd = servers.find(s => s.id === app.prdServerId);

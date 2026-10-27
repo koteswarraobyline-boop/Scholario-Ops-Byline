@@ -671,6 +671,8 @@ export interface VpsServer {
   agent?: AgentHealthTelemetry;
   health?: HealthCategory[];
   warnings?: ServerWarning[];
+  /** Applications that use this server as PRD or DR (API only; not stored) */
+  usedBy?: Array<{ id: string; name: string; codeName: string }>;
 }
 
 /** Classified result of a single synthetic check */

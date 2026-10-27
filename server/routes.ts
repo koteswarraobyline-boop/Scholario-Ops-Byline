@@ -667,7 +667,7 @@ export function buildRouter(): Router {
       return reject(400, 'cpuPercent, ramPercent and diskPercent are required numbers between 0 and 100');
     }
     if (typeof b.observedAt !== 'string' || Number.isNaN(Date.parse(b.observedAt))) {
-      return reject(400, 'observedAt (ISO-8601 timestamp) is required — update the agent (reinstall from Setup)');
+      return reject(400, 'observedAt (ISO-8601 timestamp) is required — update the agent (Setup → Agent → Update)');
     }
     const skewSec = Math.abs(Date.now() - Date.parse(b.observedAt)) / 1000;
     if (skewSec > config.agentMaxClockSkewSec) {
@@ -1076,7 +1076,7 @@ export function buildRouter(): Router {
     if (!srv) return fail(res, 404, 'Server not found');
     srv.agentToken = newToken();
     persist();
-    audit(operatorName(req), 'AGENT_TOKEN_ROTATED', 'INFRASTRUCTURE', srv.id, `${srv.hostname}: old agent token revoked — reinstall the agent`);
+    audit(operatorName(req), 'AGENT_TOKEN_ROTATED', 'INFRASTRUCTURE', srv.id, `${srv.hostname}: old agent token revoked — reinstall from Setup → Agent`);
     ok(res, { rotated: true });
   });
 
