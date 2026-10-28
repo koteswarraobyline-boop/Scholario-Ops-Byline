@@ -28,7 +28,7 @@ const stateColor = (status: string, absent: boolean) => {
 const EMPTY_FILTERS = { provider: '', connectionId: '', connectionStatus: '', region: '', status: '', q: '' };
 
 export const HostingerView: React.FC = () => {
-  const { servers, theme, syncHostinger } = useOps();
+  const { servers, theme, syncHostinger, refreshAll, notify } = useOps();
   const { hasRole } = useAuth();
   const navigate = useNavigate();
   const isDark = theme === 'dark';
@@ -249,6 +249,7 @@ export const HostingerView: React.FC = () => {
                   <th className="py-2.5 px-3.5">IP</th>
                   <th className="py-2.5 px-3.5">State</th>
                   <th className="py-2.5 px-3.5">Registered server</th>
+                  {canManage && <th className="py-2.5 px-3.5">Action</th>}
                 </tr>
               </thead>
               <tbody className={`divide-y ${isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
@@ -278,6 +279,23 @@ export const HostingerView: React.FC = () => {
                           </span>
                         )) : <span className={isDark ? 'text-slate-500' : 'text-slate-400'}>Not registered</span>}
                       </td>
+                      {canManage && (
+                        <td className="py-2.5 px-3.5">
+                          {matches.length > 0 || vm.absent ? null : (
+                            <button
+                              className={btn}
+                              disabled={busy !== null}
+                              onClick={() => void run(`reg:${vm.id}`, async () => {
+                                await api.registerProviderInstance(vm.id);
+                                await refreshAll();
+                                notify('success', 'Server registered in Ops');
+                              })}
+                            >
+                              Register in Ops
+                            </button>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
@@ -294,12 +312,27 @@ export const HostingerView: React.FC = () => {
         </p>
       )}
 
-      {instances.some(vm => ![...vm.ipv4, ...vm.ipv6].some(ip => serverByIp.has(ip))) && (
-        <p className={`text-[11px] font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-          VMs marked “Not registered” are not monitored yet.{' '}
-          <button onClick={() => navigate('/setup')} className="text-blue-500 hover:underline cursor-pointer">Register them in Setup</button>.
-          Matching by IP is a hint. Only the built-in HOSTINGER_API_TOKEN account copies plan and region onto a registered server.
-        </p>
+      {instances.some(vm => !vm.absent && ![...vm.ipv4, ...vm.ipv6].some(ip => serverByIp.has(ip))) && (
+        <div className={`flex flex-col sm:flex-row sm:items-center gap-2 text-[11px] font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+          <p className="flex-1">
+            VMs marked “Not registered” are not monitored yet. Registering creates an Ops server row in PostgreSQL (same as Setup → Add server) from the live Hostinger inventory — nothing is hardcoded.
+            {' '}You can also add or edit them in{' '}
+            <button onClick={() => navigate('/setup')} className="text-blue-500 hover:underline cursor-pointer">Setup</button>.
+          </p>
+          {canManage && (
+            <button
+              className={btn}
+              disabled={busy !== null}
+              onClick={() => void run('reg-all', async () => {
+                const res = await api.registerAllProviderInstances();
+                await refreshAll();
+                notify('success', `Registered ${res.created} server(s)${res.existed ? ` · ${res.existed} already present` : ''}${res.skipped ? ` · ${res.skipped} skipped` : ''}`);
+              })}
+            >
+              Register all unregistered
+            </button>
+          )}
+        </div>
       )}
     </div>
   );

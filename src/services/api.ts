@@ -409,6 +409,10 @@ export const api = {
   testProviderConnection: (id: string) => unwrap(api.post<ApiResponse<{ vmCount: number; connection: ProviderConnectionView }>>(`/api/v1/providers/connections/${encodeURIComponent(id)}/test`)),
   syncProviderConnection: (id: string) => unwrap(api.post<ApiResponse<{ connection: ProviderConnectionView; instances: ProviderInstanceView[] }>>(`/api/v1/providers/connections/${encodeURIComponent(id)}/sync`)),
   getProviderInstances: () => api.get<{ success: boolean; data: ProviderInstanceView[]; connections: ProviderConnectionView[] }>('/api/v1/providers/instances'),
+  registerProviderInstance: (id: string, body?: { environment?: 'PRD' | 'DR' }) =>
+    unwrap(api.post<ApiResponse<{ status: string; server?: VpsServer; instanceId: string; reason?: string }>>(`/api/v1/providers/instances/${encodeURIComponent(id)}/register`, body ?? {})),
+  registerAllProviderInstances: (body?: { environment?: 'PRD' | 'DR' }) =>
+    unwrap(api.post<ApiResponse<{ created: number; existed: number; skipped: number; servers: VpsServer[] }>>('/api/v1/providers/instances/register-all', body ?? {})),
   getLoadBalancers: () => unwrap(api.get<ApiResponse<LoadBalancerState>>('/api/v1/loadbalancers')),
   /** Cloudflare lookups for the configuration forms — the API token stays on the server */
   getCloudflareAccounts: () => unwrap(api.get<ApiResponse<Array<{ id: string; name: string }>>>('/api/v1/cloudflare/accounts')),

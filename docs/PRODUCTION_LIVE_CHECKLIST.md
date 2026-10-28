@@ -5,6 +5,8 @@ In-repo work for multi-app Ops readiness is complete. These steps run on the **l
 ## 1. Confirm the release is live
 
 - [ ] GitHub Actions on `main`: `test` green, then `deploy-production` ran (or was intentionally skipped).
+- [ ] GitHub Environment `production` has `OPS_REPORT_URL`, `OPS_DEPLOY_REPORT_TOKEN`, and `OPS_APPLICATION_CODE` (see [docs/CI-CD.md](CI-CD.md) §4). Server `.env` has matching `DEPLOY_REPORT_TOKEN`.
+- [ ] If Actions warns that `scholario-ops-release` differs from `deploy/release.sh`, an admin reinstalls it ([docs/CI-CD.md](CI-CD.md) §15).
 - [ ] `GET https://<ops-host>/api/health/live` returns ok.
 - [ ] `GET https://<ops-host>/api/health` shows a recent `schedulerAgeMs` (scheduler is running).
 - [ ] `GET https://<ops-host>/api/health/ready` returns ready (database reachable).

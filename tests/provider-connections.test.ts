@@ -334,4 +334,26 @@ test('filters combine, a missing token is reported without a value, and rows sur
   const dup = await query<{ n: string }>(`SELECT count(*)::text AS n FROM (SELECT connection_id, provider_vm_id FROM ${T('provider_instances')} GROUP BY 1, 2 HAVING count(*) > 1) d`);
   assert.equal(dup.rows[0].n, '0');
 });
+
+test('register-all creates Ops servers from provider inventory (no hardcoded fleet)', async () => {
+  const { registerAllProviderInstances, environmentFromHostname } = await import('../server/providers/register.ts');
+  assert.equal(environmentFromHostname('Cipher.LMS.DR'), 'DR');
+  assert.equal(environmentFromHostname('vantage.prd'), 'PRD');
+  assert.equal(environmentFromHostname('scholario.websites'), 'PRD');
+
+  const legacy = db.providerConnections.find(c => c.legacy)!;
+  mode.legacy = 'ok';
+  await syncConnection(legacy.id, { manual: true });
+  const before = db.servers.length;
+  const summary = registerAllProviderInstances();
+  assert.ok(summary.created.length + summary.existed.length >= 2);
+  assert.ok(db.servers.length >= before);
+  const again = await call('POST', '/v1/providers/instances/register-all', admin, {});
+  assert.ok(again.status === 200 || again.status === 201);
+  assert.equal(again.json.data.created, 0);
+  const one = db.providerInstances.find(i => !i.absent && i.ipv4[0] === '198.51.100.20')!;
+  const single = await call('POST', `/v1/providers/instances/${one.id}/register`, admin, { environment: 'DR' });
+  assert.ok(single.status === 200 || single.status === 201);
+  assert.ok(single.json.data.status === 'exists' || single.json.data.status === 'created');
+});
 });
