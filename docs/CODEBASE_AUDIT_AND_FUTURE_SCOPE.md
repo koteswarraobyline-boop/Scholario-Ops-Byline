@@ -14,6 +14,7 @@ The sections below are the 17 October record. This has landed since then:
 - Cloudflare sync is an error when the token cannot list zones, including when the account load-balancer list is empty.
 - CI posts the deployment after a success, a rollback, or a failure. Missing `OPS_REPORT_URL`, `OPS_DEPLOY_REPORT_TOKEN`, or `OPS_APPLICATION_CODE` fails that step.
 - A HARD dependency with a real check changes application status. A Hostinger connection can be deleted.
+- Blast radius is done: `registryImpact` walks the dependency graph (HARD = stops, SOFT = degraded), returns affected apps/features/users/teams, and is covered by `tests/dependency-register.test.ts` (12/12 pass).
 - DR overall is READY, DEGRADED, NOT READY, or UNKNOWN. Core checks are PASS, FAIL, WARNING, or UNKNOWN. The UI no longer treats `PARTIALLY_READY` as a current overall.
 - Load is a capacity type (warning 1 per core, critical 2). An incident waits for 5 sustained minutes. A missing core count stays unknown and does not count as a healthy load.
 - Overview lists every application (`ApplicationStatusPanel`); ICT is not the only panel. PRD-only apps are valid (DR optional; new apps do not auto-pick DR). Two applications may share one server (Setup shows “Used by”). Live operator steps: `docs/PRODUCTION_LIVE_CHECKLIST.md`.
@@ -107,7 +108,7 @@ Status words:
 | Disaster recovery readiness | Complete (code) | `server/readiness.ts`. PRD-only apps are not scored NOT_READY for lacking DR. | Confirm live PRD/DR checks after agents and URLs are wired. |
 | Failover | Complete (code, safe default) | DNS failover (super_admin); LB apps use decision log; auto-failover off unless configured and only for direct DNS. | Keep auto-failover off until restore drill + zone match ([PRODUCTION_LIVE_CHECKLIST.md](PRODUCTION_LIVE_CHECKLIST.md)). |
 | Backups | Complete (code, status only) | App backup reports + Ops `deploy/backup-db.sh` / `verify-backup.sh`. | Product records restore results; it does not execute restores (by design). |
-| Dependencies | Complete (code) | Register + HARD/SOFT links. `recomputeApplication` applies HARD (can CRITICAL) and SOFT (can WARNING) when a real check exists. Status line cites cause via `statusCause`. | — |
+| Dependencies | Complete | Register + HARD/SOFT links. `GET /api/v1/registry/:id/impact` walks the graph (HARD stops, SOFT degrades) with apps/features/users/teams. `recomputeApplication` applies checked HARD/SOFT links; `statusCause` cites the cause. Setup ImpactPanel shows blast radius. | — |
 | Cloudflare Load Balancing | Complete (code) | Read-only pool sync; empty/unreadable zones surface a clear token error. Tests: `tests/loadbalancer.test.ts`. | Live token must include Zone Read for the real zone. |
 | Cloudflare DNS zones | Complete (code) | `syncCloudflare` when token set; permission gaps are errors, not silent empty data. | Same live token scope as LB. |
 | Cloudflare Workers | Partial | Worker routing + `POST /api/v1/worker-events` for request/error counts. No first-class Worker resource table / `worker.js` in-repo. | Add a Worker resource only when a real Worker must be inventoried (§12). |
@@ -150,20 +151,20 @@ Weights follow how much of day-to-day operations the module is: monitoring 12, i
 | Agent | 7 | 70 | Ingest and install work; no updater | `tests/telemetry.test.ts`, `tests/agent.test.ts` | Version mismatch not reproduced here |
 | Cloudflare | 6 | 65 | Pools and DNS client; routing needs a zone | `tests/loadbalancer.test.ts` | Zone miss reported by the user |
 | Backups | 6 | 55 | Status is recorded, restore is not executed | `tests/ops-backup.test.ts` | Not checked |
-| Dependencies | 6 | 60 | Register exists; health ignores it | `tests/dependency-register.test.ts` | Not checked |
+| Dependencies | 6 | 90 | Register, HARD/SOFT impact walk, and health use of checked links | `tests/dependency-register.test.ts` (12/12) | Not checked |
 | CI/CD | 6 | 65 | Pipeline exists; last main run did not deploy | The workflow itself | Deploy skipped |
 | Reports | 5 | 65 | Insights from stored checks | `tests/insights.test.ts` | Not checked |
 | Deployments and runbooks | 5 | 50 | Records and checklists, not a release system | Limited | Not checked |
 | Audit log | 3 | 80 | Written and listed | Indirect | Not checked |
 
-**Overall code completeness: about 72%.**  
-Calculation: sum of (weight × score) / 110 ≈ 72.
+**Overall code completeness: about 74%.**  
+Calculation: sum of (weight × score) / 110 ≈ 74 (Dependencies raised from 60→90 after impact walk + health wiring).
 
-That number means “how much of *this* product is implemented in the repository”. It does **not** mean 72% of a future platform for 9–20 different architectures, and it does **not** mean production has been checked.
+That number means “how much of *this* product is implemented in the repository”. It does **not** mean 74% of a future platform for 9–20 different architectures, and it does **not** mean production has been checked.
 
 | Level | Result |
 |---|---|
-| Implemented in code | About 72%, as above. |
+| Implemented in code | About 74%, as above. |
 | Tested by automated tests | Core paths have tests. The full `npm test` on `main` (GitHub run 39018883468) failed 5 tests. On this branch, those four files were re-run locally and passed 44 of 44. This audit turn did not re-run the other 25 files. |
 | Verified against real Cloudflare, Hostinger, SMTP or VPSs | Not in this audit. The zone error on `ict.kodeit.digital` was reported from the running UI, which is evidence the sync runs, not evidence routing works. |
 | Verified in production | Not done. No SSH, no production database, no production health URL was called. |
@@ -265,7 +266,7 @@ Keep install as the source of truth: the agent asks the ops server for a signed 
 | No job queue | One process does probes, mail and Cloudflare. | A stuck probe loop delays everything. `schedulerAgeMs` on the health endpoint is the signal. |
 | CI deploy | Deploy runs only after tests pass, over SSH, with a tarball. | A red test job leaves production on the previous release. That is what happened on run 39018883468. |
 | Mock incident | Refused when `NODE_ENV=production`. | Safe if production really sets `NODE_ENV`. Confirm that on the host. |
-| Dependency health | Register links do not affect `recomputeApplication`. | An operator can believe a HARD database dependency is monitored when only the register row exists. |
+| Dependency health | A HARD/SOFT link with a real check affects `recomputeApplication`. A register-only row (no check) stays UNKNOWN and does not page. | Operators still need a monitor or other real check on the dependency for status to move. |
 
 ---
 
@@ -292,7 +293,7 @@ What still assumes one shape:
 | Redis is only a systemd unit name in the default agent install query | `server/routes.ts` install handler (`redis-server` in the default service list) |
 | Workers, queues and extra databases are not resource types on the application | No tables for them. The register can *name* a database, but the agent’s `databases` array is what is actually probed |
 | Overview is per application (DR optional) | `ApplicationStatusPanel.tsx` (was ICT-pair framed) |
-| Health ignores HARD/SOFT links | `recomputeApplication` uses monitors only |
+| Health uses HARD/SOFT only when the dependency has a real check | `recomputeApplication` + `registrySignals` (UNKNOWN if no check yet) |
 
 Adding a new application in Setup does not require a code change. Adding a new **kind** of dependency that should affect health does.
 
@@ -361,18 +362,18 @@ Do not start these until this report is accepted. Each task lists a rollback tha
 | Rollback | Migration is additive. Old columns stay until a later release. |
 | Done when | An app with only PRD saves, shows UNKNOWN rather than “DR down”, and a second app can use the same server. |
 
-### Phase 2 — Dependency-aware health
+### Phase 2 — Dependency-aware health — Done (26–27 Oct 2026)
 
 | | |
 |---|---|
-| Priority | After inventory |
-| Why | The register and the status badge currently answer different questions. |
-| Files | `server/engine.ts` `recomputeApplication`, `server/readiness.ts`, `DependencyMapView.tsx` |
-| Depends on | Phase 1 if new resource types must be checks; otherwise can use monitors plus existing HARD links |
-| Tests | A HARD link with a failing monitor turns the app red; a SOFT link does not; no monitor stays UNKNOWN |
-| Risk | Medium (false pages) |
-| Rollback | Feature flag defaulting to today’s monitor-only rule |
-| Done when | The application status line cites the monitor or link that caused it. |
+| Priority | Done |
+| Why | Register impact and status badge must answer the same dependency story. |
+| Files | `server/registry.ts` `registryImpact`, `server/engine.ts` `recomputeApplication` / `registrySignals`, `src/lib/statusCause.ts`, `DependencyRegister.tsx` ImpactPanel |
+| Depends on | Register (done). New resource types as checks still wait on §12. |
+| Tests | `tests/dependency-register.test.ts` (graph walk, HARD vs SOFT, users/teams); `tests/operations-ready.test.ts` (HARD raises status, SOFT degrades); `tests/status-cause.test.ts` |
+| Risk | — |
+| Rollback | — |
+| Done when | Met: impact lists affected apps/features/users with HARD=stop / SOFT=degraded; status cites the causing monitor or link. |
 
 ### Phase 3 — Integrations and metrics
 

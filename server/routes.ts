@@ -29,6 +29,7 @@ import { cfState, syncCloudflare, CloudflareError, listCloudflareAccounts, listL
 import { HostingerError, hostingerState, syncHostinger } from './hostinger.ts';
 import { ensureLegacyHostingerConnection, createProviderConnection, deleteProviderConnection, renameProviderConnection, setProviderSyncEnabled, viewConnection } from './providers/connections.ts';
 import { instancesForApi, syncConnection, testProviderConnection, ProviderSyncError } from './providers/sync.ts';
+import { registerAllProviderInstances, registerProviderInstance } from './providers/register.ts';
 import { redactSecrets } from './providers/env.ts';
 import { filterProviderInstances } from '../src/lib/providerInventory.ts';
 import { buildInstaller, buildUninstaller, buildUpdater, AGENT_VERSION } from './agent.ts';
@@ -2201,6 +2202,41 @@ export function buildRouter(): Router {
     });
     res.json({ success: true, data, connections });
   });
+  /** Register every synced Hostinger VM that is not already an Ops server. (Before :id so path is exact.) */
+  r.post('/v1/providers/instances/register-all', requireRole('it_administrator'), h((req, res) => {
+    const b = body(req);
+    const environment = optOneOf(b, 'environment', 'Environment', ENVS);
+    const summary = registerAllProviderInstances({ environment });
+    for (const r0 of summary.created) {
+      if (r0.status !== 'created') continue;
+      audit(operatorName(req), 'SERVER_REGISTERED', 'INFRASTRUCTURE', r0.server.id, `${r0.server.hostname} (${r0.server.ip}) from provider instance ${r0.instanceId}`);
+    }
+    if (summary.created.length) broadcast('servers_changed', null);
+    ok(res, {
+      created: summary.created.length,
+      existed: summary.existed.length,
+      skipped: summary.skipped.length,
+      servers: summary.created.filter(r0 => r0.status === 'created').map(r0 => r0.server),
+      details: summary,
+    }, summary.created.length ? 201 : 200);
+  }));
+  /** Register one Hostinger VM as an Ops server (PostgreSQL). Same fields as Setup → Add server. */
+  r.post('/v1/providers/instances/:id/register', requireRole('it_administrator'), h((req, res) => {
+    const b = body(req);
+    const environment = optOneOf(b, 'environment', 'Environment', ENVS);
+    const result = registerProviderInstance(req.params.id, { environment });
+    if (result.status === 'created') {
+      audit(operatorName(req), 'SERVER_REGISTERED', 'INFRASTRUCTURE', result.server.id, `${result.server.hostname} (${result.server.ip}) from provider instance ${result.instanceId}`);
+      broadcast('servers_changed', null);
+      ok(res, result, 201);
+      return;
+    }
+    if (result.status === 'exists') {
+      ok(res, result);
+      return;
+    }
+    fail(res, 400, result.reason);
+  }));
 
   // ── Users ──────────────────────────────────────────────────────────────────
   r.get('/v1/users', requireRole('it_administrator'), (req, res) => { res.json(paginate(req, db.users.map(safeUser), 100)); });
