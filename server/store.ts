@@ -13,10 +13,27 @@ import type pg from 'pg';
 import {
   Application, VpsServer, Monitor, Incident, AuditLog, CommunicationChannel,
   EscalationPolicy, MaintenanceWindow, Runbook, Deployment, BackupRecord, OpsUser, ServerMetricPoint, CheckRecord,
+  RegistryComponent, DependencyLink, ProviderConnectionRecord, ProviderInstanceRecord, ResourceLimit, WorkerRoutingEvent,
 } from '../src/types/index.ts';
+import { normalizeRouting } from '../src/lib/trafficHealth.ts';
 import { DATA_DIR, config } from './config.ts';
 import { query, withTransaction, migrate, T } from './db.ts';
-import { log } from './logger.ts';
+import { log, scrub } from './logger.ts';
+import { sealSecret, openSecret, isSealed, noteEncryptedData, keyFingerprint, setKeyFingerprintMismatch } from './secrets.ts';
+import { registryNameCollisions, registryNameKey } from './registryName.ts';
+
+/**
+ * Encrypts for storage. Without a usable key (lost key file) the value is written exactly as it is
+ * in memory: stored ciphertext stays ciphertext, and nothing new can arrive in plaintext because
+ * channel saves are refused while the key is missing (routes).
+ */
+let sealWarned = false;
+function sealOrKeep(v: string): string {
+  try { return sealSecret(v); } catch (err) {
+    if (!sealWarned) { sealWarned = true; log.error('secrets', `channel secrets cannot be encrypted: ${(err as Error).message}`); }
+    return v;
+  }
+}
 
 export interface ServerRecord extends VpsServer {
   /** Secret the telemetry agent uses to authenticate. Never sent to the browser. */
@@ -54,18 +71,41 @@ export interface StoreData {
   runbooks: Runbook[];
   deployments: Deployment[];
   backups: BackupRecord[];
+  registry: RegistryComponent[];
+  dependencyLinks: DependencyLink[];
+  providerConnections: ProviderConnectionRecord[];
+  providerInstances: ProviderInstanceRecord[];
+  resources: ResourceLimit[];
+  workerEvents: WorkerRoutingEvent[];
 }
 
 function emptyStore(): StoreData {
   return {
     version: 1, servers: [], applications: [], monitors: [], monitorBuckets: {}, incidents: [], incidentSeq: 1000,
     auditLogs: [], users: [], refreshTokens: [], channels: [], escalationPolicies: [], maintenanceWindows: [],
-    runbooks: [], deployments: [], backups: [],
+    runbooks: [], deployments: [], backups: [], registry: [], dependencyLinks: [],
+    providerConnections: [], providerInstances: [], resources: [], workerEvents: [],
   };
 }
 
 /** In-memory working set. Populated by initStore(); empty until then. */
 export const db: StoreData = emptyStore();
+
+/** Keeps the newest AUDIT_RETENTION_ENTRIES rows in memory (default 5000). Newest first. */
+export function applyAuditRetention(): boolean {
+  if (db.auditLogs.length <= config.auditRetention) return false;
+  db.auditLogs.length = config.auditRetention;
+  return true;
+}
+
+/** Deletes audit rows beyond AUDIT_RETENTION_ENTRIES in PostgreSQL. Returns how many rows were removed. */
+export async function pruneAuditLog(): Promise<number> {
+  const res = await query(
+    `DELETE FROM ${T('audit_logs')} WHERE id IN (SELECT id FROM ${T('audit_logs')} ORDER BY ts DESC, id DESC OFFSET $1)`,
+    [config.auditRetention],
+  );
+  return res.rowCount ?? 0;
+}
 
 /** In-memory time series (5s resolution, last hour) + persisted 1-minute rollups */
 export const liveMetrics: Record<string, ServerMetricPoint[]> = {};
@@ -81,6 +121,8 @@ interface TableDef<T> {
   columns: string[];
   rows: (d: StoreData) => Array<{ k: string; values: unknown[] }>;
   load: (rows: Row[], d: StoreData) => void;
+  /** Keys of loaded rows whose stored form differs from what rows() writes; rewritten with the next save */
+  stale?: (rows: Row[]) => string[];
 }
 
 const iso = (v: unknown): string => (v instanceof Date ? v.toISOString() : typeof v === 'string' ? v : '');
@@ -90,7 +132,7 @@ const num = (v: unknown): number | null => (v === null || v === undefined ? null
 const omit = <O extends object>(o: O, keys: readonly string[]) => Object.fromEntries(Object.entries(o).filter(([k]) => !keys.includes(k)));
 
 const SERVER_CONFIG_KEYS = ['id', 'hostname', 'ip', 'environment', 'applicationId', 'provider', 'region', 'plan', 'planSpec', 'notes', 'agentToken', 'hostingerVmId', 'hostingerState', 'createdAt'] as const;
-const APP_CONFIG_KEYS = ['id', 'name', 'codeName', 'description', 'tier', 'rtoTargetMin', 'rpoTargetMin', 'prdServerId', 'drServerId', 'prdUrl', 'drUrl', 'cloudflareZone', 'dnsRecordName', 'autoFailover', 'failoverState', 'lastFailoverAt', 'healthCheck', 'loadBalancer', 'environments'] as const;
+const APP_CONFIG_KEYS = ['id', 'name', 'codeName', 'description', 'tier', 'rtoTargetMin', 'rpoTargetMin', 'prdServerId', 'drServerId', 'prdUrl', 'drUrl', 'cloudflareZone', 'dnsRecordName', 'autoFailover', 'failoverState', 'lastFailoverAt', 'healthCheck', 'loadBalancer', 'environments', 'trafficRouting'] as const;
 const MONITOR_CONFIG_KEYS = ['id', 'applicationId', 'serverId', 'name', 'type', 'target', 'environment', 'intervalSec', 'timeoutSec', 'retries', 'warningThresholdMs', 'criticalThresholdMs', 'failureConfirmationThreshold', 'recoveryConfirmationThreshold', 'expectedStatusCode', 'expectedBodyContains', 'enabled', 'runbookId', 'heartbeatToken', 'managedBy'] as const;
 const INCIDENT_COLUMN_KEYS = ['id', 'title', 'severity', 'status', 'applicationId', 'environment', 'fingerprint', 'rootCause', 'startedAt', 'resolvedAt', 'durationMinutes', 'owner', 'acknowledged', 'acknowledgedAt', 'acknowledgedBy', 'recoveryStatus', 'runbookId', 'mitigationActionTaken'] as const;
 
@@ -202,6 +244,58 @@ const TABLES: TableDef<unknown>[] = [
     },
   },
   {
+    table: 'application_routing', key: ['application_id'],
+    columns: ['application_id', 'method', 'direct', 'worker', 'custom'],
+    rows: d => d.applications.map(a => {
+      const cfg = normalizeRouting(a);
+      return { k: a.id, values: [a.id, cfg.method, JSON.stringify(cfg.direct), JSON.stringify(cfg.worker), JSON.stringify(cfg.custom)] };
+    }),
+    load: (rows, d) => {
+      const obj = <T>(v: unknown): Partial<T> => {
+        if (!v) return {};
+        if (typeof v === 'string') { try { return JSON.parse(v) as Partial<T>; } catch { return {}; } }
+        return typeof v === 'object' ? v as Partial<T> : {};
+      };
+      for (const r of rows) {
+        const app = d.applications.find(a => a.id === r.application_id);
+        if (!app) continue;
+        app.trafficRouting = normalizeRouting({
+          loadBalancer: app.loadBalancer,
+          trafficRouting: {
+            method: r.method as import('../src/types/index.ts').TrafficRoutingMethod,
+            direct: obj(r.direct) as import('../src/types/index.ts').TrafficRoutingConfig['direct'],
+            worker: obj(r.worker) as import('../src/types/index.ts').TrafficRoutingConfig['worker'],
+            custom: obj(r.custom) as import('../src/types/index.ts').TrafficRoutingConfig['custom'],
+          },
+        });
+      }
+    },
+  },
+  {
+    table: 'worker_events', key: ['id'],
+    columns: ['id', 'application_id', 'kind', 'origin', 'prd_health', 'dr_health', 'detail', 'observed_at', 'received_at', 'requests', 'errors'],
+    rows: d => d.workerEvents.map(e => ({
+      k: e.id,
+      values: [e.id, e.applicationId, e.kind, e.origin, e.prdHealth, e.drHealth, e.detail, e.observedAt, e.receivedAt, e.requests, e.errors],
+    })),
+    load: (rows, d) => {
+      d.workerEvents = rows.map(r => ({
+        id: r.id as string,
+        applicationId: r.application_id as string,
+        kind: r.kind as WorkerRoutingEvent['kind'],
+        origin: (r.origin as string) ?? null,
+        prdHealth: (r.prd_health as WorkerRoutingEvent['prdHealth']) ?? null,
+        drHealth: (r.dr_health as WorkerRoutingEvent['drHealth']) ?? null,
+        detail: (r.detail as string) ?? '',
+        observedAt: iso(r.observed_at),
+        receivedAt: iso(r.received_at),
+        source: 'worker_event' as const,
+        requests: r.requests === null || r.requests === undefined ? null : Number(r.requests),
+        errors: r.errors === null || r.errors === undefined ? null : Number(r.errors),
+      })).sort((a, b) => b.observedAt.localeCompare(a.observedAt));
+    },
+  },
+  {
     table: 'monitors', key: ['id'],
     columns: ['id', 'application_id', 'server_id', 'name', 'type', 'target', 'environment', 'interval_sec', 'timeout_sec', 'retries', 'warning_threshold_ms', 'critical_threshold_ms',
       'failure_confirmation', 'recovery_confirmation', 'expected_status_code', 'expected_body_contains', 'enabled', 'runbook_id', 'heartbeat_token', 'managed_by', 'state'],
@@ -263,12 +357,130 @@ const TABLES: TableDef<unknown>[] = [
         .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
     },
   },
-  docTable('channels', 'channels'),
+  // Channel targets (webhook URLs, PagerDuty keys, recipients) are encrypted at rest (server/secrets.ts)
+  {
+    table: 'channels', key: ['id'], columns: ['id', 'data'],
+    rows: d => d.channels.map(c => ({ k: c.id, values: [c.id, JSON.stringify({ ...c, targetEndpoint: sealOrKeep(c.targetEndpoint) })] })),
+    load: (rows, d) => {
+      const list = rows.map(r => r.data as CommunicationChannel);
+      if (list.some(c => isSealed(c.targetEndpoint))) noteEncryptedData(); // a missing key is then a lost key
+      d.channels = list.map(c => ({ ...c, targetEndpoint: openSecret(c.targetEndpoint) }));
+    },
+  },
   docTable('escalation_policies', 'escalationPolicies'),
   docTable('maintenance_windows', 'maintenanceWindows'),
   docTable('runbooks', 'runbooks'),
   docTable('deployments', 'deployments'),
   docTable('backups', 'backups'),
+  // Links before components: removed links must be gone before a component delete lets
+  // PostgreSQL null their feature_id, which could otherwise collide with a remaining link
+  {
+    table: 'dependency_links', key: ['id'], columns: ['id', 'from_id', 'to_id', 'link_type', 'feature_id', 'notes', 'created_at'],
+    rows: d => d.dependencyLinks.map(l => ({ k: l.id, values: [l.id, l.fromId, l.toId, l.type, uuidOrNull(l.featureId), l.notes, l.createdAt] })),
+    load: (rows, d) => {
+      d.dependencyLinks = rows.map(r => ({
+        id: r.id as string, fromId: r.from_id as string, toId: r.to_id as string, type: r.link_type as DependencyLink['type'],
+        featureId: (r.feature_id as string) ?? null, notes: r.notes as string, createdAt: iso(r.created_at),
+      })).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    },
+  },
+  {
+    table: 'registry_components', key: ['id'],
+    columns: ['id', 'kind', 'name', 'name_key', 'owner', 'tier', 'description', 'application_id', 'server_id', 'user_count', 'served', 'created_at', 'updated_at'],
+    rows: d => d.registry.map(c => ({
+      k: c.id,
+      values: [c.id, c.kind, c.name, registryNameKey(c.name), c.owner, c.tier, c.description, uuidOrNull(c.applicationId), uuidOrNull(c.serverId), c.userCount, JSON.stringify(c.served), c.createdAt, c.updatedAt],
+    })),
+    // e.g. keys backfilled by migration 008 with PostgreSQL's lower()
+    stale: rows => rows.filter(r => r.name_key !== registryNameKey(r.name as string)).map(r => r.id as string),
+    load: (rows, d) => {
+      d.registry = rows.map(r => ({
+        id: r.id as string, kind: r.kind as RegistryComponent['kind'], name: r.name as string, owner: r.owner as string, tier: r.tier as RegistryComponent['tier'],
+        description: r.description as string, applicationId: (r.application_id as string) ?? null, serverId: (r.server_id as string) ?? null,
+        userCount: num(r.user_count), served: (r.served as string[]) ?? [], createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
+      })).sort((a, b) => a.name.localeCompare(b.name));
+    },
+  },
+  {
+    table: 'provider_connections', key: ['id'],
+    columns: ['id', 'name', 'provider', 'token_env', 'sync_enabled', 'legacy', 'status', 'last_sync_at', 'last_success_at', 'last_error', 'created_at', 'updated_at'],
+    rows: d => d.providerConnections.map(c => ({
+      k: c.id,
+      values: [c.id, c.name, c.provider, c.tokenEnv, c.syncEnabled, c.legacy, c.status, isoOrNull(c.lastSyncAt), isoOrNull(c.lastSuccessAt), c.lastError, c.createdAt, c.updatedAt],
+    })),
+    load: (rows, d) => {
+      d.providerConnections = rows.map(r => ({
+        id: r.id as string, name: r.name as string, provider: r.provider as ProviderConnectionRecord['provider'], tokenEnv: r.token_env as string,
+        syncEnabled: r.sync_enabled as boolean, legacy: r.legacy as boolean, status: r.status as ProviderConnectionRecord['status'],
+        lastSyncAt: r.last_sync_at ? iso(r.last_sync_at) : null, lastSuccessAt: r.last_success_at ? iso(r.last_success_at) : null,
+        lastError: (r.last_error as string) ?? null, createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
+      }));
+    },
+  },
+  {
+    table: 'provider_instances', key: ['id'],
+    columns: ['id', 'connection_id', 'provider_vm_id', 'hostname', 'ipv4', 'ipv6', 'os', 'region', 'plan', 'cpu', 'ram_gb', 'disk_gb', 'power_state', 'status', 'fetched_at', 'last_seen_at', 'absent'],
+    rows: d => d.providerInstances.map(i => ({
+      k: i.id,
+      values: [i.id, i.connectionId, i.providerVmId, i.hostname, JSON.stringify(i.ipv4), JSON.stringify(i.ipv6), i.os, i.region, i.plan, i.cpu, i.ramGb, i.diskGb, i.powerState, i.status, isoOrNull(i.fetchedAt), isoOrNull(i.lastSeenAt), i.absent],
+    })),
+    load: (rows, d) => {
+      const list = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+      d.providerInstances = rows.map(r => ({
+        id: r.id as string, connectionId: r.connection_id as string, providerVmId: r.provider_vm_id as string,
+        hostname: (r.hostname as string) ?? null, ipv4: list(r.ipv4), ipv6: list(r.ipv6), os: (r.os as string) ?? null,
+        region: (r.region as string) ?? null, plan: (r.plan as string) ?? null, cpu: num(r.cpu), ramGb: num(r.ram_gb), diskGb: num(r.disk_gb),
+        powerState: (r.power_state as string) ?? null, status: r.status as ProviderInstanceRecord['status'],
+        fetchedAt: r.fetched_at ? iso(r.fetched_at) : null, lastSeenAt: r.last_seen_at ? iso(r.last_seen_at) : null, absent: r.absent as boolean,
+      }));
+    },
+  },
+  {
+    table: 'resource_limits', key: ['id'],
+    columns: ['id', 'resource_key', 'kind', 'name', 'description', 'owner', 'server_id', 'application_id', 'capacity', 'unlimited', 'usage', 'unit', 'source',
+      'threshold_mode', 'warning_value', 'critical_value', 'hard_limit', 'recovery_margin', 'quota_window', 'measured_at', 'last_sync_at', 'freshness', 'sync_error',
+      'enabled', 'alert_state', 'alert_since', 'managed_by', 'last_measurement_id', 'created_at', 'updated_at'],
+    rows: d => d.resources.map(r => ({
+      k: r.id,
+      values: [r.id, r.resourceKey, r.kind, r.name, r.description, r.owner, uuidOrNull(r.serverId), uuidOrNull(r.applicationId), r.capacity, r.unlimited, r.usage, r.unit, r.source,
+        r.thresholdMode, r.warningValue, r.criticalValue, r.hardLimit, r.recoveryMargin, r.quotaWindow, isoOrNull(r.measuredAt), isoOrNull(r.lastSyncAt), r.freshness, r.syncError,
+        r.enabled, r.alertState, isoOrNull(r.alertSince), r.managedBy, r.lastMeasurementId, r.createdAt, r.updatedAt],
+    })),
+    load: (rows, d) => {
+      d.resources = rows.map(r => ({
+        id: r.id as string,
+        resourceKey: r.resource_key as string,
+        kind: r.kind as ResourceLimit['kind'],
+        name: r.name as string,
+        description: (r.description as string) ?? '',
+        owner: r.owner as string,
+        serverId: (r.server_id as string) ?? null,
+        applicationId: (r.application_id as string) ?? null,
+        capacity: num(r.capacity),
+        unlimited: Boolean(r.unlimited),
+        usage: num(r.usage),
+        unit: r.unit as ResourceLimit['unit'],
+        source: r.source as ResourceLimit['source'],
+        thresholdMode: r.threshold_mode as ResourceLimit['thresholdMode'],
+        warningValue: num(r.warning_value),
+        criticalValue: num(r.critical_value),
+        hardLimit: num(r.hard_limit),
+        recoveryMargin: Number(r.recovery_margin),
+        quotaWindow: (r.quota_window as ResourceLimit['quotaWindow']) ?? null,
+        measuredAt: r.measured_at ? iso(r.measured_at) : null,
+        lastSyncAt: r.last_sync_at ? iso(r.last_sync_at) : null,
+        freshness: r.freshness as ResourceLimit['freshness'],
+        syncError: (r.sync_error as string) ?? '',
+        enabled: Boolean(r.enabled),
+        alertState: r.alert_state as ResourceLimit['alertState'],
+        alertSince: r.alert_since ? iso(r.alert_since) : null,
+        managedBy: (r.managed_by as ResourceLimit['managedBy']) ?? null,
+        lastMeasurementId: (r.last_measurement_id as string) ?? null,
+        createdAt: iso(r.created_at),
+        updatedAt: iso(r.updated_at),
+      }));
+    },
+  },
   {
     table: 'meta', key: ['key'], columns: ['key', 'value'],
     rows: d => [{ k: 'incident_seq', values: ['incident_seq', String(d.incidentSeq)] }, ...[...metaExtra].map(([k, v]) => ({ k, values: [k, v] }))],
@@ -283,6 +495,38 @@ const TABLES: TableDef<unknown>[] = [
 
 /** Other key/value metadata (e.g. migration markers) */
 const metaExtra = new Map<string, string>();
+
+const KEY_FP = 'notify_secrets_key_fp';
+/**
+ * Stores the secrets-key fingerprint once every channel target is readable with the current key.
+ * While targets from another key remain, the old fingerprint is kept and the mismatch is reported.
+ * Must not run inside a table's rows(): the startup baseline snapshot would then count a new
+ * fingerprint as already stored, and it would never be written. Returns true when meta changed.
+ */
+function recordKeyFingerprint(channels: CommunicationChannel[]): boolean {
+  const current = keyFingerprint();
+  if (!current || !channels.some(c => c.targetEndpoint)) return false;
+  const stored = metaExtra.get(KEY_FP);
+  if (stored === current) { setKeyFingerprintMismatch(null); return false; }
+  if (channels.some(c => isSealed(c.targetEndpoint))) {
+    if (stored) setKeyFingerprintMismatch({ stored, current });
+    return false;
+  }
+  metaExtra.set(KEY_FP, current);
+  setKeyFingerprintMismatch(null);
+  return true;
+}
+
+/** Startup check: a different key than the one the stored targets were written with. Returns true when meta changed. */
+function checkKeyFingerprint(channels: CommunicationChannel[]): boolean {
+  const stored = metaExtra.get(KEY_FP);
+  const current = keyFingerprint();
+  if (stored && current && stored !== current) {
+    setKeyFingerprintMismatch({ stored, current });
+    log.error('secrets', `the notification secrets key changed (fingerprint ${stored} → ${current}); stored channel targets were written with the previous key — restore it, or re-enter every channel target`);
+  }
+  return recordKeyFingerprint(channels);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Diff-based write-back
@@ -326,21 +570,138 @@ let ready = false;
 export function persist() {
   dirty = true;
   if (saveTimer || !ready) return;
+  // Permanent and exhausted failures fail the same way again. Background changes call persist()
+  // every few seconds, so they must not keep a timer running. The next explicit flush tries again.
+  if (saveFailure?.kind === 'REJECTED') return;
+  if (saveFailure?.kind === 'CONFLICT' && conflictAttempts >= saveRetry.conflictLimit) return;
   saveTimer = setTimeout(() => { saveTimer = null; void flush(); }, 1000);
 }
 
 let lastFlushOk = true;
 
+/**
+ * UNREACHABLE: the connection itself failed (refused, reset, shutdown, too many connections).
+ *   Retried every few seconds until a save succeeds. The rows stay in memory.
+ * CONFLICT: the database was reached but the transaction could not finish (lock timeout,
+ *   deadlock, serialization, statement cancel). Retried a few times, then the timer stops.
+ *   The rows stay in memory. The next explicit flush tries again.
+ * REJECTED: PostgreSQL refused the data (constraint, invalid value, schema mismatch) or the save
+ *   itself failed in code. Retrying cannot help, so there is no timer.
+ */
+export type SaveFailureKind = 'UNREACHABLE' | 'CONFLICT' | 'REJECTED';
+export interface SaveFailure {
+  kind: SaveFailureKind;
+  /** SQLSTATE or Node error code */
+  code: string | null;
+  constraint: string | null;
+  table: string | null;
+  message: string;
+  at: string;
+}
+/** The database process is going away or cannot accept a connection yet. Same recovery as a dropped connection. */
+const SHUTDOWN_SQLSTATES = new Set(['57P01', '57P02', '57P03']);
+/** Transaction conflicts. Bounded retries — a lock that is never released must not retry forever. */
+const CONFLICT_SQLSTATES = new Set(['40001', '40P01', '55P03', '57014']);
+/** Delays and the conflict retry budget. Tests may shorten the delays; production uses these defaults. */
+export const saveRetry = {
+  unreachableMs: 5_000,
+  conflictMs: 5_000,
+  /** Failed conflict attempts before the timer stops. An explicit flush still tries again. */
+  conflictLimit: 3,
+};
+
+export function classifySaveError(err: unknown): SaveFailureKind {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) && !code.startsWith('E')) {
+    if (code.startsWith('08') || code.startsWith('53') || SHUTDOWN_SQLSTATES.has(code)) return 'UNREACHABLE';
+    if (CONFLICT_SQLSTATES.has(code)) return 'CONFLICT';
+    return 'REJECTED';
+  }
+  if (err instanceof TypeError || err instanceof RangeError || err instanceof ReferenceError || err instanceof SyntaxError) return 'REJECTED';
+  // Node socket errors (ECONNREFUSED, ECONNRESET, ETIMEDOUT…), pool timeouts, "Connection terminated"
+  return 'UNREACHABLE';
+}
+
+/** Loaded data cannot be saved safely. Startup stops instead of retrying, and nothing is written. */
+export class StoreDataError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StoreDataError';
+  }
+}
+
+let saveFailure: SaveFailure | null = null;
+let saveAttempts = 0;
+let conflictAttempts = 0;
+let loggedFailure = '';
+/** Test only. While set, every save transaction throws this after BEGIN and before any write, so the transaction rolls back. */
+let injectedSaveError: unknown = null;
+
+/** Test only: the next save transactions throw this until cleared with null. */
+export function injectSaveErrorForTests(err: unknown): void {
+  injectedSaveError = err;
+}
+
+function scrubSaveMessage(message: string): string {
+  return scrub(message).replace(/\b(password|passwd|pwd)\s*[:=]\s*\S+/gi, '$1=[redacted]').slice(0, 300);
+}
+
+/** Outcome of the latest save to PostgreSQL. attempts counts every save transaction started. */
+export function saveState(): { ok: boolean; attempts: number; failure: SaveFailure | null; conflictAttempts: number } {
+  return { ok: saveFailure === null, attempts: saveAttempts, failure: saveFailure, conflictAttempts };
+}
+
+/** What /api/health reports for the latest save. Distinct from connection loss, a lock, and a rejected row. */
+export function databaseSaveStatus(): 'OK' | 'RETRYING' | 'CONFLICT' | 'REJECTED' {
+  if (!saveFailure) return 'OK';
+  if (saveFailure.kind === 'REJECTED') return 'REJECTED';
+  if (saveFailure.kind === 'CONFLICT') return 'CONFLICT';
+  return 'RETRYING';
+}
+
+/** Response for a write whose flush did not commit. Never includes the database error text. */
+export function saveFailureClient(): { status: number; code: string; message: string } | null {
+  const failure = saveFailure;
+  if (!failure) return null;
+  if (failure.kind === 'REJECTED') {
+    return {
+      status: failure.code?.startsWith('23') ? 409 : 500,
+      code: 'SAVE_REJECTED',
+      message: `Not saved: PostgreSQL rejected the save${failure.constraint ? ` (constraint ${failure.constraint})` : ''}. Nothing from it was written to the database. `
+        + 'Scholario Ops still shows the change, but it is lost on restart; correct or remove the conflicting entry — until then no further changes can be saved.',
+    };
+  }
+  if (failure.kind === 'CONFLICT') {
+    const stopped = conflictAttempts >= saveRetry.conflictLimit;
+    return {
+      status: 503,
+      code: 'SAVE_CONFLICT',
+      message: stopped
+        ? `Not saved: PostgreSQL could not finish the transaction${failure.code ? ` (${failure.code})` : ''} (lock timeout, deadlock, or serialization). Nothing from it was written. The change is still only in memory. Automatic retry has stopped; the next save tries again.`
+        : `Not saved: PostgreSQL could not finish the transaction${failure.code ? ` (${failure.code})` : ''} (lock timeout, deadlock, or serialization). Nothing from it was written. The change is still only in memory and will be tried again a few times.`,
+    };
+  }
+  return {
+    status: 503,
+    code: 'SAVE_UNREACHABLE',
+    message: 'The change was applied but is not in the database yet (PostgreSQL unreachable) — it is saved automatically when the database is back. Do not repeat it.',
+  };
+}
+
 /** Writes all changed rows to PostgreSQL. Safe to call concurrently. Resolves to false if the write failed. */
 export async function flush(): Promise<boolean> {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
-  if (flushing) { await flushing; if (!dirty) return lastFlushOk; }
+  // Wait for every flush in progress (another caller may start a new one that includes our change)
+  while (flushing) await flushing;
   if (!dirty || !ready) return lastFlushOk;
   dirty = false;
+  recordKeyFingerprint(db.channels);
   const snaps = TABLES.map(def => ({ def, snap: snapshot(def) }));
   flushing = (async () => {
+    saveAttempts++;
     try {
       await withTransaction(async c => {
+        if (injectedSaveError) throw injectedSaveError;
         for (const { def, snap } of snaps) {
           const prev = lastHashes.get(def.table) ?? new Map();
           const changed = [...snap.entries()].filter(([k, v]) => prev.get(k) !== v.hash).map(([, v]) => v.values);
@@ -351,11 +712,43 @@ export async function flush(): Promise<boolean> {
       });
       for (const { def, snap } of snaps) lastHashes.set(def.table, new Map([...snap].map(([k, v]) => [k, v.hash])));
       lastFlushOk = true;
+      if (saveFailure) log.info('store', 'Saving to PostgreSQL works again; all pending changes are saved');
+      saveFailure = null;
+      conflictAttempts = 0;
+      loggedFailure = '';
     } catch (err) {
       dirty = true;
       lastFlushOk = false;
-      log.error('store', `Failed to save to PostgreSQL: ${(err as Error).message}`);
-      if (!saveTimer) saveTimer = setTimeout(() => { saveTimer = null; void flush(); }, 5000);
+      const e = err as { code?: unknown; constraint?: unknown; table?: unknown; message?: unknown; detail?: unknown };
+      const kind = classifySaveError(err);
+      if (kind === 'CONFLICT') conflictAttempts++;
+      saveFailure = {
+        kind,
+        code: typeof e.code === 'string' ? e.code : null,
+        constraint: typeof e.constraint === 'string' ? e.constraint : null,
+        table: typeof e.table === 'string' ? e.table : null,
+        message: scrubSaveMessage(String(e.message ?? err)),
+        at: new Date().toISOString(),
+      };
+      const stopped = kind === 'CONFLICT' && conflictAttempts >= saveRetry.conflictLimit;
+      // Once when a failure starts, and once when a conflict's automatic retries stop.
+      const signature = `${kind}|${saveFailure.code}|${saveFailure.constraint}|${stopped ? 'stopped' : 'open'}`;
+      if (signature !== loggedFailure) {
+        loggedFailure = signature;
+        const where = { code: saveFailure.code, constraint: saveFailure.constraint, table: saveFailure.table };
+        if (kind === 'REJECTED') {
+          log.error('store', `PostgreSQL rejected the save — nothing from it was written and it is not retried automatically: ${saveFailure.message}`, where);
+        } else if (kind === 'CONFLICT') {
+          log.error('store', stopped
+            ? `PostgreSQL could not finish the save (${saveFailure.code ?? 'lock or serialization'}). Nothing was written. Automatic retry has stopped after ${conflictAttempts} attempts; the change is still only in memory and the next explicit save will try again.`
+            : `PostgreSQL could not finish the save (${saveFailure.code ?? 'lock or serialization'}). Nothing was written. The change is still only in memory. Retry ${conflictAttempts} of ${saveRetry.conflictLimit}.`, where);
+        } else {
+          const every = saveRetry.unreachableMs >= 1000 ? `${Math.round(saveRetry.unreachableMs / 1000)}s` : `${saveRetry.unreachableMs}ms`;
+          log.error('store', `PostgreSQL could not be reached — nothing was written. The change stays in memory and is retried every ${every}: ${saveFailure.message}`, { code: saveFailure.code });
+        }
+      }
+      const retryMs = kind === 'UNREACHABLE' ? saveRetry.unreachableMs : kind === 'CONFLICT' && !stopped ? saveRetry.conflictMs : 0;
+      if (retryMs > 0 && !saveTimer) saveTimer = setTimeout(() => { saveTimer = null; void flush(); }, retryMs);
     } finally {
       flushing = null;
     }
@@ -374,20 +767,39 @@ export function queueMetric(serverId: string, p: ServerMetricPoint) { metricQueu
 export async function flushMetrics(): Promise<void> {
   if (!ready || metricQueue.length === 0) return;
   const batch = metricQueue.splice(0, metricQueue.length);
+  let written = 0;
   try {
     for (let i = 0; i < batch.length; i += 200) {
       const params: unknown[] = [];
       const tuples = batch.slice(i, i + 200).map(([id, p]) => {
-        params.push(id, p.t, p.cpu, p.ram, p.disk, p.load1, p.netIn, p.netOut);
+        params.push(id, p.t, p.cpu, p.ram, p.disk, p.load1, p.netIn, p.netOut,
+          p.swap ?? null, p.iowait ?? null, p.steal ?? null, p.diskRead ?? null, p.diskWrite ?? null, p.diskUtil ?? null);
         const n = params.length;
-        return `($${n - 7},$${n - 6},$${n - 5},$${n - 4},$${n - 3},$${n - 2},$${n - 1},$${n})`;
+        return `(${Array.from({ length: 14 }, (_, k) => `$${n - 13 + k}`).join(',')})`;
       });
-      await query(`INSERT INTO ${T('server_metrics')} (server_id,t,cpu,ram,disk,load1,net_in,net_out) VALUES ${tuples.join(',')} ON CONFLICT DO NOTHING`, params);
+      await query(`INSERT INTO ${T('server_metrics')} (server_id,t,cpu,ram,disk,load1,net_in,net_out,swap,iowait,steal,disk_read,disk_write,disk_util) VALUES ${tuples.join(',')} ON CONFLICT DO NOTHING`, params);
+      written = i + 200;
     }
   } catch (err) {
-    metricQueue.unshift(...batch);
+    // Re-queue only what was not written, bounded (1-minute rollups: 50k ≈ a day for 30 servers)
+    const rest = batch.slice(written).concat(metricQueue.splice(0, metricQueue.length));
+    metricQueue.push(...rest.slice(Math.max(0, rest.length - 50_000)));
     log.error('store', `Failed to save metrics: ${(err as Error).message}`);
   }
+}
+
+/** Deletes server metric rollups older than METRICS_RETENTION_HOURS (default 48). Returns how many rows were removed. */
+export async function pruneServerMetrics(): Promise<number> {
+  const cutoffMs = Date.now() - config.metricsRetentionHours * 3600 * 1000;
+  const cutoff = new Date(cutoffMs).toISOString();
+  for (const id of Object.keys(minuteMetrics)) {
+    const series = minuteMetrics[id];
+    let i = 0;
+    while (i < series.length && Date.parse(series[i].t) < cutoffMs) i++;
+    if (i > 0) minuteMetrics[id] = series.slice(i);
+  }
+  const res = await query(`DELETE FROM ${T('server_metrics')} WHERE t < $1`, [cutoff]);
+  return res.rowCount ?? 0;
 }
 
 export async function deleteServerMetrics(serverId: string) {
@@ -445,7 +857,8 @@ async function importLegacyJson(): Promise<string | null> {
   metaExtra.set('legacy_json_imported', new Date().toISOString());
   dirty = true;
   ready = true;
-  await flush();
+  // Never rename the source files unless the data is really in PostgreSQL
+  if (!(await flush())) { ready = false; throw new Error('Legacy JSON import could not be saved to PostgreSQL — the JSON files were left in place; fix the error above and restart'); }
 
   let checks = 0;
   if (fs.existsSync(LEGACY_CHECKS)) {
@@ -476,17 +889,34 @@ async function importLegacyJson(): Promise<string | null> {
 
 async function loadAll() {
   const fresh = emptyStore();
+  const stale = new Map<string, string[]>();
   for (const def of TABLES) {
     const res = await query(`SELECT * FROM ${T(def.table)}`);
     def.load(res.rows, fresh);
+    if (def.stale) stale.set(def.table, def.stale(res.rows));
   }
   Object.assign(db, fresh);
+  // A reload replaces memory with what PostgreSQL actually has. An unsaved change from the
+  // previous process is gone; the failure that blocked it does not apply to the loaded rows.
+  dirty = false;
+  saveFailure = null;
+  conflictAttempts = 0;
+  loggedFailure = '';
+  lastFlushOk = true;
   for (const def of TABLES) lastHashes.set(def.table, new Map([...snapshot(def)].map(([k, v]) => [k, v.hash])));
+  for (const [table, keys] of stale) {
+    for (const k of keys) lastHashes.get(table)!.delete(k);
+    if (keys.length) dirty = true;
+  }
   const since = new Date(Date.now() - config.metricsRetentionHours * 3600 * 1000).toISOString();
-  const m = await query(`SELECT server_id, t, cpu, ram, disk, load1, net_in, net_out FROM ${T('server_metrics')} WHERE t >= $1 ORDER BY t`, [since]);
+  const m = await query(`SELECT server_id, t, cpu, ram, disk, load1, net_in, net_out, swap, iowait, steal, disk_read, disk_write, disk_util FROM ${T('server_metrics')} WHERE t >= $1 ORDER BY t`, [since]);
   for (const k of Object.keys(minuteMetrics)) delete minuteMetrics[k];
+  const opt = (v: unknown) => (v === null || v === undefined ? null : Number(v));
   for (const r of m.rows) {
-    (minuteMetrics[r.server_id as string] ??= []).push({ t: iso(r.t), cpu: Number(r.cpu), ram: Number(r.ram), disk: Number(r.disk), load1: Number(r.load1), netIn: Number(r.net_in), netOut: Number(r.net_out) });
+    (minuteMetrics[r.server_id as string] ??= []).push({
+      t: iso(r.t), cpu: Number(r.cpu), ram: Number(r.ram), disk: Number(r.disk), load1: Number(r.load1), netIn: Number(r.net_in), netOut: Number(r.net_out),
+      swap: opt(r.swap), iowait: opt(r.iowait), steal: opt(r.steal), diskRead: opt(r.disk_read), diskWrite: opt(r.disk_write), diskUtil: opt(r.disk_util),
+    });
   }
 }
 
@@ -496,11 +926,26 @@ export async function initStore(): Promise<{ migrations: string[]; imported: str
   for (const r of (await query(`SELECT key, value FROM ${T('meta')}`)).rows) if (r.key !== 'incident_seq') metaExtra.set(r.key, r.value);
   const imported = await importLegacyJson();
   await loadAll();
+  const collisions = registryNameCollisions(db.registry);
+  if (collisions.length) {
+    dirty = false;
+    throw new StoreDataError(`Dependency register names are the same under the shared name key (${collisions.slice(0, 5).join('; ')}). Rename one of each pair in the database. Nothing was written.`);
+  }
+  const fingerprintAdded = checkKeyFingerprint(db.channels);
   ready = true;
-  setInterval(() => { void flushMetrics(); }, 10_000).unref();
-  setInterval(() => {
-    const cutoff = new Date(Date.now() - config.metricsRetentionHours * 3600 * 1000).toISOString();
-    void query(`DELETE FROM ${T('server_metrics')} WHERE t < $1`, [cutoff]).catch(() => {});
-  }, 3600_000).unref();
+  // LOCAL_UI_SAFE_MODE=true (set by `npm run dev:prodcopy`, never in production): no metric rollup
+  // writes or pruning on a local copy of production data, so its history stays as it was copied.
+  const localCopy = process.env.LOCAL_UI_SAFE_MODE === 'true';
+  const auditTrimmed = localCopy ? false : applyAuditRetention();
+  // An install from before fingerprints (encrypted targets, no fingerprint yet): store it now.
+  // Not on a local production copy: no write at startup, it is stored with the next save.
+  if ((fingerprintAdded || auditTrimmed) && !localCopy) { dirty = true; await flush(); }
+  if (!localCopy) {
+    setInterval(() => { void flushMetrics(); }, 10_000).unref();
+    const pruneMetrics = () => { void pruneServerMetrics().catch(err => log.error('store', `metrics prune failed: ${(err as Error).message}`)); };
+    await pruneServerMetrics().catch(err => log.error('store', `metrics prune failed: ${(err as Error).message}`));
+    setInterval(pruneMetrics, 3600_000).unref();
+    await pruneAuditLog().catch(err => log.error('store', `audit prune failed: ${(err as Error).message}`));
+  }
   return { migrations, imported };
 }

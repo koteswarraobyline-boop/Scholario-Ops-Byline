@@ -2,8 +2,9 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
 import { Application, Monitor, VpsServer } from '../../types';
-import { ArrowDown, Network } from 'lucide-react';
-import { EmptyState } from '../ui/EmptyState';
+import { ArrowDown } from 'lucide-react';
+import { DependencyRegisterSection } from '../setup/DependencyRegister';
+import { dnsPointsAt, routeState, servingLabel } from '../ui/routing';
 
 type NodeRef = { kind: 'app' | 'server' | 'monitor'; id: string } | null;
 
@@ -24,7 +25,7 @@ const statusDot = (s: string) =>
           : 'bg-slate-500';
 
 export const DependencyMapView: React.FC = () => {
-  const { theme, applications, servers, monitors, isLoading } = useOps();
+  const { theme, applications, servers, monitors, cloudflareZones, loadBalancer, isLoading } = useOps();
   const navigate = useNavigate();
   const isDark = theme === 'dark';
   const muted = isDark ? 'text-slate-400' : 'text-slate-500';
@@ -42,26 +43,6 @@ export const DependencyMapView: React.FC = () => {
   const monitorsOnServer = (srv: VpsServer) => monitors.filter(m => serverOfMonitor(m)?.id === srv.id);
 
   const orphanServers = servers.filter(s => !applications.some(a => a.prdServerId === s.id || a.drServerId === s.id));
-
-  if (applications.length === 0 && servers.length === 0) {
-    return (
-      <div className="space-y-6">
-        <div className={`pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
-          <h1 className="text-lg font-bold font-mono tracking-tight">DEPENDENCY MAP</h1>
-        </div>
-        {isLoading ? (
-          <div className={`text-xs font-mono animate-pulse ${muted}`}>Loading…</div>
-        ) : (
-          <EmptyState
-            icon={Network}
-            title="Nothing to map yet"
-            description="Register your servers and applications in Setup; the map is built from applications, their PRD/DR servers and their monitors."
-            action={{ label: 'Open Setup', onClick: () => navigate('/setup') }}
-          />
-        )}
-      </div>
-    );
-  }
 
   const nodeClass = (isSelected: boolean, status: string) =>
     `p-2.5 rounded border text-left transition-all cursor-pointer min-w-0 w-full ${
@@ -81,7 +62,7 @@ export const DependencyMapView: React.FC = () => {
           <span className={`w-2 h-2 rounded-full shrink-0 ${statusDot(srv.status)}`} />
           <span className={`text-[9px] uppercase ${env === 'PRD' ? 'text-blue-500' : muted}`}>{env} server</span>
         </div>
-        <div className={`font-bold text-xs mt-1 truncate ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{srv.hostname}</div>
+        <div title={srv.hostname} className={`font-bold text-xs mt-1 truncate ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{srv.hostname}</div>
         <div className={`text-[10px] truncate ${muted}`}>{srv.ip || 'No IP'} · agent {srv.agentStatus}</div>
         <div className={`text-[10px] font-semibold ${statusText(srv.status)}`}>{srv.status}</div>
       </button>
@@ -99,7 +80,7 @@ export const DependencyMapView: React.FC = () => {
         {list.map(m => (
           <button key={m.id} onClick={() => setSelected({ kind: 'monitor', id: m.id })} className={`${nodeClass(isSel('monitor', m.id), m.status)} !p-1.5 flex items-center gap-2`}>
             <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDot(m.status)}`} />
-            <span className={`truncate flex-1 text-[11px] ${isDark ? 'text-slate-200' : 'text-slate-800'} ${!m.enabled ? 'opacity-50' : ''}`}>{m.name}</span>
+            <span title={m.name} className={`truncate flex-1 text-[11px] ${isDark ? 'text-slate-200' : 'text-slate-800'} ${!m.enabled ? 'opacity-50' : ''}`}>{m.name}</span>
             <span className={`text-[9px] shrink-0 ${muted}`}>{m.type}</span>
             <span className={`text-[9px] font-bold shrink-0 ${statusText(m.status)}`}>{m.status}</span>
           </button>
@@ -119,7 +100,7 @@ export const DependencyMapView: React.FC = () => {
           }`}
         >
           <span className={`${arrowColor} font-bold`}>{arrow}</span>
-          <span className="min-w-0 truncate">{it.label}</span>
+          <span title={typeof it.label === 'string' ? it.label : undefined} className="min-w-0 truncate">{it.label}</span>
         </button>
       )) : <div className={`italic ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>{empty}</div>}
     </div>
@@ -149,7 +130,7 @@ export const DependencyMapView: React.FC = () => {
               <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
               <span className={`text-xs font-bold ${statusText(app.status)}`}>{app.status}</span>
               <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
-              <span className={`text-xs ${muted}`}>{app.failoverState === 'DR_ACTIVE' ? 'Serving from DR' : app.failoverState === 'FAILING_OVER' ? 'Switching' : 'Serving from PRD'}</span>
+              <span className={`text-xs ${muted}`}>{servingLabel(routeState(app, loadBalancer, dnsPointsAt(app, servers, cloudflareZones))) === 'Unknown' ? 'Origin unknown' : `Serving from ${servingLabel(routeState(app, loadBalancer, dnsPointsAt(app, servers, cloudflareZones)))}`}</span>
             </div>
           </div>
           <div className="space-y-4 text-xs">
@@ -204,8 +185,10 @@ export const DependencyMapView: React.FC = () => {
               {listBox(
                 apps.map(a => {
                   const role = a.prdServerId === srv.id ? 'PRD' : a.drServerId === srv.id ? 'DR' : srv.environment;
-                  const live = (role === 'PRD' && a.failoverState !== 'DR_ACTIVE') || (role === 'DR' && a.failoverState === 'DR_ACTIVE');
-                  return { key: a.id, label: <>{a.name} · {role}{live ? ' · serving traffic' : ' · standby'}</>, onClick: () => setSelected({ kind: 'app', id: a.id }) };
+                  const route = routeState(a, loadBalancer, dnsPointsAt(a, servers, cloudflareZones));
+                  const live = route === 'SPLIT' || (role === 'PRD' && route === 'PRD') || (role === 'DR' && route === 'DR');
+                  const place = route === 'UNKNOWN' || route === 'MOVING' ? 'routing unknown' : live ? 'serving traffic' : 'standby';
+                  return { key: a.id, label: <>{a.name} · {role} · {place}</>, onClick: () => setSelected({ kind: 'app', id: a.id }) };
                 }),
                 'No applications use this server', '→', 'text-amber-500',
               )}
@@ -264,15 +247,24 @@ export const DependencyMapView: React.FC = () => {
       }`}>
         <div>
           <h1 className="text-lg font-bold font-mono tracking-tight">
-            DEPENDENCY MAP &amp; BLAST RADIUS
+            PROJECT DEPENDENCIES
           </h1>
           <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Applications → their PRD / DR servers → the monitors that check them (live status)
+            Which project depends on which project, database, server, storage, API or provider
           </p>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 font-mono text-xs">
+      <DependencyRegisterSection />
+
+      {(applications.length > 0 || servers.length > 0) && <div className={`pb-1 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+        <h2 className="text-sm font-bold font-mono tracking-tight">WHERE EACH PROJECT RUNS</h2>
+        <p className={`text-xs font-mono ${muted}`}>
+          The production server, the recovery server, and the monitors that check them. This is live status, not the dependency list above.
+        </p>
+      </div>}
+
+      {(applications.length > 0 || servers.length > 0) && <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 font-mono text-xs">
 
         {/* Map */}
         <div className={`lg:col-span-2 rounded-lg border p-5 space-y-5 transition-colors ${
@@ -291,8 +283,8 @@ export const DependencyMapView: React.FC = () => {
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0">
                     <span className={`w-2 h-2 rounded-full shrink-0 ${statusDot(app.status)}`} />
-                    <span className={`font-bold text-sm truncate font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{app.name}</span>
-                    <span className={`text-[10px] truncate ${muted}`}>{app.dnsRecordName || app.codeName}</span>
+                    <span title={app.name} className={`font-bold text-sm truncate font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{app.name}</span>
+                    <span title={app.dnsRecordName || app.codeName} className={`text-[10px] truncate ${muted}`}>{app.dnsRecordName || app.codeName}</span>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <span className={`text-[10px] ${muted}`}>{app.failoverState === 'DR_ACTIVE' ? 'DR active' : app.failoverState === 'FAILING_OVER' ? 'switching' : 'PRD active'}</span>
@@ -340,7 +332,10 @@ export const DependencyMapView: React.FC = () => {
           {inspector}
         </div>
 
-      </div>
+      </div>}
+      {isLoading && applications.length === 0 && servers.length === 0 && (
+        <div className={`text-xs font-mono animate-pulse ${muted}`}>Loading…</div>
+      )}
     </div>
   );
 };

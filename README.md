@@ -15,7 +15,7 @@ npm install
 npm run dev               # http://localhost:3000
 ```
 
-If `ADMIN_PASSWORD` is empty, the first start prints a generated password in the console.
+If `ADMIN_PASSWORD` is empty (or too weak), the first start generates a password and saves it to `DATA_DIR/initial-admin-password.txt` (the console only shows the file path). Sign in, change it, then delete that file.
 
 ## Configuration: entered in the dashboard, stored in PostgreSQL
 
@@ -46,23 +46,24 @@ On first start against an empty database, an existing `data/ops-store.json` (the
 To change any of these, edit the server or the ICT application in Setup. These values exist only in the database; to set up a new, empty database, enter them in Setup or restore a database backup (`pg_dump --schema=ops`).
 
 All status values come from live sources:
-- **HTTPS monitors** check both URLs every 30 s. Results are classified as UP, DEGRADED, DOWN, TIMEOUT, DNS_ERROR, TLS_ERROR or CONNECTION_ERROR and stored in `DATA_DIR/checks/`.
+- **HTTPS monitors** check both URLs every 30 s. Results are classified as UP, DEGRADED, DOWN, TIMEOUT, DNS_ERROR, TLS_ERROR or CONNECTION_ERROR and stored in the PostgreSQL table `check_results` (kept `CHECK_HISTORY_RETENTION_DAYS`).
 - **Cloudflare Load Balancing** reads pools, pool health, origin RTT and response codes every 60 s, read-only (account `3d3255caf03b25ccf9e2d7abd0d26d15`). If the token or a permission is missing, the dashboard says "Not configured" or "Cloudflare permission required".
 - **Agent** sends CPU, memory, disk, load, network, services and processes. Install it on each ICT VPS from Infrastructure/Setup. It only makes outbound HTTPS calls to `PUBLIC_URL`, so no ports are opened on the VPS.
 - **Incidents** are raised when a monitor is confirmed DOWN (with Cloudflare origin correlation) or when Cloudflare marks an origin unhealthy. Recovery is recorded automatically.
+- **Capacity** (`/resources`) stores a limit separately from usage for CPU, memory, disk, storage, seats, active users, database size, database connections and API quotas. A server plan creates the CPU, memory and disk rows. Usage stays empty until the agent or an operator records a measurement. Warning and critical are per resource, then an infrastructure-monitor override, then the global percentages. Missing usage is not treated as zero. Accepted measurements are kept for the check-history retention window.
 - **DR readiness** runs 13 checks (PASS, FAIL, WARNING or UNKNOWN) and gives an overall READY, NOT READY, DEGRADED or UNKNOWN.
 - **Failover**: Scholario Ops never changes Cloudflare for ICT. The failover console runs pre-flight checks, shows the manual steps for Cloudflare, and records an approve or reject decision in the audit log.
 
 ## First-time setup (in the dashboard → **Setup**)
 
-1. **Add server.** Register the Main VPS (role PRD) and the DR VPS (role DR) with their public IPs.
-2. **Agent.** Run the install command on each VPS as root. Within about 15 seconds the agent shows CONNECTED.
-3. **Add application.** Choose the PRD and DR servers, the Cloudflare zone and the DNS record to switch on failover. Optionally tick the starter health monitors.
+1. **Add server.** Register the Main VPS (role PRD). Add a DR VPS only if the application has standby.
+2. **Agent.** Run **Install** (first time) or **Update** (when OUTDATED) on each VPS as root. Within about 15 seconds the agent shows CONNECTED.
+3. **Add application.** Choose the PRD server (DR is optional). Several applications may share one server. Set Cloudflare zone / DNS only if you use DNS failover.
 4. **Notifications.** Add a Teams, Email, Webhook or PagerDuty channel.
 
 ## Production
 
-See **[DEPLOYMENT.md](DEPLOYMENT.md)** for the step-by-step guide: Ubuntu VPS, PostgreSQL, PM2, nginx + HTTPS, moving your data, agents, backups and a checklist.
+See **[DEPLOYMENT.md](DEPLOYMENT.md)** for the install guide, and **[docs/PRODUCTION_LIVE_CHECKLIST.md](docs/PRODUCTION_LIVE_CHECKLIST.md)** for the post-deploy live wiring checklist (agents, Cloudflare token, channels, backups).
 
 ## Integrations (`.env`)
 
@@ -71,7 +72,7 @@ See **[DEPLOYMENT.md](DEPLOYMENT.md)** for the step-by-step guide: Ubuntu VPS, P
 | `CLOUDFLARE_API_TOKEN` | Read-only ICT monitoring: Account › Load Balancing: Monitors and Pools › Read, Zone › Load Balancers › Read and Zone › Zone › Read. DNS:Edit is only needed for DNS-record failover of other apps. |
 | `HOSTINGER_API_TOKEN` | Optional. Imports plan, CPU, RAM and state for registered servers. |
 | `SMTP_*` | Email notification channels. |
-| `DEADMAN_HEARTBEAT_URL` | External heartbeat (for example healthchecks.io) that alerts you if this server itself goes down. |
+| `DEADMAN_HEARTBEAT_URL` | Deprecated and ignored. The dead-man heartbeat now covers the monitored servers, applications, services and databases from the agents' reports — no external watchdog. |
 | `DEPLOY_REPORT_TOKEN` | Lets CI report deployments to `POST /api/v1/deployments/report`. |
 
 ## Scripts

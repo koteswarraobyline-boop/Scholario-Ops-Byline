@@ -5,9 +5,15 @@ import {
   Copy, RefreshCw, KeyRound, Activity, Layers, Bell, Wrench, X, AlertTriangle,
 } from 'lucide-react';
 import { useOps } from '../../context/OpsContext';
+import { deadManLabel } from '../ui/deadman';
 import { useAuth } from '../../context/AuthContext';
 import { api, AgentInstallInfo, CloudflarePoolOption } from '../../services/api';
-import { Application, VpsServer } from '../../types';
+import { Application, TrafficRoutingMethod, VpsServer } from '../../types';
+import { blankRouting, effectiveRoutingMethod, ROUTING_METHOD_LABELS, ROUTING_METHODS } from '../../lib/trafficHealth';
+import { resolveAgentBaseUrl } from '../../lib/agentEndpoint';
+import { DependencyRegisterSection } from './DependencyRegister';
+import { ExpandToggle, InventoryFilters, matchesQuery, useExpandSet } from '../ui/InventoryFilters';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Small shared UI helpers (match the rest of the dashboard's look)
@@ -27,7 +33,7 @@ const useStyles = () => {
     primary: 'bg-blue-600 hover:bg-blue-700 text-white',
     ghost: isDark ? 'bg-[#162033] hover:bg-[#1D2B44] text-slate-200 border border-[#23334E]' : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300',
     danger: isDark ? 'bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-900' : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300',
-    code: `px-1 rounded ${isDark ? 'bg-[#1A2436] text-emerald-300' : 'bg-slate-100 text-emerald-700'}`,
+    code: `px-1 rounded break-all ${isDark ? 'bg-[#1A2436] text-emerald-300' : 'bg-slate-100 text-emerald-700'}`,
   };
 };
 
@@ -92,7 +98,7 @@ const IntegrationsPanel: React.FC = () => {
     try { await fn(); } finally { setBusy(null); }
   };
 
-  const publicUrlMissing = integrations.publicUrl.includes('localhost') || integrations.publicUrl.includes('127.0.0.1');
+  const agentBase = resolveAgentBaseUrl(integrations.publicUrlConfigured ? integrations.publicUrl : '', integrations.publicUrl);
 
   const items = [
     {
@@ -109,7 +115,7 @@ const IntegrationsPanel: React.FC = () => {
       key: 'hostinger', icon: Server, title: 'Hostinger API', ok: integrations.hostinger.configured && !integrations.hostinger.lastError,
       configured: integrations.hostinger.configured,
       detail: !integrations.hostinger.configured
-        ? <>Optional. Set <code className={st.code}>HOSTINGER_API_TOKEN</code> to import plan / CPU / RAM / state.</>
+        ? <>Optional. Set <code className={st.code}>HOSTINGER_API_TOKEN</code> in .env and restart. Extra accounts use <code className={st.code}>HOSTINGER_&lt;LABEL&gt;_API_TOKEN</code> on the Hostinger page.</>
         : integrations.hostinger.lastError
           ? <span className="text-rose-500">{integrations.hostinger.lastError}</span>
           : <>{integrations.hostinger.vmCount} VM(s) · synced {timeAgo(integrations.hostinger.lastSyncAt)}</>,
@@ -117,19 +123,28 @@ const IntegrationsPanel: React.FC = () => {
     },
     {
       key: 'smtp', icon: Mail, title: 'Email (SMTP)', ok: integrations.smtp.configured, configured: integrations.smtp.configured,
-      detail: integrations.smtp.configured ? <>Email channels can deliver.</> : <>Optional. Set <code className={st.code}>SMTP_HOST</code>, <code className={st.code}>SMTP_FROM</code> (+ user/pass) for email alerts.</>,
+      detail: integrations.smtp.configured
+        ? <>Email channels can deliver via {integrations.smtp.server ?? 'the mail server'}. Use <b>Check SMTP</b> on Notifications to test the login.</>
+        : <>Optional. Set <code className={st.code}>SMTP_FROM</code> and <code className={st.code}>SMTP_SERVICE</code> (Gmail, Outlook365, SendGrid…), <code className={st.code}>SMTP_URL</code> or <code className={st.code}>SMTP_HOST</code>, plus user/pass, for email alerts.</>,
     },
     {
-      key: 'deadman', icon: HeartPulse, title: 'Dead-man heartbeat', ok: deadMan.status === 'HEALTHY', configured: integrations.deadMan.configured,
-      detail: !integrations.deadMan.configured
-        ? <>Recommended. Set <code className={st.code}>DEADMAN_HEARTBEAT_URL</code> (e.g. healthchecks.io ping URL) so you are alerted if this Ops server itself dies.</>
-        : <>{deadMan.status} · last ping {timeAgo(deadMan.lastHeartbeatReceivedAt)}</>,
+      // Built in: derived from the agents' reports — nothing to configure, no external watchdog
+      key: 'deadman', icon: HeartPulse, title: 'Dead-man heartbeat', ok: deadMan.status === 'HEALTHY', configured: deadMan.servers.length > 0,
+      detail: (
+        <span className="block space-y-1 break-words">
+          <span className="block">
+            Status: <b>{deadManLabel(deadMan.status)}</b>
+            {deadMan.servers.length > 0 && <> · {deadMan.servers.map(s => `${s.environment} VPS ${deadManLabel(s.state).toLowerCase()}`).join(' · ')}</>}
+          </span>
+          <span className="block">Built in — no setup needed. Heartbeats of the monitored PRD / DR servers, their applications, services and databases come from the telemetry agent's reports; a heartbeat that goes stale or fails opens an incident.</span>
+        </span>
+      ),
     },
     {
-      key: 'url', icon: Link2, title: 'Public URL', ok: !publicUrlMissing, configured: !publicUrlMissing,
-      detail: publicUrlMissing
-        ? <>Agents use <code className={st.code}>{integrations.publicUrl}</code> — set <code className={st.code}>PUBLIC_URL</code> to the address your VPS can reach (e.g. https://ops.example.com).</>
-        : <><code className={st.code}>{integrations.publicUrl}</code></>,
+      key: 'url', icon: Link2, title: 'Public URL', ok: agentBase.ok, configured: agentBase.ok,
+      detail: agentBase.ok
+        ? <><code className={st.code}>{agentBase.base}</code></>
+        : <>{agentBase.reason}</>,
     },
   ];
 
@@ -138,7 +153,7 @@ const IntegrationsPanel: React.FC = () => {
       {items.map(it => {
         const Icon = it.icon;
         return (
-          <div key={it.key} className={st.card}>
+          <div key={it.key} className={`${st.card} min-w-0`}>
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-xs font-bold font-mono">
                 <Icon className="w-4 h-4 text-blue-500" />
@@ -148,7 +163,7 @@ const IntegrationsPanel: React.FC = () => {
                 {it.ok ? 'CONNECTED' : it.configured ? 'ERROR' : 'NOT SET'}
               </span>
             </div>
-            <p className={`text-[11px] mt-2 leading-relaxed ${st.muted}`}>{it.detail}</p>
+            <p className={`text-[11px] mt-2 leading-relaxed break-words ${st.muted}`}>{it.detail}</p>
             {it.action && (
               <button onClick={it.action} disabled={busy === it.key} className={`${st.btn} ${st.ghost} mt-3`}>
                 <RefreshCw className={`w-3 h-3 ${busy === it.key ? 'animate-spin' : ''}`} /> Sync now
@@ -310,23 +325,36 @@ const AgentPanel: React.FC<{ server: VpsServer; onClose: () => void }> = ({ serv
       {error && <div className="text-xs text-rose-500">{error}</div>}
       {info && (
         <>
-          {!info.publicUrlConfigured && (
+          {info.problem ? (
             <div className="flex items-start gap-2 text-[11px] text-amber-500">
               <AlertTriangle className="w-4 h-4 shrink-0" />
-              PUBLIC_URL is not set on the Ops server, so this command uses the address in your browser. Make sure the VPS can reach it, or set PUBLIC_URL in .env.
+              <span>{info.problem} The install command is hidden so it cannot point the VPS at this computer.</span>
             </div>
+          ) : (
+            <>
+              {!info.publicUrlConfigured && (
+                <div className="flex items-start gap-2 text-[11px] text-amber-500">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  PUBLIC_URL is not set on the Ops server, so this command uses the address in your browser. Make sure the VPS can reach it, or set PUBLIC_URL in .env.
+                </div>
+              )}
+              <p className={`text-[11px] ${st.muted}`}>SSH into <b>{server.ip}</b> as root (or a sudo user).</p>
+              <p className={`text-[11px] font-semibold ${st.muted}`}>Install <span className="font-normal">(first time only)</span></p>
+              <CopyBox value={info.installCommand} />
+              <p className={`text-[11px] ${st.muted}`}>
+                Installs the <code className={st.code}>scholario-agent</code> systemd service (Python 3). It reports CPU, RAM, disk, load, network, top processes,
+                service states and warning/error logs every 10 seconds. Logs: <code className={st.code}>journalctl -u scholario-agent -f</code>.
+              </p>
+              <p className={`text-[11px] ${st.muted}`}>Status should become <b className="text-emerald-500">CONNECTED</b> within ~15 seconds. Current: <b className={statusColor(server.agentStatus)}>{server.agentStatus}</b> (last report {timeAgo(server.lastSeen)}).</p>
+              <p className={`text-[11px] font-semibold ${st.muted}`}>Update <span className="font-normal">(already installed — preferred when OUTDATED)</span></p>
+              <CopyBox value={info.updateCommand} />
+              <p className={`text-[11px] ${st.muted}`}>Keeps the token and config; restores the previous script if agent {info.agentVersion} does not report within 40 seconds.</p>
+              <details className={`text-[11px] ${st.muted}`}>
+                <summary className="cursor-pointer">Uninstall</summary>
+                <div className="mt-2"><CopyBox value={info.uninstallCommand} /></div>
+              </details>
+            </>
           )}
-          <p className={`text-[11px] ${st.muted}`}>1. SSH into <b>{server.ip}</b> as root (or a sudo user) and run:</p>
-          <CopyBox value={info.installCommand} />
-          <p className={`text-[11px] ${st.muted}`}>
-            It installs a small Python 3 agent as the <code className={st.code}>scholario-agent</code> systemd service. It reports CPU, RAM, disk, load, network, top processes,
-            service states (nginx, mysql, …) and warning/error logs every 10 seconds. Check it with <code className={st.code}>journalctl -u scholario-agent -f</code>.
-          </p>
-          <p className={`text-[11px] ${st.muted}`}>2. Status here switches to <b className="text-emerald-500">CONNECTED</b> within ~15 seconds. Current: <b className={statusColor(server.agentStatus)}>{server.agentStatus}</b> (last report {timeAgo(server.lastSeen)}).</p>
-          <details className={`text-[11px] ${st.muted}`}>
-            <summary className="cursor-pointer">Uninstall</summary>
-            <div className="mt-2"><CopyBox value={info.uninstallCommand} /></div>
-          </details>
           <button onClick={rotate} disabled={rotating} className={`${st.btn} ${st.danger}`}><KeyRound className="w-3 h-3" /> {rotating ? 'Rotating…' : 'Rotate agent token'}</button>
         </>
       )}
@@ -372,6 +400,9 @@ const ServersSection: React.FC = () => {
   const { canDo } = useAuth();
   const [editing, setEditing] = useState<VpsServer | 'new' | null>(null);
   const [agentFor, setAgentFor] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const [chip, setChip] = useState('ALL');
+  const [pageSize, setPageSize] = useState(10);
   const isAdmin = canDo('create_server');
 
   const remove = async (s: VpsServer) => {
@@ -386,9 +417,35 @@ const ServersSection: React.FC = () => {
 
   const agentServer = servers.find(s => s.id === agentFor);
 
+  const chips = useMemo(() => {
+    const n = (pred: (s: VpsServer) => boolean) => servers.filter(pred).length;
+    return [
+      { id: 'ALL', label: 'All', count: servers.length },
+      { id: 'PRD', label: 'PRD', count: n(s => s.environment === 'PRD') },
+      { id: 'DR', label: 'DR', count: n(s => s.environment === 'DR') },
+      { id: 'CONNECTED', label: 'Agent connected', count: n(s => s.agentStatus === 'CONNECTED') },
+      { id: 'DISCONNECTED', label: 'Agent down', count: n(s => s.agentStatus !== 'CONNECTED') },
+      { id: 'UNUSED', label: 'Unused', count: n(s => !applications.some(a => a.prdServerId === s.id || a.drServerId === s.id)) },
+    ];
+  }, [servers, applications]);
+
+  const filtered = useMemo(() => servers.filter(s => {
+    const usedBy = applications.filter(a => a.prdServerId === s.id || a.drServerId === s.id);
+    if (chip === 'PRD' && s.environment !== 'PRD') return false;
+    if (chip === 'DR' && s.environment !== 'DR') return false;
+    if (chip === 'CONNECTED' && s.agentStatus !== 'CONNECTED') return false;
+    if (chip === 'DISCONNECTED' && s.agentStatus === 'CONNECTED') return false;
+    if (chip === 'UNUSED' && usedBy.length > 0) return false;
+    return matchesQuery(search, [s.hostname, s.ip, s.provider, s.region, s.plan, s.notes, ...usedBy.map(a => a.name)]);
+  }).sort((a, b) => a.environment.localeCompare(b.environment) || a.hostname.localeCompare(b.hostname)), [servers, applications, chip, search]);
+
+  const paging = useClientPagination(filtered, pageSize, `${chip}|${search}`);
+  const ids = useMemo(() => paging.slice.map(s => s.id), [paging.slice]);
+  const expand = useExpandSet(ids, false);
+
   return (
     <section className="space-y-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
         <h2 className="text-sm font-bold font-mono flex items-center gap-2"><Server className="w-4 h-4 text-blue-500" /> VPS SERVERS ({servers.length})</h2>
         {isAdmin && editing === null && <button onClick={() => setEditing('new')} className={`${st.btn} ${st.primary}`}><Plus className="w-3.5 h-3.5" /> Add server</button>}
       </div>
@@ -401,49 +458,77 @@ const ServersSection: React.FC = () => {
           No servers registered yet. {isAdmin ? 'Click "Add server" and enter your Main (PRD) VPS, then your DR VPS.' : 'Ask an administrator to register the VPS servers.'}
         </div>
       ) : (
-        <div className={`${st.card} !p-0 overflow-x-auto`}>
-          <table className="w-full text-xs font-mono min-w-[860px]">
-            <thead className={`text-left ${st.isDark ? 'bg-[#0B0F17] text-slate-400' : 'bg-slate-50 text-slate-600'}`}>
-              <tr>
-                <th className="py-2 px-3">Server</th>
-                <th className="py-2 px-3">Role</th>
-                <th className="py-2 px-3">Status</th>
-                <th className="py-2 px-3">Agent</th>
-                <th className="py-2 px-3">CPU / RAM / Disk</th>
-                <th className="py-2 px-3">Connectivity</th>
-                <th className="py-2 px-3 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className={`divide-y ${st.isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
-              {servers.map(s => (
-                <tr key={s.id}>
-                  <td className="py-2 px-3">
-                    <div className="font-semibold">{s.hostname}</div>
-                    <div className={st.faint}>{s.ip}{s.provider ? ` · ${s.provider}` : ''}{s.region && s.region !== 'Unknown' ? ` · ${s.region}` : ''}</div>
-                    {s.planSpec && <div className={st.faint}>{s.planSpec.name || 'Plan'}: {s.planSpec.cpuCores} CPU · {s.planSpec.ramGb} GB · {s.planSpec.diskGb} GB</div>}
-                  </td>
-                  <td className="py-2 px-3"><span className={s.environment === 'PRD' ? 'text-blue-400 font-bold' : 'text-purple-400 font-bold'}>{s.environment}</span></td>
-                  <td className={`py-2 px-3 font-bold ${statusColor(s.status)}`}>{s.status}</td>
-                  <td className="py-2 px-3">
-                    <div className={`font-bold ${statusColor(s.agentStatus)}`}>{s.agentStatus}</div>
-                    <div className={st.faint}>{s.lastSeen ? `${timeAgo(s.lastSeen)} · v${s.agentVersion || '?'}` : 'never reported'}</div>
-                  </td>
-                  <td className="py-2 px-3 tabular-nums">
-                    {s.lastSeen ? `${s.telemetry.cpuPercent}% / ${s.telemetry.ramPercent}% / ${s.telemetry.diskPercent}%` : <span className={st.faint}>—</span>}
-                  </td>
-                  <td className="py-2 px-3">{canDo('run_probe') ? <PortCheck server={s} /> : <span className={st.faint}>—</span>}</td>
-                  <td className="py-2 px-3">
-                    <div className="flex justify-end gap-1.5">
-                      {isAdmin && <button onClick={() => setAgentFor(s.id)} className={`${st.btn} ${st.ghost} !px-2`} title="Install agent"><Terminal className="w-3.5 h-3.5" /> Agent</button>}
-                      {isAdmin && <button onClick={() => setEditing(s)} className={`${st.btn} ${st.ghost} !px-2`} title="Edit"><Pencil className="w-3.5 h-3.5" /></button>}
-                      {isAdmin && <button onClick={() => remove(s)} className={`${st.btn} ${st.danger} !px-2`} title="Remove"><Trash2 className="w-3.5 h-3.5" /></button>}
+        <>
+          <InventoryFilters
+            st={st}
+            search={search}
+            onSearch={setSearch}
+            searchPlaceholder="Search hostname, IP, app, notes…"
+            chips={chips}
+            chip={chip}
+            onChip={setChip}
+            shown={filtered.length}
+            total={servers.length}
+            expand={{ allOpen: expand.allOpen, onExpandAll: expand.expandAll, onCollapseAll: expand.collapseAll }}
+            ariaLabel="Filter servers"
+          />
+          <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+            <label className={`flex items-center gap-1.5 ${st.muted}`}>
+              Per page
+              <select className={`${st.input} !w-auto`} value={pageSize} onChange={e => setPageSize(Number(e.target.value))} aria-label="Servers per page">
+                {[5, 10, 20, 50].map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </label>
+          </div>
+          {filtered.length === 0 ? (
+            <div className={`${st.card} text-center text-xs ${st.muted} py-6`}>No servers match these filters.</div>
+          ) : (
+            <>
+            <div className={`${st.card} !p-0 divide-y ${st.isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
+              {paging.slice.map(s => {
+                const usedBy = applications.filter(a => a.prdServerId === s.id || a.drServerId === s.id);
+                const open = expand.isOpen(s.id);
+                return (
+                  <div key={s.id} className="min-w-0">
+                    <div className={`flex items-center gap-2 px-3 py-2.5 ${st.isDark ? 'hover:bg-[#0B0F17]' : 'hover:bg-slate-50'}`}>
+                      <ExpandToggle open={open} onClick={() => expand.toggle(s.id)} label={s.hostname} className={st.faint} />
+                      <button type="button" onClick={() => expand.toggle(s.id)} className="flex-1 min-w-0 text-left cursor-pointer">
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono">
+                          <span className="font-semibold break-all">{s.hostname}</span>
+                          <span className={st.faint}>{s.ip}</span>
+                          <span className={s.environment === 'PRD' ? 'text-blue-400 font-bold' : 'text-purple-400 font-bold'}>{s.environment}</span>
+                          <span className={`font-bold ${statusColor(s.status)}`}>{s.status}</span>
+                          <span className={`font-bold ${statusColor(s.agentStatus)}`}>{s.agentStatus}</span>
+                          {usedBy.length > 0 && <span className={st.muted}>· {usedBy.map(a => a.name).join(', ')}</span>}
+                        </div>
+                      </button>
+                      {isAdmin && (
+                        <div className="flex gap-1.5 shrink-0">
+                          <button onClick={() => setAgentFor(s.id)} className={`${st.btn} ${st.ghost} !px-2`} title="Install agent"><Terminal className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => setEditing(s)} className={`${st.btn} ${st.ghost} !px-2`} title="Edit"><Pencil className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => remove(s)} className={`${st.btn} ${st.danger} !px-2`} title="Remove"><Trash2 className="w-3.5 h-3.5" /></button>
+                        </div>
+                      )}
                     </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                    {open && (
+                      <div className={`px-3 pb-3 pl-10 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 text-[11px] font-mono ${st.muted}`}>
+                        <div><span className={st.faint}>Provider:</span> {[s.provider, s.region && s.region !== 'Unknown' ? s.region : ''].filter(Boolean).join(' · ') || '—'}</div>
+                        <div><span className={st.faint}>Plan:</span> {s.planSpec ? `${s.planSpec.name || 'Plan'}: ${s.planSpec.cpuCores} CPU · ${s.planSpec.ramGb} GB · ${s.planSpec.diskGb} GB` : (s.plan || '—')}</div>
+                        <div><span className={st.faint}>Agent:</span> {s.lastSeen ? `${timeAgo(s.lastSeen)} · v${s.agentVersion || '?'}` : 'never reported'}</div>
+                        <div><span className={st.faint}>CPU / RAM / Disk:</span> {s.lastSeen ? `${s.telemetry.cpuPercent}% / ${s.telemetry.ramPercent}% / ${s.telemetry.diskPercent}%` : '—'}</div>
+                        <div className="sm:col-span-2"><span className={st.faint}>Used by:</span> {usedBy.length ? usedBy.map(a => a.name).join(', ') : '—'}</div>
+                        {s.notes && <div className="sm:col-span-2 lg:col-span-3 break-words"><span className={st.faint}>Notes:</span> {s.notes}</div>}
+                        <div className="sm:col-span-2 lg:col-span-3">{canDo('run_probe') ? <PortCheck server={s} /> : null}</div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <Pagination page={paging.page} totalPages={paging.totalPages} total={paging.total} pageSize={paging.pageSize} onPage={paging.setPage} />
+            </>
+          )}
+        </>
       )}
     </section>
   );
@@ -457,7 +542,13 @@ type AppForm = {
   rtoTargetMin: number; rpoTargetMin: number; prdServerId: string; drServerId: string;
   cloudflareZone: string; dnsRecordName: string; autoFailover: boolean;
   prdUrl: string; drUrl: string;
-  lbEnabled: boolean; lbAccountId: string; lbHostname: string; lbPrdPoolId: string; lbDrPoolId: string;
+  routingMethod: TrafficRoutingMethod;
+  directPrdHost: string; directDrHost: string; directTarget: string; directManual: 'UNKNOWN' | 'PRIMARY' | 'DR'; directVerified: string;
+  workerName: string; workerRoute: string; workerAccountId: string; workerEnv: string;
+  workerPrdOrigin: string; workerDrOrigin: string; workerStrategy: string; workerHealthSource: string;
+  workerFailback: 'automatic' | 'manual' | 'unknown';
+  customDescription: string; customEndpoint: string; customNotes: string;
+  lbAccountId: string; lbHostname: string; lbPrdPoolId: string; lbDrPoolId: string;
   hcExpectedStatus: string; hcIntervalSec: number; hcTimeoutSec: number; hcSsl: boolean;
 };
 
@@ -487,7 +578,22 @@ const fromEnvForm = (f: EnvForm) => {
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
 
-const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> = ({ initial, onDone }) => {
+function routingFields(initial?: Application): Pick<AppForm, 'routingMethod' | 'directPrdHost' | 'directDrHost' | 'directTarget' | 'directManual' | 'directVerified' | 'workerName' | 'workerRoute' | 'workerAccountId' | 'workerEnv' | 'workerPrdOrigin' | 'workerDrOrigin' | 'workerStrategy' | 'workerHealthSource' | 'workerFailback' | 'customDescription' | 'customEndpoint' | 'customNotes' | 'lbAccountId' | 'lbHostname' | 'lbPrdPoolId' | 'lbDrPoolId'> {
+  const cfg = initial?.trafficRouting ?? blankRouting(initial?.loadBalancer ? 'cloudflare_lb' : 'unknown');
+  return {
+    routingMethod: initial?.trafficRouting?.method ?? (initial?.loadBalancer ? 'cloudflare_lb' : 'unknown'),
+    directPrdHost: cfg.direct.prdHostname, directDrHost: cfg.direct.drHostname, directTarget: cfg.direct.currentTarget,
+    directManual: cfg.direct.manualFailoverStatus, directVerified: cfg.direct.lastVerifiedAt ?? '',
+    workerName: cfg.worker.name, workerRoute: cfg.worker.route, workerAccountId: cfg.worker.accountId, workerEnv: cfg.worker.environment,
+    workerPrdOrigin: cfg.worker.prdOriginHostname, workerDrOrigin: cfg.worker.drOriginHostname,
+    workerStrategy: cfg.worker.failoverStrategy, workerHealthSource: cfg.worker.healthCheckSource, workerFailback: cfg.worker.failback,
+    customDescription: cfg.custom.description, customEndpoint: cfg.custom.endpoint, customNotes: cfg.custom.notes,
+    lbAccountId: initial?.loadBalancer?.accountId ?? '', lbHostname: initial?.loadBalancer?.hostname ?? '',
+    lbPrdPoolId: initial?.loadBalancer?.prdPoolId ?? '', lbDrPoolId: initial?.loadBalancer?.drPoolId ?? '',
+  };
+}
+
+export const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> = ({ initial, onDone }) => {
   const st = useStyles();
   const { servers, cloudflareZones, createApplication, updateApplication, addMonitor } = useOps();
   const [form, setForm] = useState<AppForm>(initial ? {
@@ -495,16 +601,16 @@ const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> = ({ in
     rtoTargetMin: initial.rtoTargetMin, rpoTargetMin: initial.rpoTargetMin, prdServerId: initial.prdServerId, drServerId: initial.drServerId,
     cloudflareZone: initial.cloudflareZone, dnsRecordName: initial.dnsRecordName ?? '', autoFailover: Boolean(initial.autoFailover),
     prdUrl: initial.prdUrl ?? '', drUrl: initial.drUrl ?? '',
-    lbEnabled: Boolean(initial.loadBalancer), lbAccountId: initial.loadBalancer?.accountId ?? '', lbHostname: initial.loadBalancer?.hostname ?? '',
-    lbPrdPoolId: initial.loadBalancer?.prdPoolId ?? '', lbDrPoolId: initial.loadBalancer?.drPoolId ?? '',
+    ...routingFields(initial),
     hcExpectedStatus: initial.healthCheck?.expectedStatus ? String(initial.healthCheck.expectedStatus) : '',
     hcIntervalSec: initial.healthCheck?.intervalSec ?? 30, hcTimeoutSec: initial.healthCheck?.timeoutSec ?? 15, hcSsl: initial.healthCheck?.sslMonitoring ?? true,
   } : {
     name: '', codeName: '', description: '', tier: 'TIER_1', rtoTargetMin: 30, rpoTargetMin: 15,
-    prdServerId: servers.find(s => s.environment === 'PRD')?.id ?? '', drServerId: servers.find(s => s.environment === 'DR')?.id ?? '',
+    // PRD-only is valid: do not auto-pick a DR server. Operators opt in to DR.
+    prdServerId: servers.find(s => s.environment === 'PRD')?.id ?? '', drServerId: '',
     cloudflareZone: '', dnsRecordName: '', autoFailover: false,
     prdUrl: '', drUrl: '',
-    lbEnabled: false, lbAccountId: '', lbHostname: '', lbPrdPoolId: '', lbDrPoolId: '',
+    ...routingFields(undefined),
     hcExpectedStatus: '', hcIntervalSec: 30, hcTimeoutSec: 15, hcSsl: true,
   });
   const [envs, setEnvs] = useState<Record<'PRD' | 'DR', EnvForm>>({ PRD: toEnvForm(initial?.environments?.PRD), DR: toEnvForm(initial?.environments?.DR) });
@@ -538,11 +644,26 @@ const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> = ({ in
     const payload = {
       name: form.name, codeName: form.codeName || slug(form.name), description: form.description, tier: form.tier,
       rtoTargetMin: form.rtoTargetMin, rpoTargetMin: form.rpoTargetMin, prdServerId: form.prdServerId, drServerId: form.drServerId,
-      cloudflareZone: form.cloudflareZone, dnsRecordName: form.dnsRecordName.trim(), autoFailover: form.lbEnabled ? false : form.autoFailover,
+      cloudflareZone: form.cloudflareZone, dnsRecordName: form.dnsRecordName.trim(), autoFailover: form.routingMethod === 'direct_dns' ? form.autoFailover : false,
       prdUrl: form.prdUrl.trim(), drUrl: form.drUrl.trim(),
-      loadBalancer: form.lbEnabled
-        ? { accountId: form.lbAccountId.trim(), hostname: form.lbHostname.trim(), prdPoolId: form.lbPrdPoolId.trim(), drPoolId: form.lbDrPoolId.trim() }
-        : null,
+      trafficRouting: {
+        method: form.routingMethod,
+        direct: {
+          prdHostname: form.directPrdHost.trim(), drHostname: form.directDrHost.trim(),
+          prdUrl: form.prdUrl.trim(), drUrl: form.drUrl.trim(), dnsRecordName: form.dnsRecordName.trim(),
+          currentTarget: form.directTarget.trim(), manualFailoverStatus: form.directManual,
+          lastVerifiedAt: form.directVerified.trim() || null,
+        },
+        worker: {
+          name: form.workerName.trim(), route: form.workerRoute.trim(), accountId: form.workerAccountId.trim(),
+          environment: form.workerEnv.trim(), prdOriginHostname: form.workerPrdOrigin.trim(), drOriginHostname: form.workerDrOrigin.trim(),
+          failoverStrategy: form.workerStrategy.trim(), healthCheckSource: form.workerHealthSource.trim(), failback: form.workerFailback,
+        },
+        custom: { description: form.customDescription.trim(), endpoint: form.customEndpoint.trim(), notes: form.customNotes.trim() },
+      },
+      ...(form.routingMethod === 'cloudflare_lb'
+        ? { loadBalancer: { accountId: form.lbAccountId.trim(), hostname: form.lbHostname.trim(), prdPoolId: form.lbPrdPoolId.trim(), drPoolId: form.lbDrPoolId.trim() } }
+        : {}),
       healthCheck: { expectedStatus: form.hcExpectedStatus.trim() ? Number(form.hcExpectedStatus) : null, intervalSec: form.hcIntervalSec, timeoutSec: form.hcTimeoutSec, sslMonitoring: form.hcSsl },
       environments: { PRD: fromEnvForm(envs.PRD), DR: fromEnvForm(envs.DR) },
     } as unknown as Partial<Application>;
@@ -573,13 +694,13 @@ const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> = ({ in
             <option value="TIER_1">Tier 1 — critical</option><option value="TIER_2">Tier 2 — important</option><option value="TIER_3">Tier 3 — internal</option>
           </select>
         </Label>
-        <Label text="PRD (main) server">
+        <Label text="PRD (main) server" hint="Several applications may share the same server">
           <select className={st.input} value={form.prdServerId} onChange={e => set('prdServerId', e.target.value)}>
             <option value="">— none —</option>
             {servers.map(s => <option key={s.id} value={s.id}>{s.hostname} ({s.ip}) {s.environment}</option>)}
           </select>
         </Label>
-        <Label text="DR (standby) server">
+        <Label text="DR (standby) server" hint="Optional — leave none for a Production-only application">
           <select className={st.input} value={form.drServerId} onChange={e => set('drServerId', e.target.value)}>
             <option value="">— none —</option>
             {servers.map(s => <option key={s.id} value={s.id}>{s.hostname} ({s.ip}) {s.environment}</option>)}
@@ -596,11 +717,11 @@ const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> = ({ in
         <Label text="Failover DNS record (A/AAAA)" hint="The record switched between PRD and DR IPs, e.g. app.example.com">
           <input className={st.input} value={form.dnsRecordName} onChange={e => set('dnsRecordName', e.target.value.trim().toLowerCase())} placeholder={form.cloudflareZone ? `app.${form.cloudflareZone}` : 'app.example.com'} />
         </Label>
-        <label className={`flex items-start gap-2 text-xs mt-5 ${form.lbEnabled ? 'opacity-50' : ''}`}>
-          <input type="checkbox" checked={form.autoFailover && !form.lbEnabled} disabled={form.lbEnabled} onChange={e => set('autoFailover', e.target.checked)} className="mt-0.5" />
+        <label className={`flex items-start gap-2 text-xs mt-5 ${form.routingMethod !== 'direct_dns' ? 'opacity-50' : ''}`}>
+          <input type="checkbox" checked={form.autoFailover && form.routingMethod === 'direct_dns'} disabled={form.routingMethod !== 'direct_dns'} onChange={e => set('autoFailover', e.target.checked)} className="mt-0.5" />
           <span>
             <b>Automatic failover</b>
-            <span className={`block text-[10px] ${st.faint}`}>{form.lbEnabled ? 'Not available when traffic is routed by a Cloudflare Load Balancer.' : 'Off by default. Switch DNS to DR when a PRD HTTP/TCP monitor is confirmed DOWN and all DR monitors are healthy (10 min cooldown). Failback is always manual.'}</span>
+            <span className={`block text-[10px] ${st.faint}`}>{form.routingMethod === 'direct_dns' ? 'Off by default. Switch DNS to DR when a PRD HTTP/TCP monitor is confirmed DOWN and all DR monitors are healthy (10 min cooldown). Failback is always manual.' : 'Only available for Direct DNS. Workers, Load Balancers, and custom routing are not switched by Scholario Ops.'}</span>
           </span>
         </label>
       </div>
@@ -649,11 +770,56 @@ const AppEditor: React.FC<{ initial?: Application; onDone: () => void }> = ({ in
         <p className={`text-[10px] mt-2 ${st.faint}`}>Empty fields are shown as PENDING. Setting the database type tells Scholario Ops to expect a database probe from the agent on that server (DB_ENGINE in the agent config); database passwords are never entered here.</p>
       </details>
 
-      <div className={`rounded border p-3 space-y-2 ${st.isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
-        <label className="flex items-center gap-2 text-[10px] uppercase tracking-wider font-mono font-bold">
-          <input type="checkbox" checked={form.lbEnabled} onChange={e => { set('lbEnabled', e.target.checked); if (e.target.checked) set('autoFailover', false); }} /> Cloudflare Load Balancer
-        </label>
-        {form.lbEnabled && (
+      <div className={`rounded border p-3 space-y-3 ${st.isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+        <Label text="Traffic routing method" hint="Each application chooses its own method. Switching methods keeps the other fields.">
+          <select className={st.input} value={form.routingMethod} onChange={e => set('routingMethod', e.target.value as TrafficRoutingMethod)}>
+            {ROUTING_METHODS.map(m => <option key={m} value={m}>{ROUTING_METHOD_LABELS[m]}</option>)}
+          </select>
+        </Label>
+        {form.routingMethod === 'unknown' && <p className={`text-[10px] ${st.faint}`}>No routing integration is assumed. VPS and application checks still run on their own.</p>}
+        {form.routingMethod === 'direct_dns' && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Label text="PRD hostname" hint="Name that should point at the PRD origin"><input className={st.input} value={form.directPrdHost} onChange={e => set('directPrdHost', e.target.value)} placeholder="app.example.com" /></Label>
+            <Label text="DR hostname" hint="Name that should point at the DR origin"><input className={st.input} value={form.directDrHost} onChange={e => set('directDrHost', e.target.value)} placeholder="dr-app.example.com" /></Label>
+            <Label text="Current routing target" hint="Only if you already know it. Leave empty when it is unknown."><input className={st.input} value={form.directTarget} onChange={e => set('directTarget', e.target.value)} placeholder="Unknown" /></Label>
+            <Label text="Manual failover status">
+              <select className={st.input} value={form.directManual} onChange={e => set('directManual', e.target.value as AppForm['directManual'])}>
+                <option value="UNKNOWN">Unknown</option><option value="PRIMARY">Primary (PRD)</option><option value="DR">DR</option>
+              </select>
+            </Label>
+            <Label text="Last verified" hint="Optional time you confirmed the record. Live DNS sync is shown separately."><input className={st.input} value={form.directVerified} onChange={e => set('directVerified', e.target.value)} placeholder="2026-10-22T09:00:00Z" /></Label>
+            <p className={`text-[10px] sm:col-span-2 ${st.faint}`}>PRD and DR URLs and the failover DNS record above are kept. This method does not need Load Balancer pool IDs.</p>
+          </div>
+        )}
+        {(form.routingMethod === 'cloudflare_worker' || form.routingMethod === 'cloudflare_worker_failover') && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Label text="Worker name" hint="Script name in the Cloudflare account. Not a Load Balancer pool."><input className={st.input} value={form.workerName} onChange={e => set('workerName', e.target.value)} placeholder="edge-router" /></Label>
+            <Label text="Worker route or hostname"><input className={st.input} value={form.workerRoute} onChange={e => set('workerRoute', e.target.value)} placeholder="app.example.com/*" /></Label>
+            <Label text="Cloudflare account ID" hint="Optional. Needed only to read the script list. The API token stays on the server."><input className={st.input} value={form.workerAccountId} onChange={e => set('workerAccountId', e.target.value.trim().toLowerCase())} placeholder="32-character account ID" /></Label>
+            <Label text="Deployment / environment"><input className={st.input} value={form.workerEnv} onChange={e => set('workerEnv', e.target.value)} placeholder="production" /></Label>
+            <Label text="PRD origin hostname"><input className={st.input} value={form.workerPrdOrigin} onChange={e => set('workerPrdOrigin', e.target.value)} placeholder="prd.internal.example" /></Label>
+            <Label text="DR origin hostname"><input className={st.input} value={form.workerDrOrigin} onChange={e => set('workerDrOrigin', e.target.value)} placeholder="dr.internal.example" /></Label>
+            <Label text="Failover decision strategy" hint="How the Worker chooses an origin, if you know. Leave empty when you do not."><input className={st.input} value={form.workerStrategy} onChange={e => set('workerStrategy', e.target.value)} placeholder="Unknown until the Worker is read" /></Label>
+            <Label text="Health-check source"><input className={st.input} value={form.workerHealthSource} onChange={e => set('workerHealthSource', e.target.value)} placeholder="Worker health check, or not connected" /></Label>
+            <Label text="Failback" hint="Recorded here only. Scholario Ops does not fail back automatically.">
+              <select className={st.input} value={form.workerFailback} onChange={e => set('workerFailback', e.target.value as AppForm['workerFailback'])}>
+                <option value="unknown">Unknown</option><option value="automatic">Automatic in the Worker</option><option value="manual">Manual</option>
+              </select>
+            </Label>
+            <p className={`text-[10px] sm:col-span-2 ${st.faint}`}>{form.routingMethod === 'cloudflare_worker_failover' ? 'Origin selection stays Unknown until a Worker event is received. A Worker name does not by itself mean failover is implemented.' : 'This method does not assume the Worker fails over between PRD and DR.'} Request counts stay Not connected unless the Worker posts events.</p>
+          </div>
+        )}
+        {form.routingMethod === 'custom' && (
+          <div className="grid grid-cols-1 gap-3">
+            <Label text="Description"><textarea className={st.input} rows={2} value={form.customDescription} onChange={e => set('customDescription', e.target.value)} /></Label>
+            <Label text="Routing endpoint"><input className={st.input} value={form.customEndpoint} onChange={e => set('customEndpoint', e.target.value)} placeholder="https://routing.example/status" /></Label>
+            <Label text="Monitoring notes"><textarea className={st.input} rows={2} value={form.customNotes} onChange={e => set('customNotes', e.target.value)} /></Label>
+          </div>
+        )}
+        {form.routingMethod !== 'cloudflare_lb' && (form.lbHostname || form.lbPrdPoolId) && (
+          <p className={`text-[10px] ${st.faint}`}>Saved Load Balancer mapping{form.lbHostname ? ` for ${form.lbHostname}` : ''} is kept and is not used while this method is selected.</p>
+        )}
+        {form.routingMethod === 'cloudflare_lb' && (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Label text="Cloudflare Account ID *" hint="32-character hex ID (Cloudflare dashboard → account home)">
@@ -720,6 +886,9 @@ const ApplicationsSection: React.FC = () => {
   const { applications, servers, monitors, cloudflareZones, deleteApplication } = useOps();
   const { canDo } = useAuth();
   const [editing, setEditing] = useState<Application | 'new' | null>(null);
+  const [search, setSearch] = useState('');
+  const [chip, setChip] = useState('ALL');
+  const [pageSize, setPageSize] = useState(10);
   const isAdmin = canDo('create_application');
 
   const remove = async (a: Application) => {
@@ -728,9 +897,38 @@ const ApplicationsSection: React.FC = () => {
     await deleteApplication(a.id);
   };
 
+  const chips = useMemo(() => {
+    const n = (pred: (a: Application) => boolean) => applications.filter(pred).length;
+    return [
+      { id: 'ALL', label: 'All', count: applications.length },
+      { id: 'HEALTHY', label: 'Healthy', count: n(a => a.status === 'HEALTHY') },
+      { id: 'PROBLEM', label: 'Warning / critical', count: n(a => a.status === 'WARNING' || a.status === 'CRITICAL') },
+      { id: 'TIER_1', label: 'Tier 1', count: n(a => a.tier === 'TIER_1') },
+      { id: 'TIER_2', label: 'Tier 2', count: n(a => a.tier === 'TIER_2') },
+      { id: 'TIER_3', label: 'Tier 3', count: n(a => a.tier === 'TIER_3') },
+      { id: 'NO_DR', label: 'PRD-only', count: n(a => !a.drServerId) },
+    ];
+  }, [applications]);
+
+  const filtered = useMemo(() => applications.filter(a => {
+    if (chip === 'HEALTHY' && a.status !== 'HEALTHY') return false;
+    if (chip === 'PROBLEM' && a.status !== 'WARNING' && a.status !== 'CRITICAL') return false;
+    if (chip === 'TIER_1' && a.tier !== 'TIER_1') return false;
+    if (chip === 'TIER_2' && a.tier !== 'TIER_2') return false;
+    if (chip === 'TIER_3' && a.tier !== 'TIER_3') return false;
+    if (chip === 'NO_DR' && a.drServerId) return false;
+    const prd = servers.find(s => s.id === a.prdServerId);
+    const dr = servers.find(s => s.id === a.drServerId);
+    return matchesQuery(search, [a.name, a.codeName, a.description, a.prdUrl, a.drUrl, a.dnsRecordName, a.cloudflareZone, prd?.hostname, prd?.ip, dr?.hostname, dr?.ip]);
+  }).sort((a, b) => a.name.localeCompare(b.name)), [applications, servers, chip, search]);
+
+  const paging = useClientPagination(filtered, pageSize, `${chip}|${search}`);
+  const ids = useMemo(() => paging.slice.map(a => a.id), [paging.slice]);
+  const expand = useExpandSet(ids, false);
+
   return (
     <section className="space-y-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
         <h2 className="text-sm font-bold font-mono flex items-center gap-2"><Layers className="w-4 h-4 text-blue-500" /> APPLICATIONS ({applications.length})</h2>
         {isAdmin && editing === null && (
           <button onClick={() => setEditing('new')} disabled={servers.length === 0} className={`${st.btn} ${st.primary}`} title={servers.length === 0 ? 'Register servers first' : undefined}>
@@ -746,52 +944,93 @@ const ApplicationsSection: React.FC = () => {
           No applications yet. An application ties a PRD server, a DR server and the Cloudflare DNS record that is switched on failover.
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-          {applications.map(a => {
-            const prd = servers.find(s => s.id === a.prdServerId);
-            const dr = servers.find(s => s.id === a.drServerId);
-            const zone = cloudflareZones.find(z => a.cloudflareZone && (a.cloudflareZone === z.domain || a.cloudflareZone.endsWith(`.${z.domain}`)));
-            const record = zone?.dnsRecords.find(r => r.name === a.dnsRecordName && (r.type === 'A' || r.type === 'AAAA'));
-            const appMonitors = monitors.filter(m => m.applicationId === a.id);
-            return (
-              <div key={a.id} className={`${st.card} space-y-2`}>
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <div className="text-sm font-bold">{a.name} <span className={`text-[10px] font-mono ${st.faint}`}>{a.codeName}</span></div>
-                    <div className={`text-[11px] font-mono font-bold ${statusColor(a.status)}`}>{a.status} · {a.failoverState.replace('_', ' ')}</div>
+        <>
+          <InventoryFilters
+            st={st}
+            search={search}
+            onSearch={setSearch}
+            searchPlaceholder="Search name, code, URL, server…"
+            chips={chips}
+            chip={chip}
+            onChip={setChip}
+            shown={filtered.length}
+            total={applications.length}
+            expand={{ allOpen: expand.allOpen, onExpandAll: expand.expandAll, onCollapseAll: expand.collapseAll }}
+            ariaLabel="Filter applications"
+          />
+          <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+            <label className={`flex items-center gap-1.5 ${st.muted}`}>
+              Per page
+              <select className={`${st.input} !w-auto`} value={pageSize} onChange={e => setPageSize(Number(e.target.value))} aria-label="Applications per page">
+                {[5, 10, 20, 50].map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </label>
+          </div>
+          {filtered.length === 0 ? (
+            <div className={`${st.card} text-center text-xs ${st.muted} py-6`}>No applications match these filters.</div>
+          ) : (
+            <>
+            <div className="space-y-2">
+              {paging.slice.map(a => {
+                const prd = servers.find(s => s.id === a.prdServerId);
+                const dr = servers.find(s => s.id === a.drServerId);
+                const zone = cloudflareZones.find(z => a.cloudflareZone && (a.cloudflareZone === z.domain || a.cloudflareZone.endsWith(`.${z.domain}`)));
+                const record = zone?.dnsRecords.find(r => r.name === a.dnsRecordName && (r.type === 'A' || r.type === 'AAAA'));
+                const appMonitors = monitors.filter(m => m.applicationId === a.id);
+                const open = expand.isOpen(a.id);
+                return (
+                  <div key={a.id} className={`${st.card} !p-0 min-w-0 overflow-hidden`}>
+                    <div className={`flex items-center gap-2 px-3 py-2.5 ${st.isDark ? 'hover:bg-[#0B0F17]' : 'hover:bg-slate-50'}`}>
+                      <ExpandToggle open={open} onClick={() => expand.toggle(a.id)} label={a.name} className={st.faint} />
+                      <button type="button" onClick={() => expand.toggle(a.id)} className="flex-1 min-w-0 text-left cursor-pointer">
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono">
+                          <span className="text-sm font-bold break-words">{a.name}</span>
+                          <span className={st.faint}>{a.codeName}</span>
+                          <span className={`font-bold ${statusColor(a.status)}`}>{a.status}</span>
+                          <span className={st.muted}>{a.tier.replace('_', ' ')}</span>
+                          <span className={st.muted}>{prd ? `PRD ${prd.hostname}` : 'PRD —'}{dr ? ` · DR ${dr.hostname}` : ' · PRD-only'}</span>
+                        </div>
+                      </button>
+                      {isAdmin && (
+                        <div className="flex gap-1.5 shrink-0">
+                          <button onClick={() => setEditing(a)} className={`${st.btn} ${st.ghost} !px-2`}><Pencil className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => remove(a)} className={`${st.btn} ${st.danger} !px-2`}><Trash2 className="w-3.5 h-3.5" /></button>
+                        </div>
+                      )}
+                    </div>
+                    {open && (
+                      <div className={`px-3 pb-3 pl-10 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono border-t ${st.isDark ? 'border-[#172030]' : 'border-slate-100'} pt-2 [&>*]:min-w-0 [&>*]:break-words`}>
+                        <div><span className={st.faint}>PRD:</span> {prd ? `${prd.hostname} (${prd.ip})` : <span className="text-amber-500">not set</span>}</div>
+                        <div><span className={st.faint}>DR:</span> {dr ? `${dr.hostname} (${dr.ip})` : <span className="text-amber-500">not set</span>}</div>
+                        <div className="col-span-2 break-all"><span className={st.faint}>PRD URL:</span> {a.prdUrl || <span className={st.faint}>not set</span>}</div>
+                        <div className="col-span-2 break-all"><span className={st.faint}>DR URL:</span> {a.drUrl || <span className={st.faint}>not set</span>}</div>
+                        <div className="col-span-2"><span className={st.faint}>Routing:</span> {ROUTING_METHOD_LABELS[effectiveRoutingMethod(a)]} · failover {a.failoverState.replace('_', ' ')}</div>
+                        {effectiveRoutingMethod(a) === 'cloudflare_lb' && a.loadBalancer ? (
+                          <div className="col-span-2 break-all">
+                            <span className={st.faint}>Cloudflare LB:</span> {a.loadBalancer.hostname} · account {a.loadBalancer.accountId.slice(0, 8)}… · PRD pool {a.loadBalancer.prdPoolId.slice(0, 8)}… · DR pool {a.loadBalancer.drPoolId.slice(0, 8)}…
+                          </div>
+                        ) : (
+                          <div className="col-span-2">
+                            <span className={st.faint}>DNS failover:</span>{' '}
+                            {a.dnsRecordName
+                              ? <>{a.dnsRecordName} → {record ? <b>{record.target}</b> : <span className={st.faint}>{zone ? 'record not found' : 'zone not synced'}</span>} {a.autoFailover ? <span className="text-emerald-500">(auto)</span> : <span className={st.faint}>(manual)</span>}</>
+                              : <span className="text-amber-500">not configured</span>}
+                          </div>
+                        )}
+                        {a.description && <div className="col-span-2"><span className={st.faint}>Notes:</span> {a.description}</div>}
+                        <div className="col-span-2"><span className={st.faint}>Monitors:</span> {appMonitors.length} ({appMonitors.filter(m => m.status === 'HEALTHY').length} healthy)
+                          {' '}<button onClick={() => navigate('/monitors')} className="text-blue-500 hover:underline cursor-pointer">manage</button>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  {isAdmin && (
-                    <div className="flex gap-1.5">
-                      <button onClick={() => setEditing(a)} className={`${st.btn} ${st.ghost} !px-2`}><Pencil className="w-3.5 h-3.5" /></button>
-                      <button onClick={() => remove(a)} className={`${st.btn} ${st.danger} !px-2`}><Trash2 className="w-3.5 h-3.5" /></button>
-                    </div>
-                  )}
-                </div>
-                <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
-                  <div><span className={st.faint}>PRD:</span> {prd ? `${prd.hostname} (${prd.ip})` : <span className="text-amber-500">not set</span>}</div>
-                  <div><span className={st.faint}>DR:</span> {dr ? `${dr.hostname} (${dr.ip})` : <span className="text-amber-500">not set</span>}</div>
-                  <div className="col-span-2 break-all"><span className={st.faint}>PRD URL:</span> {a.prdUrl || <span className={st.faint}>not set</span>}</div>
-                  <div className="col-span-2 break-all"><span className={st.faint}>DR URL:</span> {a.drUrl || <span className={st.faint}>not set</span>}</div>
-                  {a.loadBalancer ? (
-                    <div className="col-span-2 break-all">
-                      <span className={st.faint}>Cloudflare LB:</span> {a.loadBalancer.hostname} · account {a.loadBalancer.accountId.slice(0, 8)}… · PRD pool {a.loadBalancer.prdPoolId.slice(0, 8)}… · DR pool {a.loadBalancer.drPoolId.slice(0, 8)}…
-                    </div>
-                  ) : (
-                    <div className="col-span-2">
-                      <span className={st.faint}>DNS failover:</span>{' '}
-                      {a.dnsRecordName
-                        ? <>{a.dnsRecordName} → {record ? <b>{record.target}</b> : <span className={st.faint}>{zone ? 'record not found' : 'zone not synced'}</span>} {a.autoFailover ? <span className="text-emerald-500">(auto)</span> : <span className={st.faint}>(manual)</span>}</>
-                        : <span className="text-amber-500">not configured</span>}
-                    </div>
-                  )}
-                  <div className="col-span-2"><span className={st.faint}>Monitors:</span> {appMonitors.length} ({appMonitors.filter(m => m.status === 'HEALTHY').length} healthy)
-                    {' '}<button onClick={() => navigate('/monitors')} className="text-blue-500 hover:underline cursor-pointer">manage</button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+                );
+              })}
+            </div>
+            <Pagination page={paging.page} totalPages={paging.totalPages} total={paging.total} pageSize={paging.pageSize} onPage={paging.setPage} />
+            </>
+          )}
+        </>
       )}
     </section>
   );
@@ -893,6 +1132,7 @@ export const SetupView: React.FC = () => {
 
       <ServersSection />
       <ApplicationsSection />
+      <DependencyRegisterSection />
       {canDo('run_probe') && <ToolsSection />}
 
       {showChannelsHint && (

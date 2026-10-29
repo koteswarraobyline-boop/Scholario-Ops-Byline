@@ -11,6 +11,8 @@ import { db, ServerRecord } from './store.ts';
 import { HTTP_TYPES } from './engine.ts';
 import { lbState, poolFor, routingFor, originHealthy, originRtt, PERMISSION_HINT } from './loadbalancer.ts';
 import { readChecks, availability, AvailabilityStats } from './history.ts';
+import { THRESHOLDS } from '../src/lib/thresholds.ts';
+import { serverHealth } from './telemetryHealth.ts';
 import { Env, agentState, appHealth, backupStatus, databaseHealth, inventoryFor, serverFor, sslMonitor, urlMonitor } from './health.ts';
 
 const envLabel = (env: Env) => (env === 'PRD' ? 'Production' : 'DR');
@@ -51,7 +53,7 @@ function checkReachable(app: Application, env: Env, key: string): DrReadinessIte
 
 function checkApp(app: Application, env: Env, key: string): DrReadinessItem {
   const h = appHealth(app, env);
-  const verdict: CheckVerdict = h.status === 'HEALTHY' ? 'PASS' : h.status === 'DOWN' ? 'FAIL' : h.status === 'NOT_CONFIGURED' ? 'NOT_CONFIGURED' : h.status === 'DEGRADED' ? 'FAIL' : 'UNKNOWN';
+  const verdict: CheckVerdict = h.status === 'HEALTHY' ? 'PASS' : h.status === 'DOWN' ? 'FAIL' : h.status === 'NOT_CONFIGURED' ? 'NOT_CONFIGURED' : h.status === 'DEGRADED' ? 'WARNING' : 'UNKNOWN';
   return item(key, `${envLabel(env)} application healthy`, verdict, h.status === 'DEGRADED' ? `DEGRADED — ${h.detail}` : h.detail, h.observedAt);
 }
 
@@ -125,7 +127,7 @@ function checkSsl(app: Application, env: Env, key: string): DrReadinessItem {
   if (!url) return item(key, L, 'NOT_CONFIGURED', `No ${envLabel(env)} URL configured`);
   if (!url.startsWith('https://')) return item(key, L, 'NOT_CONFIGURED', `${url} is not https`);
   const http = urlMonitor(app, env);
-  if (http?.lastProbeStatus === 'TLS_ERROR') return item(key, L, 'FAIL', `TLS failure: ${http.history[0]?.detail ?? ''}`, http.lastCheck);
+  if (http?.lastProbeStatus === 'TLS_ERROR') return item(key, L, http.status === 'CRITICAL' ? 'FAIL' : 'WARNING', `TLS failure${http.status === 'CRITICAL' ? '' : ' (not yet confirmed)'}: ${http.history[0]?.detail ?? ''}`, http.lastCheck);
   const ssl = sslMonitor(app, env);
   if (!ssl) return item(key, L, 'NOT_CONFIGURED', 'TLS certificate monitoring is off for this application');
   if (!ssl.lastCheck) return item(key, L, 'UNKNOWN', `${ssl.name}: not checked yet`);
@@ -139,13 +141,20 @@ function checkUrl(app: Application, env: Env, key: string): DrReadinessItem {
   const m = urlMonitor(app, env);
   if (!m) return item(key, L, 'NOT_CONFIGURED', `No ${envLabel(env)} URL configured`);
   if (!m.lastCheck || !m.lastProbeStatus) return item(key, L, 'UNKNOWN', `${m.name}: not checked yet`);
-  if (m.lastStatusCode == null) return item(key, L, 'FAIL', `No HTTP response (${m.lastProbeStatus}) from ${m.target}`, m.lastCheck);
+  // One timeout is not an outage: FAIL only once the monitor has confirmed it (failure confirmation threshold)
+  if (m.lastStatusCode == null) return item(key, L, m.status === 'CRITICAL' ? 'FAIL' : 'WARNING', `No HTTP response (${m.lastProbeStatus}) from ${m.target}${m.status === 'CRITICAL' ? '' : ' — not yet confirmed'}`, m.lastCheck);
   const good = m.expectedStatusCode ? m.lastStatusCode === m.expectedStatusCode : m.lastStatusCode < 400;
-  return item(key, L, good ? 'PASS' : 'FAIL', `${m.target} → HTTP ${m.lastStatusCode}${m.expectedStatusCode ? ` (expected ${m.expectedStatusCode})` : ''} in ${m.history[0]?.responseTimeMs ?? '?'} ms`, m.lastCheck);
+  const latency = m.history[0]?.responseTimeMs;
+  const detail = `${m.target} → HTTP ${m.lastStatusCode}${m.expectedStatusCode ? ` (expected ${m.expectedStatusCode})` : ''} in ${latency ?? '?'} ms`;
+  if (good && typeof latency === 'number' && latency > config.drLatencyThresholdMs) {
+    return item(key, L, 'WARNING', `${detail} (warning above ${config.drLatencyThresholdMs} ms)`, m.lastCheck);
+  }
+  return item(key, L, good ? 'PASS' : 'FAIL', detail, m.lastCheck);
 }
 
 /** Resource checks of the DR server (agent). Shown separately; not part of the 13 core checks. */
 function capacityChecks(app: Application): DrReadinessItem[] {
+  if (!app.drServerId && !app.drUrl && !app.loadBalancer?.drPoolId) return [];
   const srv = serverFor(app, 'DR');
   const state = agentState(srv);
   const out: DrReadinessItem[] = [];
@@ -155,7 +164,7 @@ function capacityChecks(app: Application): DrReadinessItem[] {
     : state === 'NOT_CONNECTED' ? unknown('telemetry', 'DR telemetry heartbeat', `NOT_CONNECTED — agent not installed on ${srv.ip}`)
       : item('telemetry', 'DR telemetry heartbeat', state === 'STALE' ? 'WARNING' : 'FAIL', `Agent ${state} — last report ${srv.lastSeen}`, srv.lastSeen, 'capacity'));
   if (state !== 'ONLINE') {
-    for (const [k, l] of [['services', 'Required services'], ['disk', 'Disk capacity'], ['memory', 'Memory capacity'], ['cpu', 'CPU / load']]) out.push(unknown(k, l, 'No live telemetry'));
+    for (const [k, l] of [['services', 'Required services'], ['disk', 'Disk capacity'], ['memory', 'Memory capacity'], ['cpu', 'CPU / load'], ['pm2', 'PM2 applications'], ['app_local', 'Local application health'], ['time', 'Time synchronisation']]) out.push(unknown(k, l, 'No live telemetry'));
     return out;
   }
   const t = srv.telemetry;
@@ -167,11 +176,34 @@ function capacityChecks(app: Application): DrReadinessItem[] {
     out.push(item('services', 'Required services', failed.length ? 'FAIL' : notActive.length ? 'WARNING' : 'PASS', srv.services.map(s => `${s.name}: ${s.status}`).join(', '), at, 'capacity'));
   }
   const gb = (v: number | null | undefined) => (v == null ? '?' : `${v} GB`);
-  out.push(item('disk', 'Disk capacity', t.diskPercent >= 90 ? 'FAIL' : t.diskPercent >= 80 ? 'WARNING' : 'PASS', `${t.diskPercent}% used (${gb(t.diskUsedGb)} of ${gb(t.diskTotalGb)})`, at, 'capacity'));
-  out.push(item('memory', 'Memory capacity', t.ramPercent >= 95 ? 'FAIL' : t.ramPercent >= 85 ? 'WARNING' : 'PASS', `${t.ramPercent}% used`, at, 'capacity'));
+  const cap = THRESHOLDS.drCapacity;
+  // Fullest filesystem (all mounts when the agent reports them, otherwise the root filesystem)
+  const fss = srv.filesystems?.length ? srv.filesystems : null;
+  const fullest = fss ? fss.reduce((a, b) => ((b.usedPercent ?? 0) > (a.usedPercent ?? 0) ? b : a)) : null;
+  const diskPct = fullest?.usedPercent ?? t.diskPercent;
+  out.push(item('disk', 'Disk capacity', diskPct >= cap.diskPercent.critical ? 'FAIL' : diskPct >= cap.diskPercent.warning ? 'WARNING' : 'PASS',
+    fullest ? `fullest ${fullest.mountPoint} ${fullest.usedPercent}% used (${fss!.length} filesystem(s))` : `${t.diskPercent}% used (${gb(t.diskUsedGb)} of ${gb(t.diskTotalGb)})`, at, 'capacity'));
+  out.push(item('memory', 'Memory capacity', t.ramPercent >= cap.memoryPercent.critical ? 'FAIL' : t.ramPercent >= cap.memoryPercent.warning ? 'WARNING' : 'PASS', `${t.ramPercent}% used${t.swapPercent != null ? ` · swap ${t.swapPercent}%` : ''}`, at, 'capacity'));
   const cores = srv.cpuCores || srv.planSpec?.cpuCores || 0;
-  const perCore = cores ? t.loadAvg[0] / cores : 0;
-  out.push(item('cpu', 'CPU / load', t.cpuPercent >= 95 || perCore >= 2 ? 'FAIL' : t.cpuPercent >= 80 || perCore >= 1 ? 'WARNING' : 'PASS', `CPU ${t.cpuPercent}% · load ${t.loadAvg.map(l => l.toFixed(2)).join(' / ')}${cores ? ` on ${cores} cores` : ''}`, at, 'capacity'));
+  const loadText = `CPU ${t.cpuPercent}% · load ${t.loadAvg.map(l => l.toFixed(2)).join(' / ')}`;
+  if (!cores) {
+    const cpuOnly = t.cpuPercent >= cap.cpuPercent.critical ? 'FAIL' : t.cpuPercent >= cap.cpuPercent.warning ? 'WARNING' : 'UNKNOWN';
+    out.push(item('cpu', 'CPU / load', cpuOnly, `${loadText} · load per core unknown (no core count)`, at, 'capacity'));
+  } else {
+    const perCore = t.loadAvg[0] / cores;
+    out.push(item('cpu', 'CPU / load', t.cpuPercent >= cap.cpuPercent.critical || perCore >= THRESHOLDS.loadPerCore.critical ? 'FAIL' : t.cpuPercent >= cap.cpuPercent.warning || perCore >= THRESHOLDS.loadPerCore.warning ? 'WARNING' : 'PASS', `${loadText} on ${cores} cores`, at, 'capacity'));
+  }
+
+  // Agent >= 3.3 categories, judged by the same rules as the server health summary
+  const health = serverHealth(srv).health;
+  const fromHealth = (key: string, label: string, cat: string) => {
+    const h = health.find(x => x.key === cat);
+    if (!h || h.level === 'UNKNOWN') return out.push(unknown(key, label, h?.detail ?? 'Not reported'));
+    out.push(item(key, label, h.level === 'CRITICAL' ? 'FAIL' : h.level === 'WARNING' ? 'WARNING' : 'PASS', h.detail, at, 'capacity'));
+  };
+  fromHealth('pm2', 'PM2 applications', 'pm2');
+  fromHealth('app_local', 'Local application health', 'apps');
+  fromHealth('time', 'Time synchronisation', 'time');
   return out;
 }
 
@@ -199,14 +231,31 @@ export function readiness(app: Application): ReadinessResult {
     checkSsl(app, 'DR', 'dr_ssl'),
     checkUrl(app, 'DR', 'dr_url'),
   ];
-  const passed = core.filter(c => c.status === 'PASS').length;
-  // DR cannot be judged at all without evidence that the DR application answers
-  const essential = core.filter(c => ['dr_app', 'dr_url'].includes(c.key));
-  const overall: DrOverall = core.some(c => c.status === 'FAIL') ? 'NOT_READY'
-    : passed === core.length ? 'READY'
+  // Cloudflare pool / origin checks only apply to Load-Balancer-routed applications; DNS-failover
+  // applications are judged on the other checks (they could otherwise never be READY)
+  const drConfigured = Boolean(app.drServerId || app.drUrl || app.loadBalancer?.drPoolId);
+  const DR_KEYS = new Set(['dr_reachable', 'dr_app', 'dr_db', 'replication_healthy', 'replication_lag', 'dr_pool', 'dr_origin', 'dr_ssl', 'dr_url']);
+  if (!drConfigured) {
+    for (const check of core) {
+      if (!DR_KEYS.has(check.key)) continue;
+      check.status = 'NOT_CONFIGURED';
+      check.detail = 'DR is not configured for this application';
+    }
+  }
+  const LB_ONLY = new Set(['dr_pool', 'dr_origin']);
+  const applicable = core.filter(c => (drConfigured || !DR_KEYS.has(c.key)) && (app.loadBalancer || !LB_ONLY.has(c.key)));
+  for (const check of core) {
+    if (check.status === 'NOT_CONFIGURED') check.status = 'UNKNOWN';
+  }
+  const passed = applicable.filter(c => c.status === 'PASS').length;
+  // DR cannot be judged at all without evidence that the DR application answers.
+  // An application with no DR server, URL, or pool is not failed for lacking one.
+  const essential = drConfigured ? core.filter(c => ['dr_app', 'dr_url'].includes(c.key)) : core.filter(c => ['prd_app', 'prd_reachable'].includes(c.key));
+  const overall: DrOverall = applicable.some(c => c.status === 'FAIL') ? 'NOT_READY'
+    : passed === applicable.length && applicable.length > 0 ? 'READY'
       : essential.every(c => c.status !== 'PASS') ? 'UNKNOWN'
-        : 'PARTIALLY_READY';
-  return { checks: [...core, ...capacityChecks(app)], overall, passed, total: core.length, evaluatedAt: new Date().toISOString() };
+        : 'DEGRADED';
+  return { checks: [...core, ...capacityChecks(app)], overall, passed, total: applicable.length, evaluatedAt: new Date().toISOString() };
 }
 
 export function failoverPreflight(app: Application, target: 'DR' | 'PRIMARY'): FailoverPreflight {
@@ -253,14 +302,14 @@ export function failoverPreflight(app: Application, target: 'DR' | 'PRIMARY'): F
     key: 'routing', label: 'Current routing state',
     status: !routing ? (app.loadBalancer ? 'UNKNOWN' : 'NOT_CONFIGURED') : routing.found ? 'PASS' : 'UNKNOWN',
     detail: !routing ? (app.loadBalancer ? 'Routing not read yet' : 'No Load Balancer mapping')
-      : routing.found ? `${routing.hostname}: steering ${routing.steeringPolicy ?? 'default'}, pool order ${routing.defaultPools.map(poolName).join(' → ') || '—'}, fallback ${routing.fallbackPool ? poolName(routing.fallbackPool) : '—'}; serving: ${routing.activePoolId ? poolName(routing.activePoolId) : 'unknown'}`
+      : routing.found ? `${routing.hostname}: steering ${routing.steeringPolicy ?? 'default'}, pool order ${routing.defaultPools.map(poolName).join(' → ') || '—'}, fallback ${routing.fallbackPool ? poolName(routing.fallbackPool) : '—'}; serving: ${routing.traffic.length ? routing.traffic.map(t => `${poolName(t.poolId)} ${t.percent == null ? 'live' : `${t.percent}%`}`).join(' · ') : routing.activePoolId ? poolName(routing.activePoolId) : 'unknown'}`
         : `${routing.error ?? 'Load balancer not found'} — the token needs Zone › Load Balancers › Read on the zone`,
     observedAt: routing?.fetchedAt ?? null,
   });
   if (targetEnv === 'DR') {
     checks.push({
       key: 'readiness', label: 'DR readiness',
-      status: dr.overall === 'READY' ? 'PASS' : dr.overall === 'NOT_READY' ? 'FAIL' : dr.overall === 'PARTIALLY_READY' ? 'WARNING' : 'UNKNOWN',
+      status: dr.overall === 'READY' ? 'PASS' : dr.overall === 'NOT_READY' ? 'FAIL' : dr.overall === 'DEGRADED' ? 'WARNING' : 'UNKNOWN',
       detail: `${dr.overall} — ${dr.passed}/${dr.total} checks pass; not passing: ${dr.checks.filter(c => c.group === 'core' && c.status !== 'PASS').map(c => `${c.label} ${c.status}`).join(', ') || 'none'}`,
       observedAt: dr.evaluatedAt,
     });

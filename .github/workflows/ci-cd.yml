@@ -32,18 +32,19 @@ jobs:
         env:
           POSTGRES_USER: scholario_ci
           POSTGRES_PASSWORD: ci-throwaway-only
-          POSTGRES_DB: scholario_ops_ci
+          POSTGRES_DB: scholario_ops_ui_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U scholario_ci -d scholario_ops_ci"
+          --health-cmd "pg_isready -U scholario_ci -d scholario_ops_ui_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
     env:
-      # Disposable database that exists only inside this job — never production.
+      # Disposable database that exists only inside this job — never production or scholario_ops_dev.
+      # The name must be scholario_ops_ui_test: tests/helpers/test-db-guard.ts refuses every other database.
       # The tests create their own throw-away schemas and drop them afterwards.
-      DATABASE_URL: postgresql://scholario_ci:ci-throwaway-only@127.0.0.1:5432/scholario_ops_ci
+      DATABASE_URL: postgresql://scholario_ci:ci-throwaway-only@127.0.0.1:5432/scholario_ops_ui_test
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -184,6 +185,41 @@ jobs:
           esac
           printf '### Production deployment\n\n%s\n' "$msg" >> "$GITHUB_STEP_SUMMARY"
           [ "$code" = 0 ] || { echo "::error::$msg"; exit "$code"; }
+
+      - name: Report the deployment
+        if: always() && steps.deploy.conclusion != 'skipped'
+        env:
+          OPS_REPORT_URL: ${{ secrets.OPS_REPORT_URL }}
+          OPS_DEPLOY_REPORT_TOKEN: ${{ secrets.OPS_DEPLOY_REPORT_TOKEN }}
+          OPS_APPLICATION_CODE: ${{ secrets.OPS_APPLICATION_CODE }}
+          DEPLOY_CODE: ${{ steps.deploy.outputs.code }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OPS_REPORT_URL}" ] || [ -z "${OPS_DEPLOY_REPORT_TOKEN}" ] || [ -z "${OPS_APPLICATION_CODE}" ]; then
+            echo "::error::Deployment was not recorded. Set OPS_REPORT_URL, OPS_DEPLOY_REPORT_TOKEN and OPS_APPLICATION_CODE."
+            exit 1
+          fi
+          case "$OPS_REPORT_URL" in
+            https://*) ;;
+            *) echo "::error::OPS_REPORT_URL must start with https://"; exit 1 ;;
+          esac
+          case "${DEPLOY_CODE:-}" in
+            0) status=SUCCESS ;;
+            1) status=ROLLED_BACK ;;
+            *) status=FAILED ;;
+          esac
+          payload=$(jq -n \
+            --arg application "$OPS_APPLICATION_CODE" \
+            --arg version "$GITHUB_SHA" \
+            --arg status "$status" \
+            --arg commitHash "$GITHUB_SHA" \
+            '{application:$application, version:$version, status:$status, environment:"PRD", commitHash:$commitHash, author:"GitHub Actions"}')
+          curl --proto '=https' --tlsv1.2 -fsS --retry 3 --retry-delay 2 --retry-connrefused \
+            -X POST "${OPS_REPORT_URL%/}/api/v1/deployments/report" \
+            -H "Authorization: Bearer ${OPS_DEPLOY_REPORT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "$payload" >/dev/null
+          echo "Deployment report stored (${status})."
 
       - name: Clean up
         if: always()

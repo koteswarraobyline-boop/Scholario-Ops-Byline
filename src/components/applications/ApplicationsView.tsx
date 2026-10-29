@@ -3,9 +3,16 @@ import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
 import { LbFailoverConsole } from '../resilience/LbFailoverConsole';
 import { useAuth } from '../../context/AuthContext';
-import { Application, OperationalStatus, VpsServer } from '../../types';
-import { X, AlertTriangle, ArrowRight, Plus, Layers, Loader2 } from 'lucide-react';
+import { Application, Monitor, OperationalStatus, VpsServer } from '../../types';
+import { X, AlertTriangle, ArrowRight, Plus, Layers, Loader2, Pencil, Trash2 } from 'lucide-react';
+import { AppEditor } from '../setup/SetupView';
+import { HealthDimensions } from './HealthDimensions';
+import { effectiveRoutingMethod, explainVps, ROUTING_METHOD_LABELS } from '../../lib/trafficHealth';
+import { registerLinks, statusCause } from '../../lib/statusCause';
+import { dnsPointsAt, routeState, servingLabel } from '../ui/routing';
+import { MonitorFormModal } from '../monitors/CreateMonitorModal';
 import { EmptyState } from '../ui/EmptyState';
+import { useDialog } from '../ui/useDialog';
 
 // ── Formatting helpers (null-safe) ──────────────────────────────────────────
 const fmtPct = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : `${v.toFixed(2)}%`);
@@ -43,22 +50,39 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
     deployments,
     auditLogs,
     triggerFailover,
+    cloudflareZones,
+    loadBalancer,
+    integrations,
+    workerMonitor,
     setSelectedIncidentId,
     setActiveTab,
     openAddMonitorWithContext,
+    deleteMonitor,
+    deleteApplication,
     theme,
   } = useOps();
   const { hasRole, canDo } = useAuth();
   const navigate = useNavigate();
+  const dialog = useDialog(onClose);
 
   const isDark = theme === 'dark';
   const canFailover = hasRole('super_admin');
   const canAddMonitor = canDo('create_monitor');
+  const canEditApp = canDo('update_application');
+  const canDeleteApp = canDo('delete_application');
+  const canEditMonitor = canDo('update_monitor');
+  const canDeleteMonitor = canDo('delete_monitor');
 
   const [activeTab, setActiveTabLocal] = useState<'overview' | 'health' | 'monitors' | 'infra' | 'deps' | 'dr' | 'backups' | 'incidents' | 'deployments' | 'history'>('overview');
   const [confirmFailover, setConfirmFailover] = useState(false);
   const [failoverReason, setFailoverReason] = useState('');
   const [failoverBusy, setFailoverBusy] = useState(false);
+  const [editingApp, setEditingApp] = useState(false);
+  const [confirmDeleteApp, setConfirmDeleteApp] = useState(false);
+  const [deletingApp, setDeletingApp] = useState(false);
+  const [editingMonitor, setEditingMonitor] = useState<Monitor | null>(null);
+  const [confirmDeleteMonitor, setConfirmDeleteMonitor] = useState<string | null>(null);
+  const [deletingMonitor, setDeletingMonitor] = useState<string | null>(null);
 
   const prdServer = servers.find(s => s.id === application.prdServerId);
   const drServer = servers.find(s => s.id === application.drServerId);
@@ -68,8 +92,9 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
   const appDeployments = deployments.filter(d => d.applicationId === application.id);
   const appAudits = auditLogs.filter(a => a.targetId === application.id);
 
-  const isDrActive = application.failoverState === 'DR_ACTIVE';
-  const isFailingOver = application.failoverState === 'FAILING_OVER';
+  const route = routeState(application, loadBalancer, dnsPointsAt(application, servers, cloudflareZones));
+  const isDrActive = route === 'DR';
+  const isFailingOver = route === 'MOVING' || application.failoverState === 'FAILING_OVER';
   const failoverTarget: 'DR' | 'PRIMARY' = isDrActive ? 'PRIMARY' : 'DR';
   const targetServer = failoverTarget === 'DR' ? drServer : prdServer;
   const failoverBlockers: string[] = [];
@@ -106,7 +131,8 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
         <>
           <div className={`font-semibold mt-1 ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{srv.hostname}</div>
           <div className={`text-[11px] ${muted}`}>{srv.ip || 'No IP'}{srv.region ? ` · ${srv.region}` : ''}</div>
-          <div className={`text-[10px] mt-0.5 ${statusColor(srv.status)}`}>{srv.status} · agent {srv.agentStatus}</div>
+          <div className={`text-[10px] mt-0.5 ${statusColor(explainVps(srv).status)}`}>VPS {explainVps(srv).status.replace(/_/g, ' ')} · agent {srv.lastSeen ? srv.agentStatus : 'NOT CONNECTED'}</div>
+          <div className={`text-[10px] mt-0.5 font-sans ${muted}`}>{explainVps(srv).detail}</div>
         </>
       ) : (
         <div className={`mt-1 text-[11px] italic ${muted}`}>No {env} server linked — configure it in Setup</div>
@@ -117,7 +143,9 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 overflow-y-auto animate-in fade-in">
       <div
-        className={`w-full max-w-4xl rounded border overflow-hidden flex flex-col max-h-[90vh] shadow-2xl ${
+        {...dialog}
+        aria-labelledby="application-detail-title"
+        className={`w-full max-w-4xl rounded border overflow-hidden flex flex-col max-h-[90vh] shadow-2xl focus:outline-none ${
           isDark ? 'bg-[#101624] text-slate-100 border-[#223048]' : 'bg-white text-slate-900 border-slate-300'
         }`}
         onClick={e => e.stopPropagation()}
@@ -130,7 +158,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
             <span className={`w-2 h-2 rounded-full ${statusDot(application.status)}`} />
             <div>
               <div className="flex items-center gap-2 font-mono">
-                <h2 className={`text-base font-bold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.name}</h2>
+                <h2 id="application-detail-title" className={`text-base font-bold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.name}</h2>
                 <span className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>· {application.tier.replace('_', ' ')}</span>
                 <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
                 <span className={`text-xs font-semibold ${statusColor(application.status)}`}>{application.status}</span>
@@ -141,15 +169,54 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             <span className={`text-[11px] font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
               Checked {fmtTime(application.lastChecked, 'never')}
             </span>
+            {canEditApp && (
+              <button
+                type="button"
+                onClick={() => setEditingApp(true)}
+                className={`px-2 py-1 rounded text-[11px] font-mono border cursor-pointer inline-flex items-center gap-1 ${isDark ? 'border-[#223048] text-slate-200 hover:bg-[#1A2436]' : 'border-slate-300 text-slate-700 hover:bg-slate-100'}`}
+              >
+                <Pencil className="w-3 h-3" /> Edit
+              </button>
+            )}
+            {canDeleteApp && (
+              confirmDeleteApp ? (
+                <span className="inline-flex items-center gap-1">
+                  <button
+                    type="button"
+                    disabled={deletingApp}
+                    onClick={async () => {
+                      setDeletingApp(true);
+                      const ok = await deleteApplication(application.id);
+                      setDeletingApp(false);
+                      if (ok) onClose();
+                    }}
+                    className="px-2 py-1 rounded text-[11px] font-semibold bg-rose-600 hover:bg-rose-500 text-white cursor-pointer disabled:opacity-60"
+                  >
+                    {deletingApp ? 'Deleting…' : 'Delete'}
+                  </button>
+                  <button type="button" onClick={() => setConfirmDeleteApp(false)} className={`px-2 py-1 rounded text-[11px] cursor-pointer ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Cancel</button>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmDeleteApp(true)}
+                  className="px-2 py-1 rounded text-[11px] font-mono border border-rose-800/40 text-rose-500 hover:bg-rose-950/30 cursor-pointer inline-flex items-center gap-1"
+                >
+                  <Trash2 className="w-3 h-3" /> Delete
+                </button>
+              )
+            )}
             <button
               onClick={onClose}
+              aria-label="Close application details"
+              title="Close (Esc)"
               className={`p-1 transition-colors cursor-pointer ${isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800'}`}
             >
-              <X className="w-5 h-5" />
+              <X className="w-5 h-5" aria-hidden="true" />
             </button>
           </div>
         </div>
@@ -214,6 +281,17 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                 </p>
               )}
 
+              <HealthDimensions
+                application={application}
+                servers={servers}
+                monitors={monitors}
+                zones={cloudflareZones}
+                loadBalancer={loadBalancer}
+                cloudflareConfigured={Boolean(integrations?.cloudflare.configured)}
+                workerMonitor={workerMonitor}
+                isDark={isDark}
+              />
+
               <div className={`p-4 rounded border space-y-2 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
                 <div className={`text-xs font-bold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Domain &amp; Routing</div>
                 <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 ${muted}`}>
@@ -222,13 +300,13 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                     <div className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{application.cloudflareZone || 'Not configured'}</div>
                   </div>
                   <div>
-                    <span className={label}>{application.loadBalancer ? 'Cloudflare Load Balancer:' : 'DNS Record (switched on failover):'}</span>
-                    <div className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{application.loadBalancer ? `${application.loadBalancer.hostname} (read-only)` : application.dnsRecordName || 'Not configured'}</div>
+                    <span className={label}>Traffic routing method:</span>
+                    <div className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{ROUTING_METHOD_LABELS[effectiveRoutingMethod(application)]}</div>
                   </div>
                   <div>
-                    <span className={label}>Active Routing Target:</span>
-                    <div className={`font-semibold ${application.loadBalancer ? 'text-slate-400' : isFailingOver ? 'text-amber-500' : isDrActive ? 'text-rose-500' : 'text-emerald-500'}`}>
-                      {application.loadBalancer ? 'Decided by Cloudflare pool order — see PRD / DR Readiness' : isFailingOver ? 'Failover in progress' : isDrActive ? 'DR server' : 'Primary (PRD) server'}
+                    <span className={label}>Active routing target:</span>
+                    <div className={`font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+                      {servingLabel(route)}
                     </div>
                   </div>
                   <div>
@@ -336,11 +414,28 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                         </div>
                         <div className={`text-[11px] truncate ${muted}`}>{m.target}</div>
                       </div>
-                      <div className="text-right shrink-0 pl-3">
-                        <div className={`font-semibold ${statusColor(m.status)}`}>{m.status}</div>
-                        <div className={`text-[11px] ${muted}`}>
-                          {m.lastCheck ? `${fmtMs(m.responseTimeMs)} · ${fmtTime(m.lastCheck)}` : 'Not checked yet'}
+                      <div className="text-right shrink-0 pl-3 flex items-center gap-2">
+                        <div>
+                          <div className={`font-semibold ${statusColor(m.status)}`}>{m.status}</div>
+                          <div className={`text-[11px] ${muted}`}>
+                            {m.lastCheck ? `${fmtMs(m.responseTimeMs)} · ${fmtTime(m.lastCheck)}` : 'Not checked yet'}
+                          </div>
                         </div>
+                        <MonitorActions
+                          isDark={isDark}
+                          canEdit={canEditMonitor}
+                          canDelete={canDeleteMonitor}
+                          confirming={confirmDeleteMonitor === m.id}
+                          deleting={deletingMonitor === m.id}
+                          onEdit={() => setEditingMonitor(m)}
+                          onAskDelete={() => setConfirmDeleteMonitor(m.id)}
+                          onCancelDelete={() => setConfirmDeleteMonitor(null)}
+                          onDelete={async () => {
+                            setDeletingMonitor(m.id);
+                            if (await deleteMonitor(m.id)) setConfirmDeleteMonitor(null);
+                            setDeletingMonitor(null);
+                          }}
+                        />
                       </div>
                     </div>
                   ))}
@@ -393,7 +488,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
               <p className={`text-[11px] font-sans ${muted}`}>
                 Each monitor attached to this application represents a dependency the system actually checks (endpoints, databases, workers, backups).
               </p>
-              {appMonitors.length === 0 ? (
+              {appMonitors.length === 0 && registerLinks(application.dependencies).length === 0 ? (
                 <div className={emptyText}>No monitored dependencies. Add monitors for databases, workers and endpoints.</div>
               ) : (
                 <div className="space-y-2">
@@ -406,10 +501,36 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                         </div>
                         <div className={`text-[11px] truncate ${muted}`}>{m.target}</div>
                       </div>
-                      <div className="text-right shrink-0 pl-3">
-                        <span className={`font-semibold ${statusColor(m.status)}`}>{m.status}</span>
-                        <div className={`text-[10px] ${muted}`}>{m.lastCheck ? fmtMs(m.responseTimeMs) : '—'}</div>
+                      <div className="text-right shrink-0 pl-3 flex items-center gap-2">
+                        <div>
+                          <span className={`font-semibold ${statusColor(m.status)}`}>{m.status}</span>
+                          <div className={`text-[10px] ${muted}`}>{m.lastCheck ? fmtMs(m.responseTimeMs) : '—'}</div>
+                        </div>
+                        <MonitorActions
+                          isDark={isDark}
+                          canEdit={canEditMonitor}
+                          canDelete={canDeleteMonitor}
+                          confirming={confirmDeleteMonitor === m.id}
+                          deleting={deletingMonitor === m.id}
+                          onEdit={() => setEditingMonitor(m)}
+                          onAskDelete={() => setConfirmDeleteMonitor(m.id)}
+                          onCancelDelete={() => setConfirmDeleteMonitor(null)}
+                          onDelete={async () => {
+                            setDeletingMonitor(m.id);
+                            if (await deleteMonitor(m.id)) setConfirmDeleteMonitor(null);
+                            setDeletingMonitor(null);
+                          }}
+                        />
                       </div>
+                    </div>
+                  ))}
+                  {registerLinks(application.dependencies).map(d => (
+                    <div key={d.id} className={`p-3 rounded border flex items-center justify-between ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                      <div className="min-w-0">
+                        <div className={`font-semibold font-sans truncate ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{d.name}</div>
+                        <div className={`text-[11px] ${muted}`}>Register link with a real check</div>
+                      </div>
+                      <span className={`font-semibold shrink-0 pl-3 ${statusColor(d.status)}`}>{d.status}</span>
                     </div>
                   ))}
                 </div>
@@ -458,8 +579,10 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                 </div>
 
                 <div className={`pt-2 border-t space-y-2 ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
-                  {application.loadBalancer ? (
+                  {effectiveRoutingMethod(application) === 'cloudflare_lb' && application.loadBalancer ? (
                     <LbFailoverConsole app={application} />
+                  ) : effectiveRoutingMethod(application) === 'cloudflare_worker' || effectiveRoutingMethod(application) === 'cloudflare_worker_failover' || effectiveRoutingMethod(application) === 'custom' ? (
+                    <div className={`text-[11px] font-sans ${muted}`}>{ROUTING_METHOD_LABELS[effectiveRoutingMethod(application)]}. Scholario Ops does not change Worker routes, origins, or custom routing. Automatic failover stays off.</div>
                   ) : !canFailover ? (
                     <div className={`text-[11px] font-sans ${muted}`}>Only super administrators can switch traffic between PRD and DR.</div>
                   ) : failoverBlockers.length > 0 ? (
@@ -638,24 +761,83 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
           </button>
         </div>
       </div>
+      {editingApp && (
+        <div className="fixed inset-0 z-[60] overflow-y-auto bg-black/60 p-4" onMouseDown={() => setEditingApp(false)}>
+          <div className="max-w-5xl mx-auto" onMouseDown={e => e.stopPropagation()}>
+            <AppEditor initial={application} onDone={() => setEditingApp(false)} />
+          </div>
+        </div>
+      )}
+      {editingMonitor && <MonitorFormModal key={editingMonitor.id} existing={editingMonitor} onClose={() => setEditingMonitor(null)} />}
+    </div>
+  );
+};
+
+const MonitorActions: React.FC<{
+  isDark: boolean;
+  canEdit: boolean;
+  canDelete: boolean;
+  confirming: boolean;
+  deleting: boolean;
+  onEdit: () => void;
+  onAskDelete: () => void;
+  onCancelDelete: () => void;
+  onDelete: () => void;
+}> = ({ isDark, canEdit, canDelete, confirming, deleting, onEdit, onAskDelete, onCancelDelete, onDelete }) => {
+  if (!canEdit && !canDelete) return null;
+  const quiet = `p-1 rounded border cursor-pointer ${isDark ? 'border-[#23334E] text-slate-300 hover:bg-[#1D2B44]' : 'border-slate-300 text-slate-600 hover:bg-slate-100'}`;
+  return (
+    <div className="flex items-center gap-1">
+      {canEdit && (
+        <button type="button" onClick={onEdit} className={quiet} title="Edit" aria-label="Edit">
+          <Pencil className="w-3.5 h-3.5" />
+        </button>
+      )}
+      {canDelete && (confirming ? (
+        <>
+          <button type="button" disabled={deleting} onClick={onDelete} className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-600 text-white cursor-pointer disabled:opacity-60">
+            {deleting ? '…' : 'Delete'}
+          </button>
+          <button type="button" disabled={deleting} onClick={onCancelDelete} className="px-1.5 py-0.5 rounded text-[10px] bg-slate-600 text-white cursor-pointer">No</button>
+        </>
+      ) : (
+        <button type="button" onClick={onAskDelete} className={`${quiet} hover:text-rose-500`} title="Delete" aria-label="Delete">
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      ))}
     </div>
   );
 };
 
 export const ApplicationsView: React.FC = () => {
-  const { applications, servers, monitors, setSelectedAppId, selectedAppId, theme, isLoading } = useOps();
+  const { applications, servers, monitors, cloudflareZones, loadBalancer, setSelectedAppId, selectedAppId, deleteApplication, theme, isLoading } = useOps();
+  const { canDo } = useAuth();
   const navigate = useNavigate();
   const isDark = theme === 'dark';
-  const [filter, setFilter] = useState<'ALL' | 'TIER_1' | 'TIER_2' | 'HEALTHY' | 'DEGRADED'>('ALL');
+  const canEditApp = canDo('update_application');
+  const canDeleteApp = canDo('delete_application');
+  const [editingApp, setEditingApp] = useState<Application | null>(null);
+  const [confirmDeleteApp, setConfirmDeleteApp] = useState<string | null>(null);
+  const [filter, setFilter] = useState<'ALL' | 'TIER_1' | 'TIER_2' | 'TIER_3' | 'HEALTHY' | 'DEGRADED' | 'NO_DR'>('ALL');
+  const [search, setSearch] = useState('');
 
   const selectedApp = applications.find(a => a.id === selectedAppId);
 
   const filteredApps = applications.filter(a => {
     if (filter === 'TIER_1') return a.tier === 'TIER_1';
     if (filter === 'TIER_2') return a.tier === 'TIER_2';
+    if (filter === 'TIER_3') return a.tier === 'TIER_3';
     if (filter === 'HEALTHY') return a.status === 'HEALTHY';
     if (filter === 'DEGRADED') return a.status !== 'HEALTHY';
+    if (filter === 'NO_DR') return !a.drServerId;
     return true;
+  }).filter(a => {
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    const prd = servers.find(s => s.id === a.prdServerId);
+    const dr = servers.find(s => s.id === a.drServerId);
+    return [a.name, a.codeName, a.prdUrl, a.drUrl, a.dnsRecordName, prd?.hostname, prd?.ip, dr?.hostname, dr?.ip]
+      .some(v => (v ?? '').toLowerCase().includes(q));
   });
 
   return (
@@ -668,7 +850,7 @@ export const ApplicationsView: React.FC = () => {
       )}
 
       {/* Header */}
-      <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b ${
+      <div className={`flex flex-wrap items-center justify-between gap-3 pb-3 border-b ${
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
       }`}>
         <div>
@@ -680,23 +862,33 @@ export const ApplicationsView: React.FC = () => {
           </p>
         </div>
 
-        {/* Filters */}
-        <div className={`flex items-center gap-1 p-0.5 rounded border text-xs font-mono ${
-          isDark ? 'bg-[#0B0F17] border-[#1E293B]' : 'bg-slate-100 border-slate-300'
-        }`}>
-          {(['ALL', 'TIER_1', 'TIER_2', 'HEALTHY', 'DEGRADED'] as const).map(f => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`px-2.5 py-1 transition-colors rounded cursor-pointer ${
-                filter === f
-                  ? 'bg-blue-600 text-white font-medium shadow-xs'
-                  : isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              {f.replace('_', ' ')}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search name, code, URL, server…"
+            aria-label="Search applications"
+            className={`px-2.5 py-1.5 rounded border text-xs font-mono outline-none focus:ring-1 focus:ring-blue-500 min-w-[14rem] ${
+              isDark ? 'bg-[#0B0F17] border-[#1E293B] text-slate-100 placeholder:text-slate-600' : 'bg-white border-slate-300 text-slate-900'
+            }`}
+          />
+          <div className={`flex items-center gap-1 p-0.5 rounded border text-xs font-mono ${
+            isDark ? 'bg-[#0B0F17] border-[#1E293B]' : 'bg-slate-100 border-slate-300'
+          }`}>
+            {(['ALL', 'TIER_1', 'TIER_2', 'TIER_3', 'HEALTHY', 'DEGRADED', 'NO_DR'] as const).map(f => (
+              <button
+                key={f}
+                onClick={() => setFilter(f)}
+                className={`px-2.5 py-1 whitespace-nowrap transition-colors rounded cursor-pointer ${
+                  filter === f
+                    ? 'bg-blue-600 text-white font-medium shadow-xs'
+                    : isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {f === 'NO_DR' ? 'PRD only' : f.replace('_', ' ')}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -714,13 +906,13 @@ export const ApplicationsView: React.FC = () => {
       ) : filteredApps.length === 0 ? (
         <EmptyState title="No applications match this filter" />
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] gap-3">
           {filteredApps.map(app => {
             const prdServer = servers.find(s => s.id === app.prdServerId);
-            const appMonitorCount = monitors.filter(m => m.applicationId === app.id).length;
             const isHealthy = app.status === 'HEALTHY';
             const isBad = app.status === 'CRITICAL' || app.status === 'WARNING';
-            const isDr = app.failoverState === 'DR_ACTIVE';
+            const cause = statusCause(app.status, app.dependencies);
+            const route = routeState(app, loadBalancer, dnsPointsAt(app, servers, cloudflareZones));
             const lag = app.currentReplicationLagSec;
 
             return (
@@ -733,21 +925,21 @@ export const ApplicationsView: React.FC = () => {
                     : (isDark ? 'bg-[#111726] border-[#1E293B] hover:border-blue-500' : 'bg-white border-slate-200 hover:border-blue-400 shadow-xs')
                 }`}
               >
-                <div>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDot(app.status)}`} />
-                      <h3 className="font-bold text-sm truncate">{app.name}</h3>
+                <div className="min-w-0">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-start gap-2 min-w-0">
+                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${statusDot(app.status)}`} />
+                      <h3 title={app.name} className="font-bold text-sm line-clamp-2 break-words min-w-0">{app.name}</h3>
                     </div>
-                    <span className={`font-mono text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                    <span className={`font-mono text-[10px] whitespace-nowrap shrink-0 mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                       {app.tier.replace('_', ' ')}
                     </span>
                   </div>
-                  <p className={`text-[11px] mt-1 line-clamp-2 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                  <p className={`text-[11px] mt-1 line-clamp-2 break-words ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                     {app.description || app.dnsRecordName || app.codeName}
                   </p>
-                  {!isHealthy && !isBad && (
-                    <p className={`text-[10px] font-mono mt-1 ${statusColor(app.status)}`}>{app.status}{appMonitorCount === 0 ? ' · no monitors' : ''}</p>
+                  {!isHealthy && (
+                    <p className={`text-[10px] font-mono mt-1 line-clamp-2 break-words ${statusColor(app.status)}`}>{app.status}{cause ? ` · ${cause}` : ''}</p>
                   )}
                 </div>
 
@@ -767,8 +959,8 @@ export const ApplicationsView: React.FC = () => {
                   </div>
                   <div className={`flex justify-between items-center ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                     <span className="text-[10px] uppercase">Routing Target</span>
-                    <span className={app.failoverState === 'FAILING_OVER' ? 'text-amber-500 font-bold' : isDr ? 'text-rose-500 font-bold' : 'text-emerald-500 font-semibold'}>
-                      {app.failoverState === 'FAILING_OVER' ? 'Switching…' : isDr ? 'DR' : 'Primary'}
+                    <span className={route === 'DR' ? 'text-rose-500 font-bold' : route === 'PRD' ? 'text-emerald-500 font-semibold' : route === 'MOVING' || route === 'SPLIT' ? 'text-amber-500 font-bold' : (isDark ? 'text-slate-400' : 'text-slate-500')}>
+                      {servingLabel(route)}
                     </span>
                   </div>
                   <div className={`flex justify-between items-center ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
@@ -778,18 +970,51 @@ export const ApplicationsView: React.FC = () => {
                 </div>
 
                 {/* Footer */}
-                <div className={`pt-2 border-t flex items-center justify-between text-[11px] font-mono ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
-                  <span className={`truncate max-w-[140px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                <div className={`pt-2 border-t flex items-center justify-between gap-2 text-[11px] font-mono ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
+                  <span title={prdServer?.hostname} className={`truncate min-w-0 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                     {prdServer ? prdServer.hostname.split('.')[0] : 'No PRD server'}
                   </span>
-                  <span className="text-blue-500 font-semibold flex items-center gap-1">
-                    <span>Inspect</span>
-                    <ArrowRight className="w-3 h-3" />
+                  <span className="flex items-center gap-1 shrink-0">
+                    {canEditApp && (
+                      <button type="button" onClick={e => { e.stopPropagation(); setEditingApp(app); }} className="px-1.5 py-0.5 rounded text-blue-500 hover:bg-blue-500/10 cursor-pointer inline-flex items-center gap-1" title={`Edit ${app.name}`}>
+                        <Pencil className="w-3 h-3" /> Edit
+                      </button>
+                    )}
+                    {canDeleteApp && (confirmDeleteApp === app.id ? (
+                      <button
+                        type="button"
+                        onClick={async e => {
+                          e.stopPropagation();
+                          if (await deleteApplication(app.id)) {
+                            setConfirmDeleteApp(null);
+                            if (selectedAppId === app.id) setSelectedAppId(null);
+                          }
+                        }}
+                        className="px-1.5 py-0.5 rounded bg-rose-600 text-white cursor-pointer"
+                      >
+                        Delete
+                      </button>
+                    ) : (
+                      <button type="button" onClick={e => { e.stopPropagation(); setConfirmDeleteApp(app.id); }} className="px-1.5 py-0.5 rounded text-rose-500 hover:bg-rose-500/10 cursor-pointer inline-flex items-center gap-1" title={`Delete ${app.name}`}>
+                        <Trash2 className="w-3 h-3" /> Delete
+                      </button>
+                    ))}
+                    <span className="text-blue-500 font-semibold flex items-center gap-1">
+                      <span>Inspect</span>
+                      <ArrowRight className="w-3 h-3" />
+                    </span>
                   </span>
                 </div>
               </div>
             );
           })}
+        </div>
+      )}
+      {editingApp && (
+        <div className="fixed inset-0 z-[60] overflow-y-auto bg-black/60 p-4" onMouseDown={() => setEditingApp(null)}>
+          <div className="max-w-5xl mx-auto" onMouseDown={e => e.stopPropagation()}>
+            <AppEditor key={editingApp.id} initial={editingApp} onDone={() => setEditingApp(null)} />
+          </div>
         </div>
       )}
     </div>

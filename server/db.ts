@@ -8,7 +8,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
 import { config } from './config.ts';
-import { log } from './logger.ts';
+import { log, scrub } from './logger.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -59,6 +59,17 @@ function migrationsDir(): string {
   return found;
 }
 
+/** A migration file failed inside its transaction. The transaction was rolled back, so this file's statements and its schema_migrations row are not kept. Retrying cannot succeed until the data or the file changes. */
+export class MigrationError extends Error {
+  readonly file: string;
+  constructor(file: string, cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`Migration ${file} failed and was rolled back. Data already in the database was not changed. ${scrub(detail)}`);
+    this.name = 'MigrationError';
+    this.file = file;
+  }
+}
+
 /** Applies server/migrations/*.sql in order, once each, inside transactions. */
 export async function migrate(): Promise<string[]> {
   await query(`CREATE SCHEMA IF NOT EXISTS ${SCHEMA}`);
@@ -70,10 +81,15 @@ export async function migrate(): Promise<string[]> {
   for (const file of files) {
     if (applied.has(file)) continue;
     const sql = fs.readFileSync(path.join(dir, file), 'utf8').replaceAll('{{schema}}', SCHEMA);
-    await withTransaction(async c => {
-      await c.query(sql);
-      await c.query(`INSERT INTO ${T('schema_migrations')} (name) VALUES ($1)`, [file]);
-    });
+    try {
+      await withTransaction(async c => {
+        await c.query(sql);
+        await c.query(`INSERT INTO ${T('schema_migrations')} (name) VALUES ($1)`, [file]);
+      });
+    } catch (err) {
+      if (err instanceof MigrationError) throw err;
+      throw new MigrationError(file, err);
+    }
     ran.push(file);
   }
   return ran;

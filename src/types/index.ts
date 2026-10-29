@@ -93,6 +93,12 @@ export interface Application {
   healthCheck?: AppHealthCheck;
   /** Per-environment inventory; unset fields are unknown / pending confirmation */
   environments?: Partial<Record<Environment, EnvironmentInventory>>;
+  /**
+   * How public traffic reaches this application. Independent per application.
+   * Absent on older rows: a saved Load Balancer mapping means Cloudflare Load Balancer;
+   * anything else means the method is not configured.
+   */
+  trafficRouting?: TrafficRoutingConfig;
 }
 
 /** Facts about one environment of an application. null = not confirmed (shown as UNKNOWN / PENDING). */
@@ -124,6 +130,8 @@ export interface DatabaseReport {
   connections: number | null;
   maxConnections: number | null;
   longRunningQueries: number | null;
+  /** connections / maxConnections % (computed by the server; null when either is unknown) */
+  connectionUsagePercent?: number | null;
   replication: {
     role: 'primary' | 'replica' | 'none' | 'unknown';
     state: 'running' | 'stopped' | 'error' | 'unknown';
@@ -133,9 +141,81 @@ export interface DatabaseReport {
   } | null;
   error: string | null;
   observedAt: string;
+  /** Last probe with available = true, and consecutive unavailable probes (computed by the server) */
+  lastSuccessAt?: string | null;
+  consecutiveFailures?: number;
 }
+/** Database probe reported by the telemetry agent */
+export type DatabaseTelemetry = DatabaseReport;
 
 export type ProviderStatus = 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE' | 'UNKNOWN';
+
+/** Providers with an adapter. Further providers are added only after their API is checked. */
+export type ProviderKind = 'hostinger';
+
+export type ProviderSyncStatus = 'NOT_CONFIGURED' | 'OK' | 'AUTH_FAILED' | 'RATE_LIMITED' | 'ERROR' | 'PENDING';
+
+/** What the inventory shows. Derived from the token's presence and the last sync; never a secret. */
+export type ProviderDisplayStatus = 'NOT_CONFIGURED' | 'CONNECTED' | 'AUTH_FAILED' | 'SYNC_FAILED' | 'NOT_SYNCED' | 'DISABLED';
+
+/** Stored connection. The API token lives in the named environment variable, not in this record. */
+export interface ProviderConnectionRecord {
+  id: string;
+  name: string;
+  provider: ProviderKind;
+  tokenEnv: string;
+  syncEnabled: boolean;
+  legacy: boolean;
+  status: ProviderSyncStatus;
+  lastSyncAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Connection as returned to the browser. tokenConfigured reports presence only. */
+export interface ProviderConnectionView {
+  id: string;
+  name: string;
+  provider: ProviderKind;
+  tokenEnv: string;
+  tokenConfigured: boolean;
+  syncEnabled: boolean;
+  legacy: boolean;
+  status: ProviderSyncStatus;
+  displayStatus: ProviderDisplayStatus;
+  lastSyncAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  vmCount: number;
+}
+
+/** One VPS from one connection. Identity is connection + provider VM id, not IP or hostname. */
+export interface ProviderInstanceRecord {
+  id: string;
+  connectionId: string;
+  providerVmId: string;
+  hostname: string | null;
+  ipv4: string[];
+  ipv6: string[];
+  os: string | null;
+  region: string | null;
+  plan: string | null;
+  cpu: number | null;
+  ramGb: number | null;
+  diskGb: number | null;
+  powerState: string | null;
+  status: ProviderStatus;
+  fetchedAt: string | null;
+  lastSeenAt: string | null;
+  absent: boolean;
+}
+
+export interface ProviderInstanceView extends ProviderInstanceRecord {
+  provider: ProviderKind;
+  connectionName: string;
+}
 
 /** Normalised VPS facts from the Hostinger API (only fields the API returns) */
 export interface HostingerInfo {
@@ -186,6 +266,107 @@ export interface AppLoadBalancerMapping {
   drPoolId: string;
 }
 
+export type TrafficRoutingMethod =
+  | 'direct_dns'
+  | 'cloudflare_lb'
+  | 'cloudflare_worker'
+  | 'cloudflare_worker_failover'
+  | 'custom'
+  | 'unknown';
+
+export type DimensionStatus = 'HEALTHY' | 'WARNING' | 'CRITICAL' | 'UNKNOWN' | 'NOT_CONFIGURED' | 'NOT_CONNECTED';
+
+export interface HealthDimension {
+  status: DimensionStatus;
+  /** Why this state was chosen. Missing data stays here instead of being called healthy. */
+  detail: string;
+  observedAt: string | null;
+  source: string;
+}
+
+export interface DirectRoutingConfig {
+  prdHostname: string;
+  drHostname: string;
+  prdUrl: string;
+  drUrl: string;
+  dnsRecordName: string;
+  currentTarget: string;
+  manualFailoverStatus: 'UNKNOWN' | 'PRIMARY' | 'DR';
+  /** Operator-recorded verification time. Live DNS sync is a separate timestamp. */
+  lastVerifiedAt: string | null;
+}
+
+export interface WorkerRoutingConfig {
+  name: string;
+  route: string;
+  accountId: string;
+  environment: string;
+  prdOriginHostname: string;
+  drOriginHostname: string;
+  failoverStrategy: string;
+  healthCheckSource: string;
+  /** What the operator says the Worker does. Scholario Ops does not perform failback. */
+  failback: 'automatic' | 'manual' | 'unknown';
+}
+
+export interface CustomRoutingConfig {
+  description: string;
+  endpoint: string;
+  notes: string;
+}
+
+/** All method blobs are kept when the selected method changes. */
+export interface TrafficRoutingConfig {
+  method: TrafficRoutingMethod;
+  direct: DirectRoutingConfig;
+  worker: WorkerRoutingConfig;
+  custom: CustomRoutingConfig;
+}
+
+export type WorkerEventKind = 'origin_selected' | 'failover' | 'failback' | 'origin_error' | 'health';
+
+/** A fact posted by an instrumented Worker. Never invented by the dashboard. */
+export interface WorkerRoutingEvent {
+  id: string;
+  applicationId: string;
+  kind: WorkerEventKind;
+  origin: string | null;
+  prdHealth: 'healthy' | 'unhealthy' | 'unknown' | null;
+  drHealth: 'healthy' | 'unhealthy' | 'unknown' | null;
+  detail: string;
+  observedAt: string;
+  receivedAt: string;
+  source: 'worker_event';
+  /** Counts posted by the Worker. Null when that event did not include them. */
+  requests: number | null;
+  errors: number | null;
+}
+
+export interface WorkerAppSnapshot {
+  applicationId: string;
+  connection: 'configured' | 'verified' | 'unavailable' | 'unknown' | 'not_connected';
+  detail: string;
+  observedAt: string | null;
+  scriptFound: boolean | null;
+  lastDeployedAt: string | null;
+  /** Counts from the latest Worker event that included them. Null means not reported. */
+  requests: number | null;
+  errors: number | null;
+  analytics: 'NOT_CONNECTED' | 'EVENTS';
+}
+
+export interface WorkerMonitorState {
+  status: 'NOT_CONNECTED' | 'NOT_CONFIGURED' | 'OK' | 'PERMISSION_REQUIRED' | 'ERROR' | 'PENDING';
+  detail: string;
+  lastSyncAt: string | null;
+  lastSuccessAt: string | null;
+  eventsConnected: boolean;
+  permissionHint: string;
+  apps: WorkerAppSnapshot[];
+  /** Posted Worker events. Empty when ingest is disconnected or nothing has arrived. */
+  events: WorkerRoutingEvent[];
+}
+
 export interface VpsTelemetry {
   cpuPercent: number;
   ramPercent: number;
@@ -203,7 +384,197 @@ export interface VpsTelemetry {
   diskUsedGb?: number | null;
   diskFreeGb?: number | null;
   uptimeSec?: number | null;
+  /** Agent >= 3.3 (null = not available on this platform / older agent; never a made-up 0) */
+  cpuIowaitPercent?: number | null;
+  cpuStealPercent?: number | null;
+  /** 1-minute load / CPU cores (computed by the server) */
+  loadPerCore?: number | null;
+  swapTotalMb?: number | null;
+  swapUsedMb?: number | null;
+  swapFreeMb?: number | null;
+  /** null when no swap is configured */
+  swapPercent?: number | null;
+  pressure?: PressureTelemetry | null;
+  /** Disk I/O summed over physical disks (utilisation = busiest disk) */
+  diskReadBytesPerSec?: number | null;
+  diskWriteBytesPerSec?: number | null;
+  diskReadOpsPerSec?: number | null;
+  diskWriteOpsPerSec?: number | null;
+  diskUtilPercent?: number | null;
 }
+/** Current host telemetry of a server (alias used by the telemetry UI) */
+export type ServerTelemetry = VpsTelemetry;
+
+/** Pressure stall information: % of time some tasks waited for the resource (avg over 60 s). null = kernel without PSI */
+export interface PressureTelemetry { cpu: number | null; memory: number | null; io: number | null }
+
+export interface FilesystemTelemetry {
+  mountPoint: string;
+  filesystem: string;
+  device: string;
+  totalGb: number | null;
+  usedGb: number | null;
+  freeGb: number | null;
+  usedPercent: number | null;
+  /** null for filesystems without a fixed inode table (btrfs, vfat) */
+  inodeTotal: number | null;
+  inodeUsed: number | null;
+  inodeFree: number | null;
+  inodePercent: number | null;
+}
+
+export interface NetworkInterfaceTelemetry {
+  name: string;
+  rxBytesPerSec: number | null;
+  txBytesPerSec: number | null;
+  rxPacketsPerSec: number | null;
+  txPacketsPerSec: number | null;
+  /** Cumulative counters since boot */
+  rxErrors: number | null;
+  txErrors: number | null;
+  rxDrops: number | null;
+  txDrops: number | null;
+  /** Errors + drops since the previous report (computed by the server; null on the first report) */
+  newErrors: number | null;
+  newDrops: number | null;
+  operationalState: string | null;
+  /** true for bridges / veth / tunnels (no physical device) */
+  virtual: boolean | null;
+}
+
+export interface DiskIOTelemetry {
+  device: string;
+  readBytesPerSec: number | null;
+  writeBytesPerSec: number | null;
+  readOpsPerSec: number | null;
+  writeOpsPerSec: number | null;
+  ioUtilizationPercent: number | null;
+  readLatencyMs: number | null;
+  writeLatencyMs: number | null;
+}
+
+export type Pm2Status = 'online' | 'stopping' | 'stopped' | 'launching' | 'errored' | 'one-launch-status' | 'waiting restart' | 'unknown';
+
+/** One PM2 application. Built from allow-listed `pm2 jlist` fields only — environments are never collected. */
+export interface PM2ProcessTelemetry {
+  id: number | null;
+  name: string;
+  status: Pm2Status;
+  pid: number | null;
+  cpuPercent: number | null;
+  memoryMb: number | null;
+  uptimeSec: number | null;
+  startedAt: string | null;
+  restartCount: number | null;
+  unstableRestarts: number | null;
+  /** Restarts within THRESHOLDS.pm2Restarts.restartWindowMinutes (computed by the server; null until known) */
+  recentRestarts: number | null;
+  nodeVersion: string | null;
+  interpreter: string | null;
+  execMode: string | null;
+  instances: number | null;
+  /** package.json version reported by PM2 */
+  version: string | null;
+  /** Release directory (deploy/release.sh layout), e.g. 20261008-101500-abc1234 */
+  release: string | null;
+  gitRevision: string | null;
+  /** System user that owns the PM2 daemon */
+  owner: string | null;
+  /** TCP ports this process listens on */
+  ports: number[];
+}
+
+/** Local application health check run by the agent against 127.0.0.1:<port><path> */
+export interface ApplicationHealthTelemetry {
+  applicationId: string;
+  name: string;
+  environment: Environment | null;
+  port: number;
+  path: string;
+  listening: boolean | null;
+  status: 'HEALTHY' | 'DOWN' | 'UNKNOWN';
+  statusCode: number | null;
+  latencyMs: number | null;
+  error: string | null;
+  checkedAt: string;
+  /** Consecutive DOWN results (computed by the server) */
+  consecutiveFailures: number;
+  /** Last HEALTHY result (kept across failures; null = never healthy since Scholario Ops started tracking) */
+  lastSuccessAt?: string | null;
+}
+
+export interface ListeningPortTelemetry {
+  address: string;
+  port: number;
+  process: string | null;
+  pids: number[];
+  /** loopback = 127.0.0.1 / ::1 only · all = every interface (0.0.0.0 / ::) · address = one specific address */
+  scope: 'loopback' | 'all' | 'address';
+}
+
+export interface NtpTelemetry {
+  /** timedatectl NTPSynchronized (null = unknown) */
+  synchronized: boolean | null;
+  ntpEnabled: boolean | null;
+  /** Active time service (chronyd, systemd-timesyncd, ntpd …) */
+  service: string | null;
+  /** Offset from NTP time as reported by the time service (ms) */
+  clockOffsetMs: number | null;
+  /** Clock frequency error (ppm, chrony only) */
+  clockDriftPpm: number | null;
+  observedAt: string;
+}
+
+export interface SystemInfoTelemetry {
+  kernelVersion: string | null;
+  architecture: string | null;
+  bootTime: string | null;
+  timezone: string | null;
+  osName: string | null;
+  osVersion: string | null;
+  nodeVersion: string | null;
+  npmVersion: string | null;
+}
+
+export interface FailedUnitsTelemetry { count: number; units: string[]; observedAt: string }
+
+/** Delivery timing of the last report (agent >= 3.3) */
+export interface AgentTimingTelemetry {
+  sentAt: string | null;
+  /** Half the round trip of the previous report (ms) */
+  transportDelayMs: number | null;
+  /** Server clock − agent clock, corrected for the transport delay (ms; + = agent clock behind) */
+  clockSkewMs: number | null;
+}
+
+export interface AgentHealthTelemetry {
+  /** ONLINE = reporting now; STALE = missed reports; OFFLINE = stopped reporting; NOT_CONNECTED = never reported */
+  state: 'ONLINE' | 'STALE' | 'OFFLINE' | 'NOT_CONNECTED';
+  version: string | null;
+  /** Current agent version (server/agent.ts AGENT_VERSION) */
+  expectedVersion: string;
+  /** null when the agent never reported a version */
+  outdated: boolean | null;
+  startedAt: string | null;
+  restartCount: number;
+  lastSeen: string | null;
+  observedAt: string | null;
+  receivedAt: string | null;
+  sentAt: string | null;
+  transportDelayMs: number | null;
+  clockSkewMs: number | null;
+  sourceIp: string | null;
+  errors: string[];
+}
+
+export type TelemetryLevel = 'HEALTHY' | 'WARNING' | 'CRITICAL' | 'UNKNOWN';
+export type HealthCategoryKey = 'agent' | 'time' | 'cpu' | 'memory' | 'swap' | 'disk' | 'diskio' | 'network' | 'systemd' | 'pm2' | 'apps' | 'database';
+
+/** One line of a server's health summary (computed by the server from the latest telemetry) */
+export interface HealthCategory { key: HealthCategoryKey; label: string; level: TelemetryLevel; detail: string }
+
+/** A condition that needs attention. `alert` = also raised as an incident (sustained / significant only). */
+export interface ServerWarning { key: string; category: HealthCategoryKey; level: 'WARNING' | 'CRITICAL'; message: string; alert: boolean }
 
 export interface VpsProcess {
   pid: number;
@@ -222,7 +593,14 @@ export interface VpsService {
   memoryMb: number;
   cpuPercent: number;
   lastRestart: string;
+  /** Agent >= 3.3: raw systemd states and restart counter (NRestarts) */
+  activeState?: string | null;
+  subState?: string | null;
+  failed?: boolean;
+  restartCount?: number | null;
+  result?: string | null;
 }
+export type SystemdServiceTelemetry = VpsService;
 
 export interface VpsLogEntry {
   id: string;
@@ -251,6 +629,8 @@ export interface VpsServer {
   uptimeDays: number;
   /** Last agent report time; empty string when the agent has never reported */
   lastSeen: string;
+  /** Set when a report from this server was refused. Cleared on the next accepted report. */
+  lastIngestError?: { at: string; reason: string } | null;
   notes?: string;
   /** Purchased plan capacity (from configuration or the Hostinger API), separate from agent-measured values */
   planSpec?: { name: string; cpuCores: number; ramGb: number; diskGb: number; source: 'manual' | 'config' | 'hostinger' };
@@ -270,6 +650,29 @@ export interface VpsServer {
   processes: VpsProcess[];
   services: VpsService[];
   logs: VpsLogEntry[];
+  // ── Agent >= 3.3 (undefined = never reported by this server's agent) ──
+  filesystems?: FilesystemTelemetry[];
+  networkInterfaces?: NetworkInterfaceTelemetry[];
+  diskIo?: DiskIOTelemetry[];
+  /** null = PM2 is not running on this server */
+  pm2?: PM2ProcessTelemetry[] | null;
+  pm2ObservedAt?: string;
+  appHealth?: ApplicationHealthTelemetry[];
+  listeningPorts?: ListeningPortTelemetry[] | null;
+  ntp?: NtpTelemetry | null;
+  system?: SystemInfoTelemetry | null;
+  failedUnits?: FailedUnitsTelemetry | null;
+  agentTiming?: AgentTimingTelemetry;
+  /** Seconds between the last two accepted agent reports (the real heartbeat interval) */
+  reportIntervalSec?: number | null;
+  /** When the watched systemd services were last reported */
+  servicesObservedAt?: string;
+  // ── Computed by the server for every response (not stored) ──
+  agent?: AgentHealthTelemetry;
+  health?: HealthCategory[];
+  warnings?: ServerWarning[];
+  /** Applications that use this server as PRD or DR (API only; not stored) */
+  usedBy?: Array<{ id: string; name: string; codeName: string }>;
 }
 
 /** Classified result of a single synthetic check */
@@ -321,6 +724,10 @@ export interface Monitor {
   responseTimeMs: number;
   uptimePercent: number;
   history: MonitorCheckHistory[];
+  /** Pass/fail keeps alternating in the recent checks (intermittent failure below the confirmation threshold) */
+  flapping?: boolean;
+  /** Pass↔fail changes in the last 20 checks */
+  flapTransitions?: number;
   runbookId?: string;
   enabled: boolean;
   activeMaintenance: boolean;
@@ -375,6 +782,16 @@ export interface Incident {
   acknowledged: boolean;
   acknowledgedAt?: string;
   acknowledgedBy?: string;
+  /** The first notification is held back by the escalation policy's initial delay (not sent yet) */
+  notificationDeferred?: boolean;
+  /** This alert is waiting in a grouped summary (ISO time it was buffered). Survives a restart. */
+  notifyGroupPending?: string;
+  /** When the incident was first escalated for staying unacknowledged */
+  escalatedAt?: string;
+  /** Multi-step escalation progress */
+  escalation?: IncidentEscalation;
+  /** A notification held back by quiet hours, sent when they end */
+  quietHeld?: { status: 'FIRING' | 'RESOLVED'; since: string; extra?: string };
   affectedServices: string[];
   affectedMonitors: string[];
   dependentFailures: string[];
@@ -529,14 +946,108 @@ export interface CommunicationChannel {
   failureCount: number;
 }
 
+export type NotificationDeliveryKind = 'FIRING' | 'RESOLVED' | 'ESCALATED' | 'INFO' | 'TEST';
+
+/** One notification sent to one channel (GET /api/v1/notifications/deliveries) */
+export interface NotificationDelivery {
+  id: string;
+  t: string;
+  channelId: string;
+  channelName: string;
+  channelType: string;
+  kind: NotificationDeliveryKind;
+  incidentId?: string;
+  severity: string;
+  title: string;
+  result: 'DELIVERED' | 'FAILED';
+  /** Delivery attempts (temporary failures are retried) */
+  attempts: number;
+  durationMs: number;
+  error?: string;
+  /** Set when this row is a manual resend of another delivery */
+  resendOf?: string;
+  /** Read by the signed-in user (delivery log list only) */
+  read?: boolean;
+  message: { title: string; text: string; severity: string; status: NotificationDeliveryKind; incidentId?: string; link?: string };
+}
+
+/** GET /api/v1/notifications/deliveries/:id */
+export interface NotificationDeliveryDetail {
+  delivery: NotificationDelivery & { read: boolean };
+  /** Original + resends on this channel, oldest first */
+  chain: NotificationDelivery[];
+  channel: { id: string; name: string; type: string; enabled: boolean; exists: boolean };
+  incident: { id: string; title: string; severity: IncidentSeverity; status: IncidentStatus; environment: Environment; owner: string; acknowledged: boolean; startedAt: string; resolvedAt: string | null } | null;
+  /** The notification names an incident that no longer exists */
+  incidentMissing: boolean;
+  application: { id: string; name: string } | null;
+  monitor: { id: string; name: string; type: string; environment: Environment; status: OperationalStatus } | null;
+}
+
+/** GET /api/v1/notifications/health */
+export interface NotificationHealth {
+  status: 'HEALTHY' | 'DEGRADED' | 'NOT_CONFIGURED';
+  /** leader = this process sends escalations / reminders; follower = another process does; standalone = no lock in use */
+  worker: 'leader' | 'follower' | 'standalone';
+  enabledChannels: number;
+  pending: { inFlight: number; waitingRetry: number; grouped: number; heldQuietHours: number; heldInitialDelay: number; logWritesPending: number };
+  last24h: {
+    hours: number; total: number; delivered: number; failed: number; retries: number;
+    successRate: number | null; p50Ms: number | null; p95Ms: number | null;
+    channels: Array<{ channelId: string; channelName: string; delivered: number; failed: number; p95Ms: number | null; lastDeliveredAt: string | null; lastFailedAt: string | null; lastError: string | null }>;
+  };
+  failingChannels: Array<{ channelId: string; name: string; type: string; consecutiveFailures: number; lastError: string | null }>;
+  /** 'OK', or why channel secrets cannot be encrypted / decrypted (e.g. the key file is lost) */
+  secretsKey?: string;
+}
+
+export interface NotificationDeliveryStats {
+  hours: number;
+  channels: Record<string, { delivered: number; failed: number; lastError: string | null }>;
+}
+
 export interface EscalationPolicy {
   id: string;
   severity: IncidentSeverity;
   channels: string[];
+  /** Hold the first notification this long; an incident resolved (or acknowledged) within it pages nobody. 0 = immediately */
   initialDelayMin: number;
   repeatIntervalMin: number;
+  /** Still unacknowledged after this long → one [ESCALATED] message to escalationChannels + email to on-call users. 0 = never */
   autoEscalateAfterMin: number;
+  /** Label shown in the escalation message (e.g. "DBA team") */
   escalateToTeam: string;
+  /** Channels for the escalation message; empty = all enabled channels */
+  escalationChannels?: string[];
+  /**
+   * Ordered escalation steps (multi-level). When set, they replace autoEscalateAfterMin /
+   * escalateToTeam / escalationChannels (which still work as a single step for older policies).
+   */
+  steps?: EscalationStep[];
+  /** Hold non-critical notifications in this window (never allowed for CRITICAL / EMERGENCY) */
+  quietHours?: import('../lib/quietHours').QuietHours;
+}
+
+export interface EscalationStep {
+  /** Minutes after the incident opened (strictly increasing between steps) */
+  afterMin: number;
+  /** Channels for this step; empty = all enabled channels */
+  channels: string[];
+  /** Also email every active user marked On-Call */
+  notifyOnCall: boolean;
+  /** Who this step reaches, shown in the message (e.g. "DBA team", "Head of IT") */
+  label: string;
+}
+
+/** Durable escalation progress of one incident (stored with the incident; survives restarts) */
+export interface IncidentEscalation {
+  /** Steps already executed (each step runs once) */
+  stepsDone: number;
+  /** When the next step is due; null = no further step */
+  nextAt: string | null;
+  stoppedAt?: string;
+  stoppedReason?: 'acknowledged' | 'resolved';
+  history: Array<{ step: number; at: string; label: string; channels: number; onCall: number }>;
 }
 
 export interface AuditLog {
@@ -545,22 +1056,123 @@ export interface AuditLog {
   operator: string;
   action: string;
   category: 'INCIDENT' | 'FAILOVER' | 'MAINTENANCE' | 'MONITOR' | 'CLOUDFLARE' | 'INFRASTRUCTURE' | 'RUNBOOK'
-    | 'APPLICATION' | 'AUTH' | 'USER' | 'NOTIFICATION' | 'DEPLOYMENT' | 'BACKUP';
+    | 'APPLICATION' | 'AUTH' | 'USER' | 'NOTIFICATION' | 'DEPLOYMENT' | 'BACKUP' | 'REGISTRY' | 'CAPACITY';
   targetId: string;
   details: string;
+}
+
+/** What can be entered in the dependency register */
+export type RegistryKind = 'APPLICATION' | 'SERVER' | 'DATABASE' | 'STORAGE' | 'THIRD_PARTY_API' | 'PROVIDER' | 'BUSINESS_FEATURE';
+
+export interface RegistryComponent {
+  id: string;
+  kind: RegistryKind;
+  name: string;
+  owner: string;
+  tier: 'TIER_1' | 'TIER_2' | 'TIER_3';
+  description: string;
+  /** APPLICATION: the registered application it describes. BUSINESS_FEATURE: the application that provides it. */
+  applicationId: string | null;
+  /** SERVER only: the registered VPS server it describes */
+  serverId: string | null;
+  /** APPLICATION and BUSINESS_FEATURE only */
+  userCount: number | null;
+  /** Teams or customers served (APPLICATION and BUSINESS_FEATURE only) */
+  served: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** "from depends on to". HARD: from stops working without to. SOFT: from is degraded. */
+export interface DependencyLink {
+  id: string;
+  fromId: string;
+  toId: string;
+  type: 'HARD' | 'SOFT';
+  /** BUSINESS_FEATURE component that needs this dependency, if it is needed by one feature only */
+  featureId: string | null;
+  notes: string;
+  createdAt: string;
+}
+
+export interface RegistryImpact {
+  componentId: string;
+  /** Everything that stops (HARD) or is degraded (SOFT) when the component fails, nearest first */
+  affected: Array<{ id: string; name: string; kind: RegistryKind; tier: RegistryComponent['tier']; via: 'HARD' | 'SOFT'; userCount: number | null; served: string[] }>;
+  /**
+   * Largest single user count among the failed component and what stops. A lower bound on the
+   * people who lose service, not a total: counts overlap (an application and its features count
+   * the same people), so they are never added up. null = no user count recorded for any of them.
+   */
+  largestUserCountStopped: number | null;
+  /** As largestUserCountStopped, over everything affected (stopped or degraded) */
+  largestUserCountAffected: number | null;
+  /** Teams/customers served by the failed component and everything affected */
+  served: string[];
+}
+
+/**
+ * Dead-man heartbeat of the MONITORED infrastructure (server/heartbeat.ts) — PRD / DR servers and the
+ * applications, services and databases on them. Scholario Ops is the monitoring control plane, not a
+ * target. Built only from what the agents push; no external watchdog is involved.
+ * HEALTHY = fresh and passing · DEGRADED = late / slow / first failure · FAILING = down, failed or
+ * disconnected · UNKNOWN = no (fresh) data · NOT_CONFIGURED = no server registered.
+ */
+export type HeartbeatState = 'HEALTHY' | 'DEGRADED' | 'FAILING' | 'UNKNOWN';
+export type DeadManStatus = HeartbeatState | 'NOT_CONFIGURED';
+export type HeartbeatKind = 'SERVER' | 'APPLICATION' | 'SERVICE' | 'DATABASE';
+
+/** One monitored target (a server's telemetry delivery, an application check, a service, a database probe) */
+export interface HeartbeatCheck {
+  kind: HeartbeatKind;
+  /** Stable id within the server, e.g. "server", "app:<appId>:<port>", "service:nginx", "db:mysql:moodle" */
+  key: string;
+  name: string;
+  state: HeartbeatState;
+  detail: string;
+  /** What is checked, e.g. "127.0.0.1:4100/api/health" (never a credential or token) */
+  target: string | null;
+  lastCheckAt: string | null;
+  lastSuccessAt: string | null;
+  latencyMs: number | null;
+  /** Consecutive failures / missed heartbeats (null = not tracked for this target) */
+  failures: number | null;
+  httpStatus: number | null;
+  restartCount: number | null;
+  /** How often this target is observed (seconds; from the agent's actual report rate) */
+  intervalSec: number | null;
+  /** Freshness window: older than this is not live */
+  toleranceSec: number | null;
+}
+
+export interface HeartbeatGroup { state: HeartbeatState; total: number; healthy: number; checks: HeartbeatCheck[] }
+
+export interface ServerHeartbeat {
+  serverId: string;
+  hostname: string;
+  ip: string;
+  environment: Environment;
+  /** Agent version from the last report (null = never reported) */
+  agentVersion: string | null;
+  state: HeartbeatState;
+  server: HeartbeatCheck;
+  applications: HeartbeatGroup;
+  services: HeartbeatGroup;
+  databases: HeartbeatGroup;
 }
 
 export interface DeadManControlPlane {
   id: string;
   name: string;
-  nodeLocation: string;
-  targetControlPlane: string;
-  lastHeartbeatReceivedAt: string;
-  intervalSec: number;
-  toleranceSec: number;
-  status: 'HEALTHY' | 'CRITICAL_SILENCE' | 'NOT_CONFIGURED';
-  consecutiveMisses: number;
-  lastAlertSentAt?: string;
+  status: DeadManStatus;
+  evaluatedAt: string;
+  /** Agent report interval observed across servers (seconds; null until two reports arrived) */
+  telemetryIntervalSec: number | null;
+  /** Server heartbeat freshness: CONNECTED ≤ staleAfterSec, STALE ≤ disconnectedAfterSec, then DISCONNECTED */
+  staleAfterSec: number;
+  disconnectedAfterSec: number;
+  servers: ServerHeartbeat[];
+  counts: { healthy: number; degraded: number; failing: number; unknown: number; total: number };
 }
 
 /** NOT_CONFIGURED = the check cannot run because something is not set up yet (never a pass) */
@@ -577,7 +1189,7 @@ export interface DrReadinessItem {
   group?: 'core' | 'capacity';
 }
 
-export type DrOverall = 'READY' | 'PARTIALLY_READY' | 'NOT_READY' | 'UNKNOWN';
+export type DrOverall = 'READY' | 'DEGRADED' | 'NOT_READY' | 'UNKNOWN';
 
 // ── Cloudflare Load Balancing (read-only) ────────────────────────────────────
 export interface LbOriginHealth {
@@ -616,6 +1228,16 @@ export interface LbPool {
   healthError: string | null;
 }
 
+/** One pool that is currently receiving traffic. */
+export interface LbTrafficShare {
+  poolId: string;
+  /**
+   * Share of traffic, 0–100, when the steering policy fixes one (failover, or random weights).
+   * Null when the pool is receiving traffic but the policy does not publish a fixed share.
+   */
+  percent: number | null;
+}
+
 export interface LbRouting {
   hostname: string;
   found: boolean;
@@ -624,8 +1246,13 @@ export interface LbRouting {
   steeringPolicy: string | null;
   defaultPools: string[];
   fallbackPool: string | null;
-  /** First enabled + healthy pool in default_pools order (null when unknown) */
+  /**
+   * Set only when a single pool receives all traffic.
+   * Null when routing is unknown, or when traffic is split — see `traffic`.
+   */
   activePoolId: string | null;
+  /** Pools currently receiving traffic. Empty when the serving set cannot be determined. */
+  traffic: LbTrafficShare[];
   fetchedAt: string | null;
   error: string | null;
 }
@@ -676,19 +1303,6 @@ export interface TcpProbeResult {
   testedAt: string;
 }
 
-export interface SyntheticTransactionResult {
-  url: string;
-  method: string;
-  reachable: boolean;
-  statusCode: number | null;
-  latencyMs: number;
-  expectedMatch: boolean;
-  matchText?: string;
-  responseSnippet: string;
-  headers?: Record<string, string>;
-  testedAt: string;
-}
-
 export interface HttpProbeResult {
   target: string;
   reachable: boolean;
@@ -709,9 +1323,92 @@ export interface IntegrationStatus {
   hostinger: { configured: boolean; lastSyncAt: string | null; lastError: string | null; vmCount: number; status: 'NOT_CONFIGURED' | 'OK' | 'AUTH_FAILED' | 'RATE_LIMITED' | 'ERROR' | 'PENDING' };
   notifications: { status: 'CONFIGURED' | 'NOT_CONFIGURED'; enabledChannels: number };
   loadBalancing: { configured: boolean; status: LbSyncStatus; lastSyncAt: string | null; lastError: string | null; poolCount: number };
-  smtp: { configured: boolean };
-  deadMan: { configured: boolean };
+  smtp: { configured: boolean; server?: string | null; from?: string | null; problem?: string | null };
   publicUrl: string;
+  /** True when PUBLIC_URL is set. The displayed publicUrl may still be the browser address. */
+  publicUrlConfigured?: boolean;
+}
+
+/** Result of Check SMTP; settings carry names and presence only, never values */
+export interface SmtpCheckResult {
+  ok: boolean;
+  error?: string;
+  server: string;
+  settings?: {
+    envFile: string;
+    envFileFound: boolean;
+    envFileChangedSinceStart: boolean;
+    variables: { name: string; present: boolean; source: 'environment' | '.env' | 'unset' }[];
+  };
+}
+
+// ── Scholario Ops' own database backup (GET /api/v1/ops-backup) ─────────────
+/** backups/last-backup.json written by deploy/backup-db.sh */
+export interface OpsBackupRun {
+  status: 'SUCCESS' | 'FAILED';
+  error: string | null;
+  startedAt: string;
+  completedAt: string;
+  file: string | null;
+  sizeBytes: number | null;
+  sha256: string | null;
+  encryption: 'none' | 'age' | 'gpg';
+  retentionDays: number;
+  /** Rows per table in the dump */
+  tables: Record<string, number>;
+  /** null when BACKUP_REMOTE is not set */
+  offsite: { target: string; ok: boolean; error: string | null } | null;
+}
+
+/** backups/last-restore-test.json written by deploy/verify-backup.sh */
+export interface OpsRestoreTest {
+  status: 'VERIFIED' | 'FAILED';
+  error: string | null;
+  testedAt: string;
+  durationSec: number;
+  file: string | null;
+  tables: Record<string, { expected: number; restored: number }>;
+}
+
+export interface OpsBackupHealth {
+  status: 'NOT_CONFIGURED' | 'HEALTHY' | 'DEGRADED' | 'STALE' | 'FAILED';
+  backup: OpsBackupRun | null;
+  restoreTest: OpsRestoreTest | null;
+  ageHours: number | null;
+  /** Reasons for a non-HEALTHY status (alerted) */
+  problems: string[];
+  /** Recommendations (shown, never alerted) */
+  advisories: string[];
+}
+
+// ── Reliability insights (GET /api/v1/insights) ─────────────────────────────
+export type InsightForecast = import('../lib/insights').Forecast;
+export type InsightErrorBudget = import('../lib/insights').ErrorBudget;
+
+export interface ServerInsight {
+  serverId: string;
+  hostname: string;
+  environment: Environment;
+  agentState: 'ONLINE' | 'STALE' | 'OFFLINE' | 'NOT_CONNECTED';
+  /** null until there are at least 6 h of per-minute rollups */
+  disk: InsightForecast | null;
+  memory: InsightForecast | null;
+}
+
+export interface ApplicationSlo {
+  applicationId: string;
+  name: string;
+  tier: 'TIER_1' | 'TIER_2' | 'TIER_3';
+  /** Enabled PRD monitors whose checks count towards the SLO */
+  monitorCount: number;
+  budget: InsightErrorBudget;
+}
+
+export interface ReliabilityInsights {
+  generatedAt: string;
+  servers: ServerInsight[];
+  applications: ApplicationSlo[];
+  flapping: Array<{ monitorId: string; name: string; applicationId: string; environment: Environment; transitions: number }>;
 }
 
 export interface ServerMetricPoint {
@@ -722,6 +1419,15 @@ export interface ServerMetricPoint {
   load1: number;
   netIn: number;
   netOut: number;
+  /** Agent >= 3.3; null / absent = not reported (charts leave a gap, never a 0) */
+  swap?: number | null;
+  iowait?: number | null;
+  steal?: number | null;
+  /** Disk I/O, bytes per second */
+  diskRead?: number | null;
+  diskWrite?: number | null;
+  /** Busiest disk utilisation % */
+  diskUtil?: number | null;
 }
 
 export interface OpsUser {
@@ -736,104 +1442,6 @@ export interface OpsUser {
   createdAt?: string;
 }
 
-// ── Real VPS Testbench Types (added from remote merge) ──────────────────────
-
-export type RealVpsProbeState =
-  | 'HEALTHY'
-  | 'UNREACHABLE'
-  | 'TIMEOUT'
-  | 'CONNECTION_REFUSED'
-  | 'HTTP_ERROR'
-  | 'INVALID_HEALTH_RESPONSE'
-  | 'UNKNOWN';
-
-export type RealVpsErrorCategory =
-  | 'TIMEOUT'
-  | 'CONNECTION_REFUSED'
-  | 'NETWORK_UNREACHABLE'
-  | 'DNS_FAILURE'
-  | 'HTTP_ERROR'
-  | 'INVALID_RESPONSE';
-
-export interface RealVpsNode {
-  id: string;
-  name: string;
-  role?: string;
-  ip: string;
-  hostname: string;
-  port: number;
-  healthUrl: string;
-  healthPath?: string;
-  provider: string;
-  region: string;
-  environment: 'PRD' | 'DR';
-  status: OperationalStatus;
-  probeState?: RealVpsProbeState;
-  lastCheckedAt: string | null;
-  latencyMs: number | null;
-  httpStatus: number | null;
-  tlsStatus: string | null;
-  responseSnippet: string;
-  errorReason?: string | null;
-  errorCategory?: RealVpsErrorCategory | null;
-  healthData?: Record<string, string | number | boolean> | null;
-  telemetry: {
-    cpuPercent: number;
-    ramPercent: number;
-    diskPercent: number;
-    loadAvg?: number[];
-    observedAt: string;
-  };
-}
-
-export interface RealVpsConfig {
-  activeMode: 'real_pair' | 'sample_cluster';
-  routing: 'MAIN' | 'DR';
-  autoFailover: boolean;
-  healthCheckIntervalSec: number;
-  main: RealVpsNode;
-  dr: RealVpsNode;
-  testApp: {
-    id: string;
-    name: string;
-    codeName: string;
-    domain: string;
-    healthPath: string;
-    failoverState: 'PRIMARY_ACTIVE' | 'DR_ACTIVE';
-    mainServerId: string;
-    drServerId: string;
-    lastFailoverAt?: string;
-  };
-}
-
-export interface RealVpsProbeResult {
-  target?: string;
-  vpsType?: 'main' | 'dr' | 'custom';
-  reachable: boolean;
-  probeState?: RealVpsProbeState;
-  statusCode: number | null;
-  latencyMs: number;
-  health?: string | null;
-  healthPath?: string;
-  healthData?: Record<string, string | number | boolean> | null;
-  tlsValid?: boolean;
-  tlsInfo?: string;
-  headers?: Record<string, string>;
-  bodySnippet?: string;
-  error?: string;
-  errorCategory?: RealVpsErrorCategory | null;
-  timestamp: string;
-}
-
-export interface RealVpsTcpProbeResult {
-  host: string;
-  port: number;
-  open: boolean;
-  latencyMs: number;
-  error?: string;
-  testedAt: string;
-}
-
 export interface SyntheticTransactionResult {
   url: string;
   method: string;
@@ -845,4 +1453,85 @@ export interface SyntheticTransactionResult {
   responseSnippet: string;
   headers?: Record<string, string>;
   testedAt: string;
+}
+
+/** First-class capacity record. A user headcount is not a seat limit: those are different kinds. */
+export type ResourceKind =
+  | 'CPU' | 'MEMORY' | 'SERVER_DISK' | 'STORAGE'
+  | 'SEATS' | 'ACTIVE_USERS'
+  | 'DATABASE_SIZE' | 'DATABASE_CONNECTIONS'
+  | 'API_QUOTA' | 'LOAD';
+
+export type ResourceUnit =
+  | 'cores' | 'millicores' | 'percent'
+  | 'bytes' | 'GiB' | 'GB'
+  | 'seats' | 'users' | 'connections' | 'requests' | 'load';
+
+export type ResourceSource = 'manual' | 'config' | 'provider' | 'discovered';
+export type ThresholdMode = 'percent' | 'absolute';
+export type QuotaWindow = 'minute' | 'hour' | 'day';
+export type ResourceFreshness = 'FRESH' | 'STALE' | 'MISSING' | 'ERROR' | 'UNKNOWN';
+export type ResourceAlertState = 'NORMAL' | 'WARNING' | 'CRITICAL' | 'EXCEEDED' | 'STALE' | 'UNKNOWN';
+
+export interface ResourceLimit {
+  id: string;
+  resourceKey: string;
+  kind: ResourceKind;
+  name: string;
+  description: string;
+  owner: string;
+  serverId: string | null;
+  applicationId: string | null;
+  /** Null when the limit is unknown. Never use 0 to mean unknown or unlimited. */
+  capacity: number | null;
+  unlimited: boolean;
+  /** Null when nothing has been measured. Never treat that as zero. */
+  usage: number | null;
+  unit: ResourceUnit;
+  source: ResourceSource;
+  thresholdMode: ThresholdMode;
+  /** Null together with criticalValue means "use the server override, then the global default". */
+  warningValue: number | null;
+  criticalValue: number | null;
+  hardLimit: number | null;
+  /** Percent points, or the same unit as an absolute threshold. Recovery requires a drop of this size. */
+  recoveryMargin: number;
+  /** Set only for API_QUOTA. Usage is requests inside this window and is never converted to another window. */
+  quotaWindow: QuotaWindow | null;
+  measuredAt: string | null;
+  lastSyncAt: string | null;
+  freshness: ResourceFreshness;
+  syncError: string;
+  enabled: boolean;
+  alertState: ResourceAlertState;
+  alertSince: string | null;
+  /** server-plan rows follow the server plan. agent-db rows follow a database the agent reported. agent-load follows the load average. */
+  managedBy: 'server-plan' | 'agent-db' | 'agent-load' | null;
+  lastMeasurementId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResourceEvaluation {
+  state: ResourceAlertState;
+  freshness: ResourceFreshness;
+  utilizationPercent: number | null;
+  thresholdFrom: 'resource' | 'monitor' | 'default' | 'none';
+  mode: ThresholdMode;
+  warning: number | null;
+  critical: number | null;
+}
+
+export interface ResourceView extends ResourceLimit {
+  evaluation: ResourceEvaluation;
+}
+
+/** One accepted usage sample. Missing samples are not filled in. */
+export interface ResourceMeasurement {
+  measuredAt: string;
+  usage: number;
+  capacity: number | null;
+  unit: string;
+  source: string;
+  alertState: ResourceAlertState;
 }
