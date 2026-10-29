@@ -818,16 +818,26 @@ export const ApplicationsView: React.FC = () => {
   const canDeleteApp = canDo('delete_application');
   const [editingApp, setEditingApp] = useState<Application | null>(null);
   const [confirmDeleteApp, setConfirmDeleteApp] = useState<string | null>(null);
-  const [filter, setFilter] = useState<'ALL' | 'TIER_1' | 'TIER_2' | 'HEALTHY' | 'DEGRADED'>('ALL');
+  const [filter, setFilter] = useState<'ALL' | 'TIER_1' | 'TIER_2' | 'TIER_3' | 'HEALTHY' | 'DEGRADED' | 'NO_DR'>('ALL');
+  const [search, setSearch] = useState('');
 
   const selectedApp = applications.find(a => a.id === selectedAppId);
 
   const filteredApps = applications.filter(a => {
     if (filter === 'TIER_1') return a.tier === 'TIER_1';
     if (filter === 'TIER_2') return a.tier === 'TIER_2';
+    if (filter === 'TIER_3') return a.tier === 'TIER_3';
     if (filter === 'HEALTHY') return a.status === 'HEALTHY';
     if (filter === 'DEGRADED') return a.status !== 'HEALTHY';
+    if (filter === 'NO_DR') return !a.drServerId;
     return true;
+  }).filter(a => {
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    const prd = servers.find(s => s.id === a.prdServerId);
+    const dr = servers.find(s => s.id === a.drServerId);
+    return [a.name, a.codeName, a.prdUrl, a.drUrl, a.dnsRecordName, prd?.hostname, prd?.ip, dr?.hostname, dr?.ip]
+      .some(v => (v ?? '').toLowerCase().includes(q));
   });
 
   return (
@@ -852,23 +862,33 @@ export const ApplicationsView: React.FC = () => {
           </p>
         </div>
 
-        {/* Filters */}
-        <div className={`flex items-center gap-1 p-0.5 rounded border text-xs font-mono ${
-          isDark ? 'bg-[#0B0F17] border-[#1E293B]' : 'bg-slate-100 border-slate-300'
-        }`}>
-          {(['ALL', 'TIER_1', 'TIER_2', 'HEALTHY', 'DEGRADED'] as const).map(f => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`px-2.5 py-1 whitespace-nowrap transition-colors rounded cursor-pointer ${
-                filter === f
-                  ? 'bg-blue-600 text-white font-medium shadow-xs'
-                  : isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              {f.replace('_', ' ')}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search name, code, URL, server…"
+            aria-label="Search applications"
+            className={`px-2.5 py-1.5 rounded border text-xs font-mono outline-none focus:ring-1 focus:ring-blue-500 min-w-[14rem] ${
+              isDark ? 'bg-[#0B0F17] border-[#1E293B] text-slate-100 placeholder:text-slate-600' : 'bg-white border-slate-300 text-slate-900'
+            }`}
+          />
+          <div className={`flex items-center gap-1 p-0.5 rounded border text-xs font-mono ${
+            isDark ? 'bg-[#0B0F17] border-[#1E293B]' : 'bg-slate-100 border-slate-300'
+          }`}>
+            {(['ALL', 'TIER_1', 'TIER_2', 'TIER_3', 'HEALTHY', 'DEGRADED', 'NO_DR'] as const).map(f => (
+              <button
+                key={f}
+                onClick={() => setFilter(f)}
+                className={`px-2.5 py-1 whitespace-nowrap transition-colors rounded cursor-pointer ${
+                  filter === f
+                    ? 'bg-blue-600 text-white font-medium shadow-xs'
+                    : isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {f === 'NO_DR' ? 'PRD only' : f.replace('_', ' ')}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 

@@ -1,5 +1,6 @@
 /**
- * Operator checks, hourly SLA buckets, maintenance windows, runbooks, and CI backup reports.
+ * Operator checks, hourly SLA buckets, availability / uptime / daily reports, maintenance
+ * windows, runbooks, and CI backup reports.
  * Sample data on a throw-away schema. Nothing here deploys, fails over, or runs a backup.
  *   npm run test:local -- tests/operations-ready.test.ts
  */
@@ -123,7 +124,7 @@ after(async () => {
   fs.rmSync(DATA_DIR, { recursive: true, force: true });
 });
 
-describe('operator checks, SLA buckets, maintenance, runbooks, and backup reports', { concurrency: 1 }, () => {
+describe('operator checks, SLA buckets, reports, maintenance, runbooks, and backup reports', { concurrency: 1 }, () => {
   test('operators can run HTTP, TCP, DNS and SSL checks; metadata addresses are refused; nothing is stored', async () => {
     assert.equal((await api('POST', '/api/v1/tools/http', { url: `${sampleBase}/diag` }, '')).status, 401);
     assert.equal((await api('POST', '/api/v1/tools/http', { url: `${sampleBase}/diag` }, viewerToken)).status, 403);
@@ -229,6 +230,47 @@ describe('operator checks, SLA buckets, maintenance, runbooks, and backup report
     assert.equal(prd.monitoring.availabilityPercent, 100);
     assert.equal(typeof prd.monitoring.avgLatencyMs, 'number');
     assert.equal(dr.monitoring.availabilityPercent, 0);
+  });
+
+  test('uptime and daily reports are built from stored check results on sample data', async () => {
+    const { appId } = await appPair('report-sample');
+    const mon = await api('POST', '/api/v1/monitors', monitorBody('Report probe', appId, `${sampleBase}/ok`, 'PRD', true));
+    assert.equal(mon.status, 201, mon.raw);
+    const probed = await api('POST', `/api/v1/monitors/${mon.body.data.id}/probe`);
+    assert.equal(probed.body.data.lastProbeStatus, 'UP');
+
+    const app = await api('GET', `/api/v1/applications/${appId}`);
+    assert.equal(app.body.data.uptime24h, 100);
+    const appName = app.body.data.name as string;
+
+    assert.equal((await api('GET', '/api/v1/reports/uptime', undefined, '')).status, 401);
+    assert.equal((await api('GET', '/api/v1/reports/daily', undefined, '')).status, 401);
+
+    const uptime = await api('GET', '/api/v1/reports/uptime', undefined, viewerToken);
+    assert.equal(uptime.status, 200, uptime.raw);
+    const row = (uptime.body.data as Array<{ id: string; name: string; uptime24h: number | null; uptime7d: number | null; uptime30d: number | null }>)
+      .find(a => a.id === appId);
+    assert.ok(row, 'the sample application is in the uptime report');
+    assert.equal(row.name, appName);
+    assert.equal(row.uptime24h, 100);
+    assert.equal(row.uptime7d, 100);
+    assert.equal(row.uptime30d, 100);
+
+    const daily = await api('GET', '/api/v1/reports/daily', undefined, viewerToken);
+    assert.equal(daily.status, 200, daily.raw);
+    assert.equal(typeof daily.body.data.generatedAt, 'string');
+    assert.ok(Date.parse(daily.body.data.generatedAt) > 0);
+    const report = daily.body.data.report as string;
+    assert.match(report, /SCHOLARIO OPS — DAILY OPERATIONS REPORT/);
+    assert.match(report, /APPLICATION UPTIME \(24h \/ 7d \/ 30d\)/);
+    assert.match(report, new RegExp(`${appName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+100% / 100% / 100%`));
+    assert.match(report, /INCIDENTS IN LAST 24H/);
+    assert.match(report, /SERVERS/);
+
+    const summary = await api('GET', '/api/v1/reports/summary', undefined, viewerToken);
+    assert.equal(summary.status, 200, summary.raw);
+    assert.ok(summary.body.data.totalApps >= 1);
+    assert.ok(summary.body.data.totalMonitors >= 1);
   });
 
   test('a maintenance window can be created, completed and deleted, and alerts stay paused only for its scope', async () => {

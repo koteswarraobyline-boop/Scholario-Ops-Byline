@@ -117,7 +117,7 @@ Status words:
 | Runbooks | Complete (code, checklist) | CRUD and step checkboxes. | Does not SSH/execute on a VPS (by design). |
 | Maintenance windows | Complete (code) | Create, edit, complete, delete; alerts paused for scope. | — |
 | Audit log | Complete | `audit()` writes rows. UI: `src/components/admin/AuditLogsView.tsx`. | Retention prune already configured (`AUDIT_RETENTION_ENTRIES`). |
-| Reports and reliability | Complete (code) | Insights, uptime/daily/summary, SLO/disk alerts; empty history stays unknown. | Needs live metric history for forecasts. |
+| Reports and reliability | Complete | Insights, availability, SLA buckets, `/reports/uptime`, `/reports/daily`, `/reports/summary`, SLO/disk alerts; empty history stays unknown. Sample-data tests in `operations-ready` and `insights`. | Needs live metric history for forecasts. |
 | Authentication | Complete | Login, refresh, logout, change password, roles, optional OIDC SSO when configured. | Delete `initial-admin-password.txt` after first login. |
 | Users | Complete | `src/components/admin/UsersView.tsx`. Create, reset password, delete. | Super-admin is required to delete a user. |
 | Notifications channels | Complete | Teams, webhook, email, PagerDuty. Edit and delete for `it_administrator`. Delivery log and resend. | Email needs `PUBLIC_URL` for the incident button. |
@@ -153,7 +153,7 @@ Weights follow how much of day-to-day operations the module is: monitoring 12, i
 | Backups | 6 | 55 | Status is recorded, restore is not executed | `tests/ops-backup.test.ts` | Not checked |
 | Dependencies | 6 | 90 | Register, HARD/SOFT impact walk, and health use of checked links | `tests/dependency-register.test.ts` (12/12) | Not checked |
 | CI/CD | 6 | 65 | Pipeline exists; last main run did not deploy | The workflow itself | Deploy skipped |
-| Reports | 5 | 65 | Insights from stored checks | `tests/insights.test.ts` | Not checked |
+| Reports | 5 | 85 | Insights, availability/SLA, uptime + daily reports from stored checks | `tests/insights.test.ts`, `tests/operations-ready.test.ts` | Not checked |
 | Deployments and runbooks | 5 | 50 | Records and checklists, not a release system | Limited | Not checked |
 | Audit log | 3 | 80 | Written and listed | Indirect | Not checked |
 
