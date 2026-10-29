@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
 import { api, ApplicationAvailability, DatabaseHealthRow, DrReadiness } from '../../services/api';
@@ -6,6 +6,7 @@ import { Application, Monitor, OperationalStatus, VpsServer, LbPool } from '../.
 import { Ago, triText, triColor, verdictColor } from '../ui/Freshness';
 import { originHealthy, originRtt } from '../providers/LoadBalancerPanel';
 import { effectiveRoutingMethod, ROUTING_METHOD_LABELS } from '../../lib/trafficHealth';
+import { ExpandToggle, InventoryFilters, matchesQuery, useExpandSet } from '../ui/InventoryFilters';
 
 type Env = 'PRD' | 'DR';
 
@@ -14,18 +15,73 @@ type Env = 'PRD' | 'DR';
  * Every application is listed — not a single ICT pair. Missing data stays missing.
  */
 export const ApplicationStatusPanel: React.FC = () => {
-  const { applications, theme } = useOps();
+  const { applications, servers, theme } = useOps();
   const isDark = theme === 'dark';
+  const [search, setSearch] = useState('');
+  const [chip, setChip] = useState('ALL');
+  const st = useMemo(() => ({
+    isDark,
+    input: `w-full px-2.5 py-1.5 rounded border text-xs font-mono outline-none focus:ring-1 focus:ring-blue-500 ${
+      isDark ? 'bg-[#0B0F17] border-[#1E293B] text-slate-100 placeholder:text-slate-600' : 'bg-white border-slate-300 text-slate-900 placeholder:text-slate-400'
+    }`,
+    btn: 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-mono font-semibold transition-colors cursor-pointer',
+    ghost: isDark ? 'bg-[#162033] hover:bg-[#1D2B44] text-slate-200 border border-[#23334E]' : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300',
+    muted: isDark ? 'text-slate-400' : 'text-slate-600',
+    faint: isDark ? 'text-slate-500' : 'text-slate-400',
+  }), [isDark]);
+
+  const chips = useMemo(() => {
+    const n = (pred: (a: Application) => boolean) => applications.filter(pred).length;
+    return [
+      { id: 'ALL', label: 'All', count: applications.length },
+      { id: 'HEALTHY', label: 'Healthy', count: n(a => a.status === 'HEALTHY') },
+      { id: 'PROBLEM', label: 'Warning / critical', count: n(a => a.status === 'WARNING' || a.status === 'CRITICAL') },
+      { id: 'HAS_DR', label: 'With DR', count: n(a => Boolean(a.drServerId || a.drUrl)) },
+      { id: 'NO_DR', label: 'PRD-only', count: n(a => !a.drServerId && !a.drUrl) },
+    ];
+  }, [applications]);
+
+  const filtered = useMemo(() => applications.filter(a => {
+    if (chip === 'HEALTHY' && a.status !== 'HEALTHY') return false;
+    if (chip === 'PROBLEM' && a.status !== 'WARNING' && a.status !== 'CRITICAL') return false;
+    if (chip === 'HAS_DR' && !(a.drServerId || a.drUrl)) return false;
+    if (chip === 'NO_DR' && (a.drServerId || a.drUrl)) return false;
+    const prd = servers.find(s => s.id === a.prdServerId);
+    const dr = servers.find(s => s.id === a.drServerId);
+    return matchesQuery(search, [a.name, a.codeName, a.prdUrl, a.drUrl, prd?.hostname, prd?.ip, dr?.hostname, dr?.ip]);
+  }).sort((a, b) => a.name.localeCompare(b.name)), [applications, servers, chip, search]);
+
+  const ids = useMemo(() => filtered.map(a => a.id), [filtered]);
+  // With many apps, start collapsed so overview stays scannable
+  const expand = useExpandSet(ids, false);
+
   if (applications.length === 0) return null;
   return (
     <section className="space-y-3 min-w-0" aria-label="Application health">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h2 className="text-xs font-bold font-mono uppercase tracking-wider">Applications — live</h2>
         <p className={`text-[11px] font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-          {applications.length} registered · DR shown only when configured
+          {applications.length} registered · DR shown only when configured · expand a row for detail
         </p>
       </div>
-      {applications.map(app => <AppPanel key={app.id} app={app} />)}
+      <InventoryFilters
+        st={st}
+        search={search}
+        onSearch={setSearch}
+        searchPlaceholder="Search application, URL, server…"
+        chips={chips}
+        chip={chip}
+        onChip={setChip}
+        shown={filtered.length}
+        total={applications.length}
+        expand={{ allOpen: expand.allOpen, onExpandAll: expand.expandAll, onCollapseAll: expand.collapseAll }}
+        ariaLabel="Filter live applications"
+      />
+      {filtered.length === 0 ? (
+        <div className={`text-xs font-mono ${st.muted}`}>No applications match these filters.</div>
+      ) : filtered.map(app => (
+        <AppPanel key={app.id} app={app} open={expand.isOpen(app.id)} onToggle={() => expand.toggle(app.id)} />
+      ))}
     </section>
   );
 };
@@ -43,7 +99,7 @@ function envVerdict(http: Monitor | undefined, pool: LbPool | undefined, srv: Vp
   return { status: http.status, why: http.history[0]?.detail ?? '' };
 }
 
-const AppPanel: React.FC<{ app: Application }> = ({ app }) => {
+const AppPanel: React.FC<{ app: Application; open: boolean; onToggle: () => void }> = ({ app, open, onToggle }) => {
   const { servers, monitors, loadBalancer, theme } = useOps();
   const navigate = useNavigate();
   const isDark = theme === 'dark';
@@ -54,6 +110,7 @@ const AppPanel: React.FC<{ app: Application }> = ({ app }) => {
   const [ready, setReady] = useState<DrReadiness | null>(null);
 
   useEffect(() => {
+    if (!open) return;
     let alive = true;
     const load = () => {
       api.getAvailability(app.id, '24h')
@@ -66,7 +123,7 @@ const AppPanel: React.FC<{ app: Application }> = ({ app }) => {
     load();
     const t = setInterval(load, 60_000);
     return () => { alive = false; clearInterval(t); };
-  }, [app.id]);
+  }, [app.id, open]);
 
   const env = (e: Env) => {
     const srv = servers.find(s => s.id === (e === 'PRD' ? app.prdServerId : app.drServerId));
@@ -170,27 +227,40 @@ const AppPanel: React.FC<{ app: Application }> = ({ app }) => {
     );
   };
 
+  const summaryCls = prd.verdict.status === 'HEALTHY' && (!hasDr || dr.verdict.status === 'HEALTHY') ? 'text-emerald-500' : prd.verdict.status === 'CRITICAL' ? 'text-rose-500' : 'text-amber-500';
+
   return (
-    <div className={`rounded-xl border p-4 space-y-3 min-w-0 ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h2 className="text-xs font-bold font-mono uppercase tracking-wider">{app.name} application — live</h2>
-          <p className={`text-[11px] font-mono ${muted}`}>{ROUTING_METHOD_LABELS[effectiveRoutingMethod(app)]}{app.loadBalancer ? ` · ${app.loadBalancer.hostname}` : ''}{app.prdUrl ? ` · ${app.prdUrl}` : ''}</p>
+    <div className={`rounded-xl border min-w-0 overflow-hidden ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
+      <div className={`flex items-center gap-2 px-4 py-3 ${isDark ? 'hover:bg-[#0B0F17]' : 'hover:bg-slate-50'}`}>
+        <ExpandToggle open={open} onClick={onToggle} label={app.name} className={muted} />
+        <button type="button" onClick={onToggle} className="flex-1 min-w-0 text-left cursor-pointer">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0">
+              <h2 className="text-xs font-bold font-mono uppercase tracking-wider break-words">{app.name}</h2>
+              <p className={`text-[11px] font-mono truncate ${muted}`}>
+                <span className={`font-bold ${verdictColor(app.status)}`}>{app.status}</span>
+                {' · '}{ROUTING_METHOD_LABELS[effectiveRoutingMethod(app)]}
+                {prd.srv ? ` · PRD ${prd.srv.hostname}` : ''}
+                {hasDr && dr.srv ? ` · DR ${dr.srv.hostname}` : ' · PRD-only'}
+              </p>
+            </div>
+            <div className={`text-sm font-bold font-mono shrink-0 ${summaryCls}`}>{answer}</div>
+          </div>
+        </button>
+      </div>
+      {open && (
+        <div className="px-4 pb-4 space-y-3">
+          <div className={`grid grid-cols-1 ${hasDr ? 'xl:grid-cols-2' : ''} gap-3 [&>*]:min-w-0`}>
+            {card('Production / Primary', prd)}
+            {hasDr && card('Disaster Recovery / Standby', dr)}
+          </div>
+          <div className="flex flex-wrap gap-3 text-[11px] font-mono">
+            <button onClick={() => navigate('/resilience')} className="text-blue-400 hover:underline cursor-pointer">PRD / DR Readiness & failover pre-flight →</button>
+            <button onClick={() => navigate('/cloudflare')} className="text-blue-400 hover:underline cursor-pointer">Cloudflare pools →</button>
+            <button onClick={() => navigate('/infrastructure')} className="text-blue-400 hover:underline cursor-pointer">VPS telemetry →</button>
+          </div>
         </div>
-        <div className="text-right">
-          <div className={`text-[10px] font-mono ${muted}`}>Is {app.name} healthy right now?</div>
-          <div className={`text-sm font-bold font-mono ${prd.verdict.status === 'HEALTHY' && (!hasDr || dr.verdict.status === 'HEALTHY') ? 'text-emerald-500' : prd.verdict.status === 'CRITICAL' ? 'text-rose-500' : 'text-amber-500'}`}>{answer}</div>
-        </div>
-      </div>
-      <div className={`grid grid-cols-1 ${hasDr ? 'xl:grid-cols-2' : ''} gap-3 [&>*]:min-w-0`}>
-        {card('Production / Primary', prd)}
-        {hasDr && card('Disaster Recovery / Standby', dr)}
-      </div>
-      <div className="flex flex-wrap gap-3 text-[11px] font-mono">
-        <button onClick={() => navigate('/resilience')} className="text-blue-400 hover:underline cursor-pointer">PRD / DR Readiness & failover pre-flight →</button>
-        <button onClick={() => navigate('/cloudflare')} className="text-blue-400 hover:underline cursor-pointer">Cloudflare pools →</button>
-        <button onClick={() => navigate('/infrastructure')} className="text-blue-400 hover:underline cursor-pointer">VPS telemetry →</button>
-      </div>
+      )}
     </div>
   );
 };

@@ -12,6 +12,8 @@ import { Application, TrafficRoutingMethod, VpsServer } from '../../types';
 import { blankRouting, effectiveRoutingMethod, ROUTING_METHOD_LABELS, ROUTING_METHODS } from '../../lib/trafficHealth';
 import { resolveAgentBaseUrl } from '../../lib/agentEndpoint';
 import { DependencyRegisterSection } from './DependencyRegister';
+import { ExpandToggle, InventoryFilters, matchesQuery, useExpandSet } from '../ui/InventoryFilters';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Small shared UI helpers (match the rest of the dashboard's look)
@@ -398,6 +400,9 @@ const ServersSection: React.FC = () => {
   const { canDo } = useAuth();
   const [editing, setEditing] = useState<VpsServer | 'new' | null>(null);
   const [agentFor, setAgentFor] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const [chip, setChip] = useState('ALL');
+  const [pageSize, setPageSize] = useState(10);
   const isAdmin = canDo('create_server');
 
   const remove = async (s: VpsServer) => {
@@ -412,9 +417,35 @@ const ServersSection: React.FC = () => {
 
   const agentServer = servers.find(s => s.id === agentFor);
 
+  const chips = useMemo(() => {
+    const n = (pred: (s: VpsServer) => boolean) => servers.filter(pred).length;
+    return [
+      { id: 'ALL', label: 'All', count: servers.length },
+      { id: 'PRD', label: 'PRD', count: n(s => s.environment === 'PRD') },
+      { id: 'DR', label: 'DR', count: n(s => s.environment === 'DR') },
+      { id: 'CONNECTED', label: 'Agent connected', count: n(s => s.agentStatus === 'CONNECTED') },
+      { id: 'DISCONNECTED', label: 'Agent down', count: n(s => s.agentStatus !== 'CONNECTED') },
+      { id: 'UNUSED', label: 'Unused', count: n(s => !applications.some(a => a.prdServerId === s.id || a.drServerId === s.id)) },
+    ];
+  }, [servers, applications]);
+
+  const filtered = useMemo(() => servers.filter(s => {
+    const usedBy = applications.filter(a => a.prdServerId === s.id || a.drServerId === s.id);
+    if (chip === 'PRD' && s.environment !== 'PRD') return false;
+    if (chip === 'DR' && s.environment !== 'DR') return false;
+    if (chip === 'CONNECTED' && s.agentStatus !== 'CONNECTED') return false;
+    if (chip === 'DISCONNECTED' && s.agentStatus === 'CONNECTED') return false;
+    if (chip === 'UNUSED' && usedBy.length > 0) return false;
+    return matchesQuery(search, [s.hostname, s.ip, s.provider, s.region, s.plan, s.notes, ...usedBy.map(a => a.name)]);
+  }).sort((a, b) => a.environment.localeCompare(b.environment) || a.hostname.localeCompare(b.hostname)), [servers, applications, chip, search]);
+
+  const paging = useClientPagination(filtered, pageSize, `${chip}|${search}`);
+  const ids = useMemo(() => paging.slice.map(s => s.id), [paging.slice]);
+  const expand = useExpandSet(ids, false);
+
   return (
     <section className="space-y-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
         <h2 className="text-sm font-bold font-mono flex items-center gap-2"><Server className="w-4 h-4 text-blue-500" /> VPS SERVERS ({servers.length})</h2>
         {isAdmin && editing === null && <button onClick={() => setEditing('new')} className={`${st.btn} ${st.primary}`}><Plus className="w-3.5 h-3.5" /> Add server</button>}
       </div>
@@ -427,56 +458,77 @@ const ServersSection: React.FC = () => {
           No servers registered yet. {isAdmin ? 'Click "Add server" and enter your Main (PRD) VPS, then your DR VPS.' : 'Ask an administrator to register the VPS servers.'}
         </div>
       ) : (
-        <div className={`${st.card} !p-0 overflow-x-auto`}>
-          <table className="w-full text-xs font-mono min-w-[860px]">
-            <thead className={`text-left ${st.isDark ? 'bg-[#0B0F17] text-slate-400' : 'bg-slate-50 text-slate-600'}`}>
-              <tr>
-                <th className="py-2 px-3">Server</th>
-                <th className="py-2 px-3">Role</th>
-                <th className="py-2 px-3">Used by</th>
-                <th className="py-2 px-3">Status</th>
-                <th className="py-2 px-3">Agent</th>
-                <th className="py-2 px-3">CPU / RAM / Disk</th>
-                <th className="py-2 px-3">Connectivity</th>
-                <th className="py-2 px-3 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className={`divide-y ${st.isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
-              {servers.map(s => {
+        <>
+          <InventoryFilters
+            st={st}
+            search={search}
+            onSearch={setSearch}
+            searchPlaceholder="Search hostname, IP, app, notes…"
+            chips={chips}
+            chip={chip}
+            onChip={setChip}
+            shown={filtered.length}
+            total={servers.length}
+            expand={{ allOpen: expand.allOpen, onExpandAll: expand.expandAll, onCollapseAll: expand.collapseAll }}
+            ariaLabel="Filter servers"
+          />
+          <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+            <label className={`flex items-center gap-1.5 ${st.muted}`}>
+              Per page
+              <select className={`${st.input} !w-auto`} value={pageSize} onChange={e => setPageSize(Number(e.target.value))} aria-label="Servers per page">
+                {[5, 10, 20, 50].map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </label>
+          </div>
+          {filtered.length === 0 ? (
+            <div className={`${st.card} text-center text-xs ${st.muted} py-6`}>No servers match these filters.</div>
+          ) : (
+            <>
+            <div className={`${st.card} !p-0 divide-y ${st.isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
+              {paging.slice.map(s => {
                 const usedBy = applications.filter(a => a.prdServerId === s.id || a.drServerId === s.id);
+                const open = expand.isOpen(s.id);
                 return (
-                <tr key={s.id}>
-                  <td className="py-2 px-3">
-                    <div className="font-semibold">{s.hostname}</div>
-                    <div className={st.faint}>{s.ip}{s.provider ? ` · ${s.provider}` : ''}{s.region && s.region !== 'Unknown' ? ` · ${s.region}` : ''}</div>
-                    {s.planSpec && <div className={st.faint}>{s.planSpec.name || 'Plan'}: {s.planSpec.cpuCores} CPU · {s.planSpec.ramGb} GB · {s.planSpec.diskGb} GB</div>}
-                  </td>
-                  <td className="py-2 px-3"><span className={s.environment === 'PRD' ? 'text-blue-400 font-bold' : 'text-purple-400 font-bold'}>{s.environment}</span></td>
-                  <td className={`py-2 px-3 ${st.faint}`}>
-                    {usedBy.length === 0 ? '—' : usedBy.map(a => a.name).join(', ')}
-                  </td>
-                  <td className={`py-2 px-3 font-bold ${statusColor(s.status)}`}>{s.status}</td>
-                  <td className="py-2 px-3">
-                    <div className={`font-bold ${statusColor(s.agentStatus)}`}>{s.agentStatus}</div>
-                    <div className={st.faint}>{s.lastSeen ? `${timeAgo(s.lastSeen)} · v${s.agentVersion || '?'}` : 'never reported'}</div>
-                  </td>
-                  <td className="py-2 px-3 tabular-nums">
-                    {s.lastSeen ? `${s.telemetry.cpuPercent}% / ${s.telemetry.ramPercent}% / ${s.telemetry.diskPercent}%` : <span className={st.faint}>—</span>}
-                  </td>
-                  <td className="py-2 px-3">{canDo('run_probe') ? <PortCheck server={s} /> : <span className={st.faint}>—</span>}</td>
-                  <td className="py-2 px-3">
-                    <div className="flex justify-end gap-1.5">
-                      {isAdmin && <button onClick={() => setAgentFor(s.id)} className={`${st.btn} ${st.ghost} !px-2`} title="Install agent"><Terminal className="w-3.5 h-3.5" /> Agent</button>}
-                      {isAdmin && <button onClick={() => setEditing(s)} className={`${st.btn} ${st.ghost} !px-2`} title="Edit"><Pencil className="w-3.5 h-3.5" /></button>}
-                      {isAdmin && <button onClick={() => remove(s)} className={`${st.btn} ${st.danger} !px-2`} title="Remove"><Trash2 className="w-3.5 h-3.5" /></button>}
+                  <div key={s.id} className="min-w-0">
+                    <div className={`flex items-center gap-2 px-3 py-2.5 ${st.isDark ? 'hover:bg-[#0B0F17]' : 'hover:bg-slate-50'}`}>
+                      <ExpandToggle open={open} onClick={() => expand.toggle(s.id)} label={s.hostname} className={st.faint} />
+                      <button type="button" onClick={() => expand.toggle(s.id)} className="flex-1 min-w-0 text-left cursor-pointer">
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono">
+                          <span className="font-semibold break-all">{s.hostname}</span>
+                          <span className={st.faint}>{s.ip}</span>
+                          <span className={s.environment === 'PRD' ? 'text-blue-400 font-bold' : 'text-purple-400 font-bold'}>{s.environment}</span>
+                          <span className={`font-bold ${statusColor(s.status)}`}>{s.status}</span>
+                          <span className={`font-bold ${statusColor(s.agentStatus)}`}>{s.agentStatus}</span>
+                          {usedBy.length > 0 && <span className={st.muted}>· {usedBy.map(a => a.name).join(', ')}</span>}
+                        </div>
+                      </button>
+                      {isAdmin && (
+                        <div className="flex gap-1.5 shrink-0">
+                          <button onClick={() => setAgentFor(s.id)} className={`${st.btn} ${st.ghost} !px-2`} title="Install agent"><Terminal className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => setEditing(s)} className={`${st.btn} ${st.ghost} !px-2`} title="Edit"><Pencil className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => remove(s)} className={`${st.btn} ${st.danger} !px-2`} title="Remove"><Trash2 className="w-3.5 h-3.5" /></button>
+                        </div>
+                      )}
                     </div>
-                  </td>
-                </tr>
+                    {open && (
+                      <div className={`px-3 pb-3 pl-10 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 text-[11px] font-mono ${st.muted}`}>
+                        <div><span className={st.faint}>Provider:</span> {[s.provider, s.region && s.region !== 'Unknown' ? s.region : ''].filter(Boolean).join(' · ') || '—'}</div>
+                        <div><span className={st.faint}>Plan:</span> {s.planSpec ? `${s.planSpec.name || 'Plan'}: ${s.planSpec.cpuCores} CPU · ${s.planSpec.ramGb} GB · ${s.planSpec.diskGb} GB` : (s.plan || '—')}</div>
+                        <div><span className={st.faint}>Agent:</span> {s.lastSeen ? `${timeAgo(s.lastSeen)} · v${s.agentVersion || '?'}` : 'never reported'}</div>
+                        <div><span className={st.faint}>CPU / RAM / Disk:</span> {s.lastSeen ? `${s.telemetry.cpuPercent}% / ${s.telemetry.ramPercent}% / ${s.telemetry.diskPercent}%` : '—'}</div>
+                        <div className="sm:col-span-2"><span className={st.faint}>Used by:</span> {usedBy.length ? usedBy.map(a => a.name).join(', ') : '—'}</div>
+                        {s.notes && <div className="sm:col-span-2 lg:col-span-3 break-words"><span className={st.faint}>Notes:</span> {s.notes}</div>}
+                        <div className="sm:col-span-2 lg:col-span-3">{canDo('run_probe') ? <PortCheck server={s} /> : null}</div>
+                      </div>
+                    )}
+                  </div>
                 );
               })}
-            </tbody>
-          </table>
-        </div>
+            </div>
+            <Pagination page={paging.page} totalPages={paging.totalPages} total={paging.total} pageSize={paging.pageSize} onPage={paging.setPage} />
+            </>
+          )}
+        </>
       )}
     </section>
   );
@@ -834,6 +886,9 @@ const ApplicationsSection: React.FC = () => {
   const { applications, servers, monitors, cloudflareZones, deleteApplication } = useOps();
   const { canDo } = useAuth();
   const [editing, setEditing] = useState<Application | 'new' | null>(null);
+  const [search, setSearch] = useState('');
+  const [chip, setChip] = useState('ALL');
+  const [pageSize, setPageSize] = useState(10);
   const isAdmin = canDo('create_application');
 
   const remove = async (a: Application) => {
@@ -842,9 +897,38 @@ const ApplicationsSection: React.FC = () => {
     await deleteApplication(a.id);
   };
 
+  const chips = useMemo(() => {
+    const n = (pred: (a: Application) => boolean) => applications.filter(pred).length;
+    return [
+      { id: 'ALL', label: 'All', count: applications.length },
+      { id: 'HEALTHY', label: 'Healthy', count: n(a => a.status === 'HEALTHY') },
+      { id: 'PROBLEM', label: 'Warning / critical', count: n(a => a.status === 'WARNING' || a.status === 'CRITICAL') },
+      { id: 'TIER_1', label: 'Tier 1', count: n(a => a.tier === 'TIER_1') },
+      { id: 'TIER_2', label: 'Tier 2', count: n(a => a.tier === 'TIER_2') },
+      { id: 'TIER_3', label: 'Tier 3', count: n(a => a.tier === 'TIER_3') },
+      { id: 'NO_DR', label: 'PRD-only', count: n(a => !a.drServerId) },
+    ];
+  }, [applications]);
+
+  const filtered = useMemo(() => applications.filter(a => {
+    if (chip === 'HEALTHY' && a.status !== 'HEALTHY') return false;
+    if (chip === 'PROBLEM' && a.status !== 'WARNING' && a.status !== 'CRITICAL') return false;
+    if (chip === 'TIER_1' && a.tier !== 'TIER_1') return false;
+    if (chip === 'TIER_2' && a.tier !== 'TIER_2') return false;
+    if (chip === 'TIER_3' && a.tier !== 'TIER_3') return false;
+    if (chip === 'NO_DR' && a.drServerId) return false;
+    const prd = servers.find(s => s.id === a.prdServerId);
+    const dr = servers.find(s => s.id === a.drServerId);
+    return matchesQuery(search, [a.name, a.codeName, a.description, a.prdUrl, a.drUrl, a.dnsRecordName, a.cloudflareZone, prd?.hostname, prd?.ip, dr?.hostname, dr?.ip]);
+  }).sort((a, b) => a.name.localeCompare(b.name)), [applications, servers, chip, search]);
+
+  const paging = useClientPagination(filtered, pageSize, `${chip}|${search}`);
+  const ids = useMemo(() => paging.slice.map(a => a.id), [paging.slice]);
+  const expand = useExpandSet(ids, false);
+
   return (
     <section className="space-y-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
         <h2 className="text-sm font-bold font-mono flex items-center gap-2"><Layers className="w-4 h-4 text-blue-500" /> APPLICATIONS ({applications.length})</h2>
         {isAdmin && editing === null && (
           <button onClick={() => setEditing('new')} disabled={servers.length === 0} className={`${st.btn} ${st.primary}`} title={servers.length === 0 ? 'Register servers first' : undefined}>
@@ -860,53 +944,93 @@ const ApplicationsSection: React.FC = () => {
           No applications yet. An application ties a PRD server, a DR server and the Cloudflare DNS record that is switched on failover.
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-          {applications.map(a => {
-            const prd = servers.find(s => s.id === a.prdServerId);
-            const dr = servers.find(s => s.id === a.drServerId);
-            const zone = cloudflareZones.find(z => a.cloudflareZone && (a.cloudflareZone === z.domain || a.cloudflareZone.endsWith(`.${z.domain}`)));
-            const record = zone?.dnsRecords.find(r => r.name === a.dnsRecordName && (r.type === 'A' || r.type === 'AAAA'));
-            const appMonitors = monitors.filter(m => m.applicationId === a.id);
-            return (
-              <div key={a.id} className={`${st.card} space-y-2 min-w-0`}>
-                <div className="flex items-start justify-between gap-2 min-w-0">
-                  <div className="min-w-0">
-                    <div className="text-sm font-bold break-words">{a.name} <span className={`text-[10px] font-mono ${st.faint}`}>{a.codeName}</span></div>
-                    <div className={`text-[11px] font-mono font-bold ${statusColor(a.status)}`}>{a.status} · {a.failoverState.replace('_', ' ')}</div>
+        <>
+          <InventoryFilters
+            st={st}
+            search={search}
+            onSearch={setSearch}
+            searchPlaceholder="Search name, code, URL, server…"
+            chips={chips}
+            chip={chip}
+            onChip={setChip}
+            shown={filtered.length}
+            total={applications.length}
+            expand={{ allOpen: expand.allOpen, onExpandAll: expand.expandAll, onCollapseAll: expand.collapseAll }}
+            ariaLabel="Filter applications"
+          />
+          <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+            <label className={`flex items-center gap-1.5 ${st.muted}`}>
+              Per page
+              <select className={`${st.input} !w-auto`} value={pageSize} onChange={e => setPageSize(Number(e.target.value))} aria-label="Applications per page">
+                {[5, 10, 20, 50].map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </label>
+          </div>
+          {filtered.length === 0 ? (
+            <div className={`${st.card} text-center text-xs ${st.muted} py-6`}>No applications match these filters.</div>
+          ) : (
+            <>
+            <div className="space-y-2">
+              {paging.slice.map(a => {
+                const prd = servers.find(s => s.id === a.prdServerId);
+                const dr = servers.find(s => s.id === a.drServerId);
+                const zone = cloudflareZones.find(z => a.cloudflareZone && (a.cloudflareZone === z.domain || a.cloudflareZone.endsWith(`.${z.domain}`)));
+                const record = zone?.dnsRecords.find(r => r.name === a.dnsRecordName && (r.type === 'A' || r.type === 'AAAA'));
+                const appMonitors = monitors.filter(m => m.applicationId === a.id);
+                const open = expand.isOpen(a.id);
+                return (
+                  <div key={a.id} className={`${st.card} !p-0 min-w-0 overflow-hidden`}>
+                    <div className={`flex items-center gap-2 px-3 py-2.5 ${st.isDark ? 'hover:bg-[#0B0F17]' : 'hover:bg-slate-50'}`}>
+                      <ExpandToggle open={open} onClick={() => expand.toggle(a.id)} label={a.name} className={st.faint} />
+                      <button type="button" onClick={() => expand.toggle(a.id)} className="flex-1 min-w-0 text-left cursor-pointer">
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono">
+                          <span className="text-sm font-bold break-words">{a.name}</span>
+                          <span className={st.faint}>{a.codeName}</span>
+                          <span className={`font-bold ${statusColor(a.status)}`}>{a.status}</span>
+                          <span className={st.muted}>{a.tier.replace('_', ' ')}</span>
+                          <span className={st.muted}>{prd ? `PRD ${prd.hostname}` : 'PRD —'}{dr ? ` · DR ${dr.hostname}` : ' · PRD-only'}</span>
+                        </div>
+                      </button>
+                      {isAdmin && (
+                        <div className="flex gap-1.5 shrink-0">
+                          <button onClick={() => setEditing(a)} className={`${st.btn} ${st.ghost} !px-2`}><Pencil className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => remove(a)} className={`${st.btn} ${st.danger} !px-2`}><Trash2 className="w-3.5 h-3.5" /></button>
+                        </div>
+                      )}
+                    </div>
+                    {open && (
+                      <div className={`px-3 pb-3 pl-10 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono border-t ${st.isDark ? 'border-[#172030]' : 'border-slate-100'} pt-2 [&>*]:min-w-0 [&>*]:break-words`}>
+                        <div><span className={st.faint}>PRD:</span> {prd ? `${prd.hostname} (${prd.ip})` : <span className="text-amber-500">not set</span>}</div>
+                        <div><span className={st.faint}>DR:</span> {dr ? `${dr.hostname} (${dr.ip})` : <span className="text-amber-500">not set</span>}</div>
+                        <div className="col-span-2 break-all"><span className={st.faint}>PRD URL:</span> {a.prdUrl || <span className={st.faint}>not set</span>}</div>
+                        <div className="col-span-2 break-all"><span className={st.faint}>DR URL:</span> {a.drUrl || <span className={st.faint}>not set</span>}</div>
+                        <div className="col-span-2"><span className={st.faint}>Routing:</span> {ROUTING_METHOD_LABELS[effectiveRoutingMethod(a)]} · failover {a.failoverState.replace('_', ' ')}</div>
+                        {effectiveRoutingMethod(a) === 'cloudflare_lb' && a.loadBalancer ? (
+                          <div className="col-span-2 break-all">
+                            <span className={st.faint}>Cloudflare LB:</span> {a.loadBalancer.hostname} · account {a.loadBalancer.accountId.slice(0, 8)}… · PRD pool {a.loadBalancer.prdPoolId.slice(0, 8)}… · DR pool {a.loadBalancer.drPoolId.slice(0, 8)}…
+                          </div>
+                        ) : (
+                          <div className="col-span-2">
+                            <span className={st.faint}>DNS failover:</span>{' '}
+                            {a.dnsRecordName
+                              ? <>{a.dnsRecordName} → {record ? <b>{record.target}</b> : <span className={st.faint}>{zone ? 'record not found' : 'zone not synced'}</span>} {a.autoFailover ? <span className="text-emerald-500">(auto)</span> : <span className={st.faint}>(manual)</span>}</>
+                              : <span className="text-amber-500">not configured</span>}
+                          </div>
+                        )}
+                        {a.description && <div className="col-span-2"><span className={st.faint}>Notes:</span> {a.description}</div>}
+                        <div className="col-span-2"><span className={st.faint}>Monitors:</span> {appMonitors.length} ({appMonitors.filter(m => m.status === 'HEALTHY').length} healthy)
+                          {' '}<button onClick={() => navigate('/monitors')} className="text-blue-500 hover:underline cursor-pointer">manage</button>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  {isAdmin && (
-                    <div className="flex gap-1.5 shrink-0">
-                      <button onClick={() => setEditing(a)} className={`${st.btn} ${st.ghost} !px-2`}><Pencil className="w-3.5 h-3.5" /></button>
-                      <button onClick={() => remove(a)} className={`${st.btn} ${st.danger} !px-2`}><Trash2 className="w-3.5 h-3.5" /></button>
-                    </div>
-                  )}
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono [&>*]:min-w-0 [&>*]:break-words">
-                  <div><span className={st.faint}>PRD:</span> {prd ? `${prd.hostname} (${prd.ip})` : <span className="text-amber-500">not set</span>}</div>
-                  <div><span className={st.faint}>DR:</span> {dr ? `${dr.hostname} (${dr.ip})` : <span className="text-amber-500">not set</span>}</div>
-                  <div className="col-span-2 break-all"><span className={st.faint}>PRD URL:</span> {a.prdUrl || <span className={st.faint}>not set</span>}</div>
-                  <div className="col-span-2 break-all"><span className={st.faint}>DR URL:</span> {a.drUrl || <span className={st.faint}>not set</span>}</div>
-                  <div className="col-span-2"><span className={st.faint}>Routing:</span> {ROUTING_METHOD_LABELS[effectiveRoutingMethod(a)]}</div>
-                  {effectiveRoutingMethod(a) === 'cloudflare_lb' && a.loadBalancer ? (
-                    <div className="col-span-2 break-all">
-                      <span className={st.faint}>Cloudflare LB:</span> {a.loadBalancer.hostname} · account {a.loadBalancer.accountId.slice(0, 8)}… · PRD pool {a.loadBalancer.prdPoolId.slice(0, 8)}… · DR pool {a.loadBalancer.drPoolId.slice(0, 8)}…
-                    </div>
-                  ) : (
-                    <div className="col-span-2">
-                      <span className={st.faint}>DNS failover:</span>{' '}
-                      {a.dnsRecordName
-                        ? <>{a.dnsRecordName} → {record ? <b>{record.target}</b> : <span className={st.faint}>{zone ? 'record not found' : 'zone not synced'}</span>} {a.autoFailover ? <span className="text-emerald-500">(auto)</span> : <span className={st.faint}>(manual)</span>}</>
-                        : <span className="text-amber-500">not configured</span>}
-                    </div>
-                  )}
-                  <div className="col-span-2"><span className={st.faint}>Monitors:</span> {appMonitors.length} ({appMonitors.filter(m => m.status === 'HEALTHY').length} healthy)
-                    {' '}<button onClick={() => navigate('/monitors')} className="text-blue-500 hover:underline cursor-pointer">manage</button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+                );
+              })}
+            </div>
+            <Pagination page={paging.page} totalPages={paging.totalPages} total={paging.total} pageSize={paging.pageSize} onPage={paging.setPage} />
+            </>
+          )}
+        </>
       )}
     </section>
   );
