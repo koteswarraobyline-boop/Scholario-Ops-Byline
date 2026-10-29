@@ -4,7 +4,7 @@
  * (GET /api/v1/deadman/status, SSE deadman_update). Nothing here changes a heartbeat, an incident or
  * any backend state — the individual heartbeat states are shown exactly as the server computed them.
  */
-import { Application, DeadManControlPlane, HeartbeatCheck, HeartbeatKind, HeartbeatState, Incident, ServerHeartbeat } from '../types';
+import { Application, DeadManControlPlane, DeadManStatus, HeartbeatCheck, HeartbeatKind, HeartbeatState, Incident, ServerHeartbeat } from '../types';
 
 export type NodeState = 'HEALTHY' | 'DEGRADED' | 'FAILING' | 'DISCONNECTED' | 'UNKNOWN';
 export type TypeFilter = 'ALL' | HeartbeatKind;
@@ -81,20 +81,41 @@ export function filterRecords(d: DeadManControlPlane, f: HeartbeatFilters): Hear
 
 export const isDefaultView = (f: HeartbeatFilters) => f.type === 'ALL' && f.status === 'ALL';
 
-/** Totals per heartbeat type: healthy / configured (not-configured categories add nothing) */
-export function typeTotals(d: DeadManControlPlane): Record<HeartbeatKind, { healthy: number; total: number }> {
+/** Totals per heartbeat type from a record set (not-configured categories add nothing) */
+export function typeTotalsFrom(recs: HeartbeatRecord[]): Record<HeartbeatKind, { healthy: number; total: number }> {
   const out = { SERVER: { healthy: 0, total: 0 }, APPLICATION: { healthy: 0, total: 0 }, SERVICE: { healthy: 0, total: 0 }, DATABASE: { healthy: 0, total: 0 } };
-  for (const r of records(d)) {
+  for (const r of recs) {
     out[r.check.kind].total++;
     if (r.check.state === 'HEALTHY') out[r.check.kind].healthy++;
   }
   return out;
 }
 
-export function stateCounts(d: DeadManControlPlane): Record<HeartbeatState, number> {
+export function stateCountsFrom(recs: HeartbeatRecord[]): Record<HeartbeatState, number> {
   const out: Record<HeartbeatState, number> = { HEALTHY: 0, DEGRADED: 0, FAILING: 0, UNKNOWN: 0 };
-  for (const r of records(d)) out[r.check.state]++;
+  for (const r of recs) out[r.check.state]++;
   return out;
+}
+
+/**
+ * Aggregate status for the header badge / waveform from a count set (filter-scoped or full).
+ * Empty set → UNKNOWN (e.g. filters matched nothing) — never inherits overall FAILING.
+ */
+export function statusFromCounts(counts: Record<HeartbeatState, number>): DeadManStatus {
+  if (counts.FAILING > 0) return 'FAILING';
+  if (counts.DEGRADED > 0) return 'DEGRADED';
+  if (counts.HEALTHY > 0) return 'HEALTHY';
+  if (counts.UNKNOWN > 0) return 'UNKNOWN';
+  return 'UNKNOWN';
+}
+
+/** Totals per heartbeat type: healthy / configured; optional filters scope the set */
+export function typeTotals(d: DeadManControlPlane, f: HeartbeatFilters = DEFAULT_FILTERS): Record<HeartbeatKind, { healthy: number; total: number }> {
+  return typeTotalsFrom(filterRecords(d, f));
+}
+
+export function stateCounts(d: DeadManControlPlane, f: HeartbeatFilters = DEFAULT_FILTERS): Record<HeartbeatState, number> {
+  return stateCountsFrom(filterRecords(d, f));
 }
 
 /** Open incident raised for this heartbeat (same fingerprints the alert engine uses), or undefined */

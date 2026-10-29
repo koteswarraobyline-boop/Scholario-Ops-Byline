@@ -6,7 +6,7 @@ import { LevelBadge } from '../infrastructure/telemetryUi';
 import { deadManBadge, deadManLevel, fmtLatency } from '../ui/deadman';
 import {
   DEFAULT_FILTERS, GROUPS, HeartbeatFilters, NodeState, StatusFilter, TypeFilter, filterRecords, incidentFor, isDefaultView,
-  matchesServer, nodeState, serverFilterOptions, stateCounts, stateWord, typeTotals,
+  matchesServer, nodeState, serverFilterOptions, stateCountsFrom, statusFromCounts, stateWord, typeTotalsFrom,
 } from '../../lib/heartbeatView';
 
 /** Parses an ISO timestamp; returns null for '' / invalid values. */
@@ -184,11 +184,14 @@ export const DeadManPanel: React.FC<{
 }> = ({ deadMan, isDark, now, incidents = [], applications = [], initialFilters, initialExpanded = [] }) => {
   const [filters, setFilters] = useState<HeartbeatFilters>({ ...DEFAULT_FILTERS, ...initialFilters });
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(initialExpanded));
-  const level = deadManLevel(deadMan.status);
-  const healthy = deadMan.status === 'HEALTHY';
   const muted = isDark ? 'text-slate-400' : 'text-slate-500';
-  const counts = stateCounts(deadMan);
-  const totals = typeTotals(deadMan);
+  // Header badge, counts, type totals and waveform follow the active filters (not the unfiltered fleet)
+  const scoped = filterRecords(deadMan, filters);
+  const counts = stateCountsFrom(scoped);
+  const totals = typeTotalsFrom(scoped);
+  const viewStatus = deadMan.servers.length === 0 ? deadMan.status : statusFromCounts(counts);
+  const level = deadManLevel(viewStatus);
+  const healthy = viewStatus === 'HEALTHY';
   const incidentOf = (c: HeartbeatCheck, s: ServerHeartbeat) => incidentFor(c, s, incidents, applications);
   const tone = level === 'HEALTHY' ? (isDark ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-emerald-100 text-emerald-800 border border-emerald-300')
     : level === 'CRITICAL' ? (isDark ? 'bg-rose-950 text-rose-300 border border-rose-800' : 'bg-rose-100 text-rose-800 border border-rose-300')
@@ -197,7 +200,7 @@ export const DeadManPanel: React.FC<{
   const select = `px-2 py-1 rounded text-xs font-mono focus:outline-none focus:border-blue-500 border cursor-pointer ${isDark ? 'bg-[#0B0F17] border-[#1E293B] text-slate-200' : 'bg-white border-slate-300 text-slate-800'}`;
   const defaultView = isDefaultView(filters);
   const servers = deadMan.servers.filter(s => matchesServer(s, filters.server));
-  const matches = defaultView ? [] : filterRecords(deadMan, filters);
+  const matches = defaultView ? [] : scoped;
   const toggle = (id: string) => setExpanded(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   const set = (patch: Partial<HeartbeatFilters>) => setFilters(f => ({ ...f, ...patch }));
 
@@ -211,7 +214,7 @@ export const DeadManPanel: React.FC<{
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="font-semibold text-xs tracking-tight">Dead-Man Watchdog Heartbeat Stream</span>
-              <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold ${tone}`}>{deadManBadge(deadMan.status)}</span>
+              <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold ${tone}`}>{deadManBadge(viewStatus)}</span>
               {counts.FAILING > 0 && <span className="text-[10px] font-mono font-bold text-rose-500">{counts.FAILING} failing</span>}
             </div>
             <p className={`text-[11px] font-mono mt-0.5 break-words ${muted}`}>

@@ -191,6 +191,22 @@ test('heartbeat 3–8: type, status and server filters — alone and combined', 
   assert.match(failingApps, /last success 2m 0s ago/);
   assert.match(failingApps, /4 consecutive failure/);
   assert.match(failingApps, /HTTP — no response/);
+  // Header / summary follow the active filters — healthy filter must not keep overall HEARTBEAT FAILING
+  assert.match(failingApps, /HEARTBEAT FAILING/);
+  assert.match(failingApps, /1 failing/);
+  assert.match(failingApps, /1 Failing/);
+  assert.match(failingApps, /Applications<\/span> <b[^>]*>0\/1</);
+  const healthyAppsDr = html(d, { initialFilters: { type: 'APPLICATION', status: 'HEALTHY', server: 'DR' } });
+  assert.match(healthyAppsDr, /1 matching heartbeat</);
+  assert.match(healthyAppsDr, /SYNCHRONIZED/);
+  assert.equal(healthyAppsDr.includes('HEARTBEAT FAILING'), false, 'filtered healthy view must not show overall failing badge');
+  assert.equal(/\d+ failing/.test(healthyAppsDr), false, 'no failing count when the filter is healthy-only');
+  assert.match(healthyAppsDr, /1 Healthy/);
+  assert.match(healthyAppsDr, /0 Failing/);
+  assert.match(healthyAppsDr, /Applications<\/span> <b[^>]*>1\/1</);
+  const emptyFailingDb = html(d, { initialFilters: { type: 'DATABASE', status: 'FAILING' } });
+  assert.match(emptyFailingDb, /No heartbeats match these filters/);
+  assert.equal(emptyFailingDb.includes('HEARTBEAT FAILING'), false, 'empty filter must not inherit overall FAILING');
   const healthySvcPrd = filterRecords(d, { type: 'SERVICE', status: 'HEALTHY', server: 'PRD' });
   assert.deepEqual(healthySvcPrd.map(r => `${r.server.environment}:${r.check.name}`), ['PRD:nginx', 'PRD:pm2-root', 'PRD:mariadb']);
   assert.equal(filterRecords(d, { type: 'APPLICATION', status: 'FAILING', server: 'DR' }).length, 0);
@@ -199,6 +215,7 @@ test('heartbeat 3–8: type, status and server filters — alone and combined', 
   const prdOnly = html(d, { initialFilters: { server: 'PRD' } });
   assert.match(prdOnly, /PRD VPS/);
   assert.equal(prdOnly.includes('DR VPS ·'), false);
+  assert.match(prdOnly, /HEARTBEAT FAILING/, 'PRD-only still failing because ICT is down on PRD');
   assert.match(html(d, { initialFilters: { type: 'DATABASE', status: 'FAILING' } }), /No heartbeats match these filters/);
 });
 
