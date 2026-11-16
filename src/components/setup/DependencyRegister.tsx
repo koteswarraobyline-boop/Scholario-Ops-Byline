@@ -1,9 +1,22 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Network, Plus, Pencil, Trash2, X, Zap } from 'lucide-react';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
 import { api } from '../../services/api';
-import { Application, DependencyLink, RegistryComponent, RegistryImpact, RegistryKind, VpsServer } from '../../types';
+import { Application, DependencyLink, DependencyMethod, RegistryComponent, RegistryImpact, RegistryKind, RegistryPaths, VpsServer } from '../../types';
+
+const liveStatusClass = (s: string) =>
+  s === 'HEALTHY' ? 'text-emerald-500'
+    : s === 'WARNING' ? 'text-amber-500'
+      : s === 'CRITICAL' ? 'text-rose-500'
+        : s === 'MAINTENANCE' ? 'text-blue-500'
+          : 'text-slate-400';
+const liveDot = (s: string) =>
+  s === 'HEALTHY' ? 'bg-emerald-500'
+    : s === 'WARNING' ? 'bg-amber-500'
+      : s === 'CRITICAL' ? 'bg-rose-500'
+        : s === 'MAINTENANCE' ? 'bg-blue-500'
+          : 'bg-slate-500';
 
 const KINDS: Array<{ id: RegistryKind; label: string }> = [
   { id: 'APPLICATION', label: 'Application' },
@@ -15,6 +28,8 @@ const KINDS: Array<{ id: RegistryKind; label: string }> = [
   { id: 'PROVIDER', label: 'Provider' },
 ];
 const kindLabel = (k: RegistryKind) => KINDS.find(x => x.id === k)?.label ?? k;
+const METHODS: DependencyMethod[] = ['HTTP', 'API', 'DATABASE', 'EMBED', 'LINK', 'OTHER'];
+const methodLabel = (m: DependencyLink['method'] | '' | null | undefined) => (m ? m : 'not recorded');
 const TIERS: RegistryComponent['tier'][] = ['TIER_1', 'TIER_2', 'TIER_3'];
 const tierLabel = (t: string) => t.replace('TIER_', 'Tier ');
 const hasAudience = (k: RegistryKind) => k === 'APPLICATION' || k === 'BUSINESS_FEATURE';
@@ -147,6 +162,7 @@ const LinkEditor: React.FC<{ initial?: DependencyLink; fromId?: string; onDone: 
   const [toId, setToId] = useState(initial?.toId ?? '');
   const [type, setType] = useState<DependencyLink['type']>(initial?.type ?? 'HARD');
   const [featureId, setFeatureId] = useState(initial?.featureId ?? '');
+  const [method, setMethod] = useState<DependencyLink['method'] | ''>(initial?.method ?? '');
   const [notes, setNotes] = useState(initial?.notes ?? '');
   const [busy, setBusy] = useState(false);
   const features = registry.filter(c => c.kind === 'BUSINESS_FEATURE');
@@ -155,7 +171,7 @@ const LinkEditor: React.FC<{ initial?: DependencyLink; fromId?: string; onDone: 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
-    const saved = await saveDependencyLink(initial?.id ?? null, { fromId, toId, type, featureId: featureId || null, notes });
+    const saved = await saveDependencyLink(initial?.id ?? null, { fromId, toId, type, featureId: featureId || null, method: method || null, notes });
     setBusy(false);
     if (saved) onDone();
   };
@@ -167,13 +183,13 @@ const LinkEditor: React.FC<{ initial?: DependencyLink; fromId?: string; onDone: 
         <button type="button" onClick={onDone} aria-label="Close dependency editor" className={`${st.btn} ${st.ghost} !px-2`}><X className="w-3.5 h-3.5" /></button>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-        <Field text="A (depends on B)">
+        <Field text="Consumer (depends on the provider)">
           <select value={fromId} onChange={e => setFromId(e.target.value)} required className={st.input}>
             <option value="">— choose —</option>
             {registry.map(option)}
           </select>
         </Field>
-        <Field text="B (needed by A)">
+        <Field text="Provider (needed by the consumer)">
           <select value={toId} onChange={e => setToId(e.target.value)} required className={st.input}>
             <option value="">— choose —</option>
             {registry.filter(c => c.id !== fromId).map(option)}
@@ -191,7 +207,13 @@ const LinkEditor: React.FC<{ initial?: DependencyLink; fromId?: string; onDone: 
             {features.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
           </select>
         </Field>
-        <Field text="Notes" className="sm:col-span-2 lg:col-span-4">
+        <Field text="Method" hint="How the consumer reaches the provider. Blank means not recorded.">
+          <select value={method ?? ''} onChange={e => setMethod(e.target.value as DependencyLink['method'] | '')} className={st.input}>
+            <option value="">Not recorded</option>
+            {METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </Field>
+        <Field text="Business rationale" className="sm:col-span-2 lg:col-span-3">
           <input value={notes} onChange={e => setNotes(e.target.value)} maxLength={500} className={st.input} />
         </Field>
       </div>
@@ -206,15 +228,33 @@ const LinkEditor: React.FC<{ initial?: DependencyLink; fromId?: string; onDone: 
 // ─────────────────────────────────────────────────────────────────────────────
 const ImpactPanel: React.FC<{ component: RegistryComponent; impact: RegistryImpact | null; error: string | null; onClose: () => void }> = ({ component, impact, error, onClose }) => {
   const st = useStyles();
+  const [paths, setPaths] = useState<RegistryPaths | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api.getRegistryPaths(component.id).then(p => { if (!cancelled) setPaths(p); }).catch(() => { if (!cancelled) setPaths(null); });
+    return () => { cancelled = true; };
+  }, [component.id]);
+
   const stops = impact?.affected.filter(a => a.via === 'HARD') ?? [];
   const degraded = impact?.affected.filter(a => a.via === 'SOFT') ?? [];
   const item = (a: RegistryImpact['affected'][number]) => (
     <li key={a.id} className="break-words">{a.name} <span className={st.faint}>· {kindLabel(a.kind)} · {tierLabel(a.tier)}{a.userCount != null ? ` · ${a.userCount.toLocaleString()} users` : ''}</span></li>
   );
+  const pathRow = (n: RegistryPaths['upstream'][number]) => (
+    <li key={n.id} className="flex items-center gap-1.5 break-words">
+      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${liveDot(n.status)}`} />
+      <span>{n.name}</span>
+      <span className={st.faint}>· {kindLabel(n.kind)} · {n.via}</span>
+      <span className={`font-bold ${liveStatusClass(n.status)}`}>{n.status}</span>
+    </li>
+  );
   return (
     <div className={`${st.card} space-y-2 text-xs font-mono`} role="region" aria-label={`Impact of ${component.name}`}>
       <div className="flex items-center justify-between gap-2">
-        <h3 className="font-bold flex items-center gap-1.5"><Zap className="w-3.5 h-3.5 text-amber-500" /> IF {component.name.toUpperCase()} FAILS</h3>
+        <h3 className="font-bold flex items-center gap-1.5">
+          <Zap className="w-3.5 h-3.5 text-amber-500" /> IF {component.name.toUpperCase()} FAILS
+          {paths && <span className={`ml-1 text-[10px] font-bold ${liveStatusClass(paths.status)}`}>{paths.status}</span>}
+        </h3>
         <button type="button" onClick={onClose} aria-label="Close impact" className={`${st.btn} ${st.ghost} !px-2`}><X className="w-3.5 h-3.5" /></button>
       </div>
       {error ? <div className="text-rose-500">{error}</div> : !impact ? <div className={st.muted}>Working out who is affected…</div> : (
@@ -242,6 +282,22 @@ const ImpactPanel: React.FC<{ component: RegistryComponent; impact: RegistryImpa
               {degraded.length ? <ul className="list-disc ml-4">{degraded.map(item)}</ul> : <div className={st.faint}>None</div>}
             </div>
           </div>
+          {paths && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 border-t border-dashed border-slate-600/40">
+              <div>
+                <div className="font-bold text-blue-500">Upstream · depends on ({paths.upstream.length})</div>
+                {paths.upstream.length
+                  ? <ul className="space-y-0.5 mt-1">{paths.upstream.map(pathRow)}</ul>
+                  : <div className={st.faint}>No upstream dependencies</div>}
+              </div>
+              <div>
+                <div className="font-bold text-violet-400">Downstream · affects ({paths.downstream.length})</div>
+                {paths.downstream.length
+                  ? <ul className="space-y-0.5 mt-1">{paths.downstream.map(pathRow)}</ul>
+                  : <div className={st.faint}>Nothing depends on it</div>}
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
@@ -310,6 +366,10 @@ const NEW_KINDS: RegistryKind[] = ['DATABASE', 'STORAGE', 'THIRD_PARTY_API', 'PR
 
 export const DependencyRegisterSection: React.FC = () => {
   const st = useStyles();
+  useEffect(() => {
+    if (window.location.hash !== '#dependency-register-title') return;
+    document.getElementById('dependency-register-title')?.scrollIntoView({ block: 'start' });
+  }, []);
   const { applications, servers, registry, dependencyLinks, saveRegistryComponent, deleteRegistryComponent, saveDependencyLink, deleteDependencyLink } = useOps();
   const { canDo } = useAuth();
   const isAdmin = canDo('create_application');
@@ -330,6 +390,7 @@ export const DependencyRegisterSection: React.FC = () => {
     name: string;
     owner: string;
     type: DependencyLink['type'];
+    method: DependencyLink['method'] | '';
     notes: string;
     busy: boolean;
   } | null>(null);
@@ -400,7 +461,7 @@ export const DependencyRegisterSection: React.FC = () => {
       toId = recording.target;
     }
     if (toId && toId !== fromId) {
-      const saved = await saveDependencyLink(null, { fromId, toId, type: recording.type, featureId: null, notes: recording.notes });
+      const saved = await saveDependencyLink(null, { fromId, toId, type: recording.type, featureId: null, method: recording.method || null, notes: recording.notes });
       if (saved) setRecording(null);
       else setRecording(r => r && { ...r, busy: false });
       return;
@@ -425,7 +486,8 @@ export const DependencyRegisterSection: React.FC = () => {
       </div>
       <p className={`text-xs ${st.muted}`}>
         Each project is an application you already run. Record what that project depends on — another project, a server, a database, storage, a third-party API or a provider.
-        <b> Hard</b> means the project stops if that thing fails. <b>Soft</b> means the project still runs, but worse. Use <b>Impact</b> to see who is affected.
+        Direction is consumer → provider. <b> Hard</b> means the project stops if that thing fails. <b>Soft</b> means the project still runs, but worse.
+        {' '}<b>{registry.length}</b> components, <b>{dependencyLinks.length}</b> saved relationships, <b>{describedProjects.length}</b> applications with a written dependency, <b>{openProjects}</b> with nothing written down.
       </p>
 
       {applications.length > 0 && (
@@ -478,7 +540,7 @@ export const DependencyRegisterSection: React.FC = () => {
                     {isAdmin && !open && (
                       <button
                         type="button"
-                        onClick={() => setRecording({ appId: app.id, target: '', kind: 'DATABASE', name: '', owner: 'Unassigned', type: 'HARD', notes: '', busy: false })}
+                        onClick={() => setRecording({ appId: app.id, target: '', kind: 'DATABASE', name: '', owner: 'Unassigned', type: 'HARD', method: '', notes: '', busy: false })}
                         className={`${st.btn} ${st.primary}`}
                         aria-label={`Record what ${app.name} depends on`}
                       >
@@ -502,7 +564,8 @@ export const DependencyRegisterSection: React.FC = () => {
                             <span className="min-w-0 break-words">
                               <b>{name(l.toId)}</b>
                               <span className={st.faint}> · {kindLabel(target?.kind ?? 'APPLICATION')}{target?.owner ? ` · ${target.owner}` : ''}</span>{' '}
-                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${l.type === 'HARD' ? 'bg-rose-500/15 text-rose-500' : 'bg-amber-500/15 text-amber-500'}`}>{l.type === 'HARD' ? 'STOPS' : 'DEGRADED'}</span>
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${l.type === 'HARD' ? 'bg-rose-500/15 text-rose-500' : 'bg-amber-500/15 text-amber-500'}`}>{l.type === 'HARD' ? 'HARD' : 'SOFT'}</span>
+                              <span className={st.faint}> · {methodLabel(l.method)}</span>
                               {l.notes && <span className={st.faint}> — {l.notes}</span>}
                             </span>
                             {isAdmin && (confirmUnlink === l.id ? (
@@ -560,6 +623,12 @@ export const DependencyRegisterSection: React.FC = () => {
                           <option value="new">Something not listed yet…</option>
                         </select>
                       </Field>
+                      <Field text="Method" hint="Blank means not recorded">
+                        <select value={recording.method ?? ''} onChange={e => setRecording({ ...recording, method: e.target.value as DependencyLink['method'] | '' })} className={st.input}>
+                          <option value="">Not recorded</option>
+                          {METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+                        </select>
+                      </Field>
                       <Field text="If it fails" hint={recording.type === 'HARD' ? 'This project stops' : 'This project still runs, but worse'}>
                         <select value={recording.type} onChange={e => setRecording({ ...recording, type: e.target.value as DependencyLink['type'] })} className={st.input}>
                           <option value="HARD">Hard — project stops</option>
@@ -577,7 +646,7 @@ export const DependencyRegisterSection: React.FC = () => {
                           <Field text="Owner"><input value={recording.owner} onChange={e => setRecording({ ...recording, owner: e.target.value })} required maxLength={200} className={st.input} /></Field>
                         </>
                       )}
-                      <Field text="Why it is needed" className="sm:col-span-2 lg:col-span-4">
+                      <Field text="Business rationale" className="sm:col-span-2 lg:col-span-4">
                         <input value={recording.notes} onChange={e => setRecording({ ...recording, notes: e.target.value })} maxLength={500} className={st.input} placeholder="e.g. Login reads this database" />
                       </Field>
                       <div className="flex gap-2 sm:col-span-2">
@@ -677,9 +746,11 @@ export const DependencyRegisterSection: React.FC = () => {
               {dependencyLinks.map(l => (
                 <li key={l.id} className={`flex items-start justify-between gap-2 text-xs font-mono border-b last:border-b-0 pb-1.5 ${st.row}`}>
                   <div className="min-w-0 break-words">
-                    <b>{name(l.fromId)}</b> depends on <b>{name(l.toId)}</b>{' '}
+                    <b>{name(l.fromId)}</b> → <b>{name(l.toId)}</b>{' '}
+                    <span className={st.faint}>consumer → provider</span>{' '}
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${l.type === 'HARD' ? 'bg-rose-500/15 text-rose-500' : 'bg-amber-500/15 text-amber-500'}`}>{l.type}</span>
-                    {l.featureId && <span className={st.muted}> · needed by {name(l.featureId)}</span>}
+                    <span className={st.faint}> · {methodLabel(l.method)}</span>
+                    {l.featureId && <span className={st.muted}> · feature {name(l.featureId)}</span>}
                     {l.notes && <div className={`text-[10px] ${st.faint}`}>{l.notes}</div>}
                   </div>
                   {isAdmin && (confirmUnlink === l.id ? (

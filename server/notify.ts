@@ -17,6 +17,7 @@ import { isQuietTime, quietUntil } from '../src/lib/quietHours.ts';
 import { isNotificationWorker } from './leader.ts';
 import { incidentNotification, groupedNotification, IncidentNames } from './incidentMail.ts';
 import { mailSubject } from '../src/lib/incidentMail.ts';
+import { isEmail } from './validate.ts';
 
 export interface NotificationMessage {
   title: string;
@@ -631,6 +632,49 @@ const firingSent = new Set<string>();
 const timelineNote = (incident: Incident, level: Incident['timeline'][number]['level'], message: string) =>
   incident.timeline.push({ id: crypto.randomUUID(), timestamp: new Date().toISOString(), source: 'Escalation Policy', level, message });
 
+/** Impact, owners, and the outage path, appended to the channel message. Empty when none of that was recorded. */
+function noticeExtra(incident: Incident, extra?: string): string | undefined {
+  const parts: string[] = [];
+  if (extra?.trim()) parts.push(extra.trim());
+  const snap = incident.impactAnalysis;
+  if (snap && (snap.applications.length || snap.features.length || snap.usersStopped != null || snap.usersAffected != null)) {
+    const apps = snap.applications.map(a => `${a.name} (${a.via})`).join(', ');
+    const features = snap.features.map(f => `${f.name} (${f.via}${f.action ? `: ${f.action}` : ''})`).join(', ');
+    const users = snap.usersStopped != null
+      ? `Users stopped: ${snap.usersStopped}`
+      : snap.usersAffected != null ? `Users affected: ${snap.usersAffected}` : '';
+    parts.push([apps && `Applications: ${apps}`, features && `Features: ${features}`, users].filter(Boolean).join('. '));
+  }
+  if (incident.likelyCause && incident.likelyCause.confidence !== 'NONE') parts.push(incident.likelyCause.summary);
+  if (incident.notifiedOwners?.length) parts.push(`Owners: ${incident.notifiedOwners.join(', ')}`);
+  if (incident.suggestedSeverity && incident.severityReason && !incident.severityReason.startsWith('No application tier')) {
+    parts.push(`Suggested severity ${incident.suggestedSeverity}: ${incident.severityReason}`);
+  }
+  const outage = incident.outage;
+  if (outage) {
+    const probe = outage.probeIntervalSec != null ? `Probe every ${outage.probeIntervalSec}s` : 'Not a timed probe';
+    const confirmed = outage.confirmedFailures != null ? `, confirmed after ${outage.confirmedFailures} failure(s)` : '';
+    parts.push(`${probe}${confirmed}. Cloudflare origin: ${outage.cloudflareOrigin}. DR readiness: ${outage.drReadiness}. ${outage.drDetail}`);
+  }
+  const text = parts.filter(Boolean).join(' ');
+  return text || undefined;
+}
+
+/** Owner emails that are not already on an enabled email channel, sent through that channel. */
+function notifyOwnerEmails(incident: Incident, msg: NotificationMessage): void {
+  const emails = (incident.notifiedOwners ?? []).filter(isEmail);
+  if (!emails.length) return;
+  const emailChannels = db.channels.filter(c => c.enabled && c.type === 'EMAIL' && c.targetEndpoint.trim());
+  if (!emailChannels.length) return;
+  const already = new Set(emailChannels.flatMap(c => c.targetEndpoint.split(/[,;\s]+/).map(s => s.toLowerCase()).filter(Boolean)));
+  const extra = [...new Set(emails.map(e => e.toLowerCase()))].filter(e => !already.has(e));
+  if (!extra.length) return;
+  const channel = { ...emailChannels[0], id: `${emailChannels[0].id}:owners`, name: `${emailChannels[0].name} (application owners)`, targetEndpoint: extra.join(', ') };
+  void deliverAndRecord(channel, msg).then(r => {
+    if (!r.ok) log.error('notify', `owner email for ${incident.id} failed: ${r.error}`);
+  });
+}
+
 /**
  * opts.afterDelay: the engine sends a FIRING that was held back by the policy's initial delay.
  * Returns true when a notification was handed to at least one channel.
@@ -710,8 +754,12 @@ export function notifyIncident(incident: Incident, status: 'FIRING' | 'RESOLVED'
   else firingSent.delete(incident.id);
   // Bounded: forget cooldown keys older than a day
   if (lastSent.size > 5000) for (const [k, t] of lastSent) if (now - t > 86_400_000) lastSent.delete(k);
-  const msg = incidentNotification(incident, status, incidentNames(incident), extra, incidentLink(incident.id));
+  const msg = incidentNotification(incident, status, incidentNames(incident), noticeExtra(incident, extra), incidentLink(incident.id));
   for (const ch of channels) void sendToChannel(ch, msg);
+  if (status === 'FIRING' && !isReminderMsg && incident.notifiedOwners?.length) {
+    notifyOwnerEmails(incident, msg);
+    timelineNote(incident, 'INFO', `Application owners included on this notification: ${incident.notifiedOwners.join(', ')}`);
+  }
   return true;
 }
 
@@ -753,10 +801,11 @@ export function escalateStep(incident: Incident, steps: EscalationStep[], index:
   const stepText = steps.length > 1 ? ` (step ${index + 1} of ${steps.length})` : '';
   const msg = incidentNotification(
     incident, 'ESCALATED', incidentNames(incident),
-    `Not acknowledged after ${minutes} min — escalated${team ? ` to ${team}` : ''}${stepText}.`,
+    noticeExtra(incident, `Not acknowledged after ${minutes} min — escalated${team ? ` to ${team}` : ''}${stepText}.`),
     incidentLink(incident.id),
   );
   for (const ch of chosen) void sendToChannel(ch, msg);
+  if (incident.notifiedOwners?.length) notifyOwnerEmails(incident, msg);
   const emailOnCall = onCall.length > 0 && !smtpConfigProblem();
   if (emailOnCall) {
     const direct = { id: 'on-call', name: 'On-call users', type: 'EMAIL', targetEndpoint: onCall.map(u => u.email).join(', '), enabled: true } as CommunicationChannel;

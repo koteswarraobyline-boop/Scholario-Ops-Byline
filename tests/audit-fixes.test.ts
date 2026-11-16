@@ -167,6 +167,44 @@ test('auto-failover: a failed attempt is not retried on every check', async () =
   assert.equal(app.failoverState, 'PRIMARY_ACTIVE');
 });
 
+test('auto-failover is opt-in for DNS records, and a Load Balancer application is never switched', async () => {
+  const off = mkApp(prd.id, dr.id, { autoFailover: false, dnsRecordName: 'optout.example.com' });
+  db.applications.push(off);
+  const p = mkMonitor(off.id, 'PRD', 'HTTPS'); p.status = 'CRITICAL'; p.consecutiveFailures = 3;
+  const d = mkMonitor(off.id, 'DR', 'HTTPS'); d.status = 'HEALTHY'; d.lastCheck = new Date().toISOString(); d.consecutiveFailures = 0;
+  db.monitors.push(p, d);
+  records = [{ id: 'opt1', type: 'A', name: 'optout.example.com', content: prd.ip }];
+  await evaluateAutoFailover(p);
+  assert.equal(off.failoverState, 'PRIMARY_ACTIVE');
+  assert.equal(records[0].content, prd.ip);
+  assert.equal(failoverAudits(off.id).length, 0);
+
+  const back = mkApp(prd.id, dr.id, { autoFailover: true, failoverState: 'DR_ACTIVE', dnsRecordName: 'failback.example.com' });
+  db.applications.push(back);
+  const bp = mkMonitor(back.id, 'PRD', 'HTTPS'); bp.status = 'CRITICAL'; bp.consecutiveFailures = 3;
+  const bd = mkMonitor(back.id, 'DR', 'HTTPS'); bd.status = 'HEALTHY'; bd.lastCheck = new Date().toISOString(); bd.consecutiveFailures = 0;
+  db.monitors.push(bp, bd);
+  records = [{ id: 'fb1', type: 'A', name: 'failback.example.com', content: dr.ip }];
+  await evaluateAutoFailover(bp);
+  assert.equal(back.failoverState, 'DR_ACTIVE', 'failback stays manual');
+  assert.equal(records[0].content, dr.ip);
+
+  const lb = mkApp(prd.id, dr.id, {
+    autoFailover: true,
+    dnsRecordName: 'lb.example.com',
+    loadBalancer: { accountId: 'a'.repeat(32), hostname: 'lb.example.com', prdPoolId: 'b'.repeat(32), drPoolId: 'c'.repeat(32) },
+  });
+  db.applications.push(lb);
+  const lp = mkMonitor(lb.id, 'PRD', 'HTTPS'); lp.status = 'CRITICAL'; lp.consecutiveFailures = 3;
+  const ld = mkMonitor(lb.id, 'DR', 'HTTPS'); ld.status = 'HEALTHY'; ld.lastCheck = new Date().toISOString(); ld.consecutiveFailures = 0;
+  db.monitors.push(lp, ld);
+  records = [{ id: 'lb1', type: 'A', name: 'lb.example.com', content: prd.ip }];
+  await evaluateAutoFailover(lp);
+  assert.equal(lb.failoverState, 'PRIMARY_ACTIVE');
+  assert.equal(records[0].content, prd.ip);
+  assert.equal(failoverAudits(lb.id).filter(a => a.action.startsWith('FAILOVER_TO_')).length, 0);
+});
+
 test('DNS switch is all-or-nothing: dual-stack refused; a partial failure restores the switched records', async () => {
   records = [{ id: 'a1', type: 'A', name: 'ds.example.com', content: '198.51.100.1' }, { id: 'v6', type: 'AAAA', name: 'ds.example.com', content: '2001:db8::1' }];
   await assert.rejects(switchDnsRecord('example.com', 'ds.example.com', '198.51.100.2'), /also has AAAA/);

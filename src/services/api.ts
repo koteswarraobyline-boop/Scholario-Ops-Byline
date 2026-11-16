@@ -3,9 +3,11 @@ import {
   CommunicationChannel, EscalationPolicy, MaintenanceWindow, Runbook, Deployment, BackupRecord,
   IntegrationStatus, HttpProbeResult, TcpProbeResult, ServerMetricPoint, DrReadinessItem, OpsUser,
   LoadBalancerState, FailoverPreflight, DrOverall, CheckRecord, BackupStatus, DatabaseHealth, DatabaseReport, HostingerInfo,
+  GoLivePreview, GoLiveRun,
   ProviderConnectionView, ProviderInstanceView,
   ReliabilityInsights, OpsBackupHealth, NotificationDelivery, NotificationDeliveryStats, NotificationDeliveryDetail, NotificationHealth,
   SmtpCheckResult,   RegistryComponent, DependencyLink, RegistryImpact,
+  TrackedCredential, CredentialExpiryState, CredentialKind, Environment, OperationalStatus,
   ResourceMeasurement, ResourceView, QuotaWindow,
 } from '../types';
 
@@ -44,6 +46,42 @@ export interface ApiResponse<T> {
   success: boolean;
   data: T;
   message?: string;
+}
+
+export interface CredentialInput {
+  name: string;
+  kind: CredentialKind;
+  provider: string;
+  owner: string;
+  environment: Environment;
+  expiresAt: string;
+  applicationId?: string | null;
+  notes?: string;
+}
+
+export interface CredentialRow extends TrackedCredential {
+  daysLeft: number | null;
+  state: CredentialExpiryState;
+  evaluated?: { opened: number; resolved: number };
+}
+
+export interface CertificateRow {
+  monitorId: string;
+  name: string;
+  target: string;
+  applicationId: string;
+  environment: Environment;
+  status: OperationalStatus;
+  daysLeft: number | null;
+  validTo: string | null;
+  state: CredentialExpiryState | 'UNKNOWN';
+  detail: string;
+}
+
+export interface CredentialCatalogue {
+  credentials: CredentialRow[];
+  certificates: CertificateRow[];
+  warnDays: number;
 }
 
 export interface PaginatedApiResponse<T> {
@@ -88,6 +126,8 @@ export interface BootstrapData {
   /** Absent until the server that added Worker monitoring is deployed. */
   workerMonitor?: import('../types').WorkerMonitorState;
   deadMan: DeadManControlPlane;
+  /** Outbound Ops self-heartbeat. Absent on older servers. */
+  externalHeartbeat?: import('../types').ExternalHeartbeat;
   integrations: IntegrationStatus;
   summary: SystemSummary;
 }
@@ -314,7 +354,10 @@ export const api = {
   getFailoverPreflight: (id: string, target: 'DR' | 'PRIMARY') =>
     unwrap(api.get<ApiResponse<FailoverPreflight>>(`/api/v1/applications/${encodeURIComponent(id)}/failover/preflight?target=${target}`)),
   recordFailoverDecision: (id: string, target: 'DR' | 'PRIMARY', decision: 'APPROVED' | 'REJECTED', reason: string) =>
-    unwrap(api.post<ApiResponse<{ recorded: boolean }>>(`/api/v1/applications/${encodeURIComponent(id)}/failover/decision`, { target, decision, reason })),
+    unwrap(api.post<ApiResponse<{ recorded: boolean; decision: 'APPROVED' | 'REJECTED'; preflight: FailoverPreflight }>>(`/api/v1/applications/${encodeURIComponent(id)}/failover/decision`, { target, decision, reason })),
+  getGoLive: (id: string) => unwrap(api.get<ApiResponse<GoLivePreview>>(`/api/v1/applications/${encodeURIComponent(id)}/go-live`)),
+  recordGoLive: (id: string, defect?: string) =>
+    unwrap(api.post<ApiResponse<{ recorded: boolean; run: GoLiveRun; preview: GoLivePreview }>>(`/api/v1/applications/${encodeURIComponent(id)}/go-live`, defect ? { defect } : {})),
 
   // ── Monitors ────────────────────────────────────────────────────────────────
   getMonitors: () => unwrap(api.get<ApiResponse<Monitor[]>>('/api/v1/monitors')),
@@ -336,14 +379,25 @@ export const api = {
 
   // ── Incidents ───────────────────────────────────────────────────────────────
   getIncidents: () => api.get<PaginatedApiResponse<Incident>>('/api/v1/incidents?pageSize=500').then(r => r.data),
-  createIncident: (data: { title: string; severity: string; applicationId?: string; environment?: string; description?: string }) =>
+  createIncident: (data: { title: string; severity: string; applicationId?: string; environment?: string; description?: string; rootCauseCategory?: string }) =>
     unwrap(api.post<ApiResponse<Incident>>('/api/v1/incidents', data)),
   acknowledgeIncident: (id: string) => unwrap(api.post<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/acknowledge`)),
   updateIncidentStatus: (id: string, status: string) => unwrap(api.patch<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/status`, { status })),
   updateIncidentSeverity: (id: string, severity: string) => unwrap(api.patch<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/severity`, { severity })),
   assignIncident: (id: string, owner: string) => unwrap(api.patch<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/assign`, { owner })),
   addIncidentNote: (id: string, content: string) => unwrap(api.post<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/notes`, { content })),
-  resolveIncident: (id: string, resolution?: string) => unwrap(api.post<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/resolve`, { resolution })),
+  resolveIncident: (id: string, resolution?: string, force?: boolean) =>
+    unwrap(api.post<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/resolve`, { resolution, force: force || undefined })),
+  updateIncidentRootCause: (id: string, data: { rootCauseCategory: string; description?: string }) =>
+    unwrap(api.patch<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/root-cause`, data)),
+  updateIncidentRunbook: (id: string, runbookId: string | null) =>
+    unwrap(api.patch<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/runbook`, { runbookId })),
+  setIncidentFixSteps: (id: string, steps: Array<string | { id?: string; text: string }>) =>
+    unwrap(api.put<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/fix-steps`, { steps })),
+  toggleIncidentFixStep: (id: string, stepId: string) =>
+    unwrap(api.post<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/fix-steps/${encodeURIComponent(stepId)}/toggle`)),
+  refreshIncidentImpact: (id: string) =>
+    unwrap(api.post<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/refresh-impact`)),
 
   // ── Notifications ───────────────────────────────────────────────────────────
   getChannels: () => unwrap(api.get<ApiResponse<CommunicationChannel[]>>('/api/v1/channels')),
@@ -361,6 +415,11 @@ export const api = {
   completeMaintenance: (id: string) => unwrap(api.post<ApiResponse<MaintenanceWindow>>(`/api/v1/maintenance/${encodeURIComponent(id)}/complete`)),
   deleteMaintenance: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/maintenance/${encodeURIComponent(id)}`)),
   getRunbooks: () => unwrap(api.get<ApiResponse<Runbook[]>>('/api/v1/runbooks')),
+  getCredentials: () => unwrap(api.get<ApiResponse<CredentialCatalogue>>('/api/v1/credentials')),
+  createCredential: (data: CredentialInput) => unwrap(api.post<ApiResponse<CredentialRow>>('/api/v1/credentials', data)),
+  updateCredential: (id: string, data: Partial<CredentialInput>) => unwrap(api.patch<ApiResponse<CredentialRow>>(`/api/v1/credentials/${encodeURIComponent(id)}`, data)),
+  deleteCredential: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/credentials/${encodeURIComponent(id)}`)),
+  evaluateCredentials: () => unwrap(api.post<ApiResponse<{ opened: number; resolved: number }>>('/api/v1/credentials/evaluate')),
   createRunbook: (data: Partial<Runbook>) => unwrap(api.post<ApiResponse<Runbook>>('/api/v1/runbooks', data)),
   updateRunbook: (id: string, data: Partial<Runbook>) => unwrap(api.patch<ApiResponse<Runbook>>(`/api/v1/runbooks/${encodeURIComponent(id)}`, data)),
   deleteRunbook: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/runbooks/${encodeURIComponent(id)}`)),
@@ -370,12 +429,22 @@ export const api = {
   // ── Dependency register ─────────────────────────────────────────────────────
   getRegistry: () => unwrap(api.get<ApiResponse<{ components: RegistryComponent[]; links: DependencyLink[] }>>('/api/v1/registry')),
   getRegistryImpact: (id: string) => unwrap(api.get<ApiResponse<RegistryImpact>>(`/api/v1/registry/${encodeURIComponent(id)}/impact`)),
+  getRegistryPaths: (id: string) => unwrap(api.get<ApiResponse<import('../types').RegistryPaths>>(`/api/v1/registry/${encodeURIComponent(id)}/paths`)),
+  getImpactPreview: (q: { applicationId?: string; serverId?: string; registryId?: string; environment?: string }) => {
+    const p = new URLSearchParams();
+    if (q.applicationId) p.set('applicationId', q.applicationId);
+    if (q.serverId) p.set('serverId', q.serverId);
+    if (q.registryId) p.set('registryId', q.registryId);
+    if (q.environment) p.set('environment', q.environment);
+    return unwrap(api.get<ApiResponse<import('../types').ImpactPreview>>(`/api/v1/impact/preview?${p}`));
+  },
   createRegistryComponent: (data: Partial<RegistryComponent>) => unwrap(api.post<ApiResponse<RegistryComponent>>('/api/v1/registry', data)),
   updateRegistryComponent: (id: string, data: Partial<RegistryComponent>) => unwrap(api.patch<ApiResponse<RegistryComponent>>(`/api/v1/registry/${encodeURIComponent(id)}`, data)),
   deleteRegistryComponent: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean; linksRemoved: number }>>(`/api/v1/registry/${encodeURIComponent(id)}`)),
 
   getResources: (query = '') => api.get<PaginatedApiResponse<ResourceView>>(`/api/v1/resources${query}`),
   getResource: (id: string) => unwrap(api.get<ApiResponse<{ resource: ResourceView; alerts: Incident[]; measurements: ResourceMeasurement[] }>>(`/api/v1/resources/${encodeURIComponent(id)}`)),
+  getExternalHeartbeat: () => unwrap(api.get<ApiResponse<import('../types').ExternalHeartbeat>>('/api/v1/external-heartbeat')),
   createResource: (data: Partial<ResourceView>) => unwrap(api.post<ApiResponse<ResourceView>>('/api/v1/resources', data)),
   updateResource: (id: string, data: Partial<ResourceView>) => unwrap(api.patch<ApiResponse<ResourceView>>(`/api/v1/resources/${encodeURIComponent(id)}`, data)),
   deleteResource: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/resources/${encodeURIComponent(id)}`)),

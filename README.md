@@ -72,7 +72,7 @@ See **[DEPLOYMENT.md](DEPLOYMENT.md)** for the install guide, and **[docs/PRODUC
 | `CLOUDFLARE_API_TOKEN` | Read-only ICT monitoring: Account › Load Balancing: Monitors and Pools › Read, Zone › Load Balancers › Read and Zone › Zone › Read. DNS:Edit is only needed for DNS-record failover of other apps. |
 | `HOSTINGER_API_TOKEN` | Optional. Imports plan, CPU, RAM and state for registered servers. |
 | `SMTP_*` | Email notification channels. |
-| `DEADMAN_HEARTBEAT_URL` | Deprecated and ignored. The dead-man heartbeat now covers the monitored servers, applications, services and databases from the agents' reports — no external watchdog. |
+| `DEADMAN_HEARTBEAT_URL` | Optional. Outbound heartbeat URL (healthchecks.io, UptimeRobot, …). Ops pings it every `DEADMAN_INTERVAL_SEC` (default 60) so an external watchdog alerts within about `DEADMAN_TOLERANCE_SEC` (default 180) if Ops itself stops. Status is exposed at `GET /api/v1/external-heartbeat` (URL never returned). Separate from the infrastructure dead-man stream built from agent reports. |
 | `DEPLOY_REPORT_TOKEN` | Lets CI report deployments to `POST /api/v1/deployments/report`. |
 
 ## Scripts

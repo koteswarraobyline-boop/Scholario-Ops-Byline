@@ -19,6 +19,7 @@ import {
 import {
   HTTP_TYPES, TCP_TYPES, INFRA_TYPES, PUSH_TYPES, runMonitorNow, registerNewMonitor, recomputeDerived,
   ingestAgentReport, publicServer, performFailover, FailoverError, nextIncidentId, isFailoverInProgress, closeIncidentsReferencing, forgetMonitor, forgetServer, AgentReport, closeMonitorIncident, noteIngestRejection,
+  externalHeartbeat,
 } from './engine.ts';
 import { parseRoutingUpdate } from './routingConfig.ts';
 import { authorizeWorkerEvent, eventsFor, recordWorkerEvent, workerMonitorState } from './workers.ts';
@@ -39,7 +40,8 @@ import { agentHealth, serverHealth } from './telemetryHealth.ts';
 import { infraHeartbeat } from './heartbeat.ts';
 import { lbState, syncLoadBalancers, PERMISSION_HINT } from './loadbalancer.ts';
 import { syncAppUrlMonitors, DEFAULT_HEALTH_CHECK } from './appMonitors.ts';
-import { readiness, failoverPreflight, applicationAvailability } from './readiness.ts';
+import { readiness, failoverPreflight, latestFailoverDecision, applicationAvailability } from './readiness.ts';
+import { evaluateGoLive, recordGoLive } from './golive.ts';
 import { isMockIncident, MOCK_INCIDENT_MONITOR_ID } from '../src/lib/mockIncident.ts';
 import { allowMockIncidentTest, runMockIncidentAlert, closeMockIncident, mockIncidentStatus } from './mockIncident.ts';
 import { readChecks } from './history.ts';
@@ -53,11 +55,17 @@ import { secretsKeyStatus, SecretsKeyMissingError, isSealed, keyFingerprintMisma
 import { quietHoursProblem, type QuietHours } from '../src/lib/quietHours.ts';
 import { listDeliveries, getDelivery, getDeliveryForUser, deliveryChain, deliveryStats, unreadCounts, setRead, markAllRead, deliveryHealth, pendingLogWrites } from './deliveries.ts';
 import { workerState } from './leader.ts';
-import { notificationStatus, evaluateResourceAlerts } from './alerts.ts';
+import { notificationStatus, evaluateResourceAlerts, evaluateResourceForecastAlerts, evaluateCredentialExpiry, resolveAlert } from './alerts.ts';
 import { buildComponent, buildLink, removeComponent, forgetRegistryReferences, registryImpact, RegistryConflict, kindLabel } from './registry.ts';
+import {
+  enrichNewIncident, buildImpactSnapshot, previewImpact, registryPaths, newFixStep, ROOT_CAUSE_CATEGORIES,
+} from './incidentImpact.ts';
 import { applyConnectorReport, applyMeasurement, applyServerTelemetry, buildResource, detachServerResources, MeasurementConflict, presentResource, pullUsageEndpoints, syncServerPlan, unlinkApplicationResources } from './resources.ts';
 import { readResourceMeasurements, recordResourceMeasurement } from './resourceHistory.ts';
+import { forecastTimeToFull } from '../src/lib/resources.ts';
 import { log } from './logger.ts';
+import type { RootCauseCategory, IncidentFixStep, TrackedCredential, CredentialKind } from '../src/types/index.ts';
+import { daysUntil, expiryState } from '../src/lib/credentialExpiry.ts';
 
 const VERSION = '3.0.0';
 const startedAt = Date.now();
@@ -150,6 +158,17 @@ function integrationStatus(req: Request): IntegrationStatus {
       /** Which setting is missing or invalid (names only) */
       problem: smtpConfigProblem(),
     },
+    // Never the URL itself — only whether it is set, the host name and timing
+    externalHeartbeat: {
+      configured: externalHeartbeat.configured,
+      status: externalHeartbeat.status,
+      configError: externalHeartbeat.configError,
+      intervalSec: externalHeartbeat.intervalSec,
+      toleranceSec: externalHeartbeat.toleranceSec,
+      nodeLocation: externalHeartbeat.nodeLocation,
+      lastSuccessAt: externalHeartbeat.lastSuccessAt,
+      workerRunning: externalHeartbeat.workerRunning,
+    },
     publicUrl: publicBaseUrl(req),
     publicUrlConfigured: Boolean(config.publicUrl),
   };
@@ -195,8 +214,11 @@ function summary() {
     // Dead-man heartbeat of the monitored infrastructure; "last heartbeat" = the most recent agent report
     deadManStatus: heartbeat.status,
     deadManLastHeartbeat: db.servers.map(x => x.lastSeen).filter(Boolean).sort().at(-1) ?? null,
-    overallHealth: critical.length > 0 || criticalApps > 0 || heartbeat.status === 'FAILING' ? 'CRITICAL'
-      : open.length > 0 || unhealthyApps > 0 ? 'WARNING'
+    // Outbound Ops self-heartbeat (external watchdog). FAILING here means our pings are not landing.
+    externalHeartbeatStatus: externalHeartbeat.status,
+    externalHeartbeatLastSuccess: externalHeartbeat.lastSuccessAt,
+    overallHealth: critical.length > 0 || criticalApps > 0 || heartbeat.status === 'FAILING' || externalHeartbeat.status === 'FAILING' ? 'CRITICAL'
+      : open.length > 0 || unhealthyApps > 0 || externalHeartbeat.status === 'DEGRADED' ? 'WARNING'
         : db.applications.length === 0 || unknownApps > 0 ? 'UNKNOWN' : 'OPERATIONAL',
     visibilityGaps,
     generatedAt: nowIso(),
@@ -903,6 +925,7 @@ export function buildRouter(): Router {
       loadBalancer: lbState,
       workerMonitor: workerMonitorState(),
       deadMan: infraHeartbeat(),
+      externalHeartbeat,
       integrations: integrationStatus(req),
       summary: summary(),
     });
@@ -913,6 +936,9 @@ export function buildRouter(): Router {
   // Heartbeat of the monitored servers / applications / services / databases (same data under both names)
   r.get('/v1/deadman/status', (_req, res) => { ok(res, infraHeartbeat()); });
   r.get('/v1/health/heartbeats', (_req, res) => { ok(res, infraHeartbeat()); });
+  // Outbound external heartbeat of Scholario Ops itself (URL never included)
+  r.get('/v1/external-heartbeat', (_req, res) => { ok(res, externalHeartbeat); });
+  r.get('/v1/deadman/external', (_req, res) => { ok(res, externalHeartbeat); });
 
   // ── Servers ────────────────────────────────────────────────────────────────
   // Capacity forecasts, SLO error budgets and flapping monitors (computed from stored data only)
@@ -941,9 +967,14 @@ export function buildRouter(): Router {
   r.get('/v1/resources/:id', h(async (req, res) => {
     const row = db.resources.find(x => x.id === req.params.id);
     if (!row) return fail(res, 404, 'Resource not found');
-    const alerts = db.incidents.filter(i => i.fingerprint === `resource-limit:${row.id}`).slice(0, 20);
-    const measurements = await readResourceMeasurements(row.id, 100);
-    ok(res, { resource: presentResource(row), alerts, measurements });
+    const alerts = db.incidents.filter(i => i.fingerprint === `resource-limit:${row.id}` || i.fingerprint === `resource-forecast:${row.id}`).slice(0, 20);
+    // Enough history for a trend (oldest first for the forecast; API returns newest first)
+    const measurements = await readResourceMeasurements(row.id, 500);
+    const limit = row.unlimited ? null : row.capacity;
+    const forecast = limit !== null
+      ? forecastTimeToFull([...measurements].reverse().map(m => ({ measuredAt: m.measuredAt, usage: m.usage })), limit)
+      : null;
+    ok(res, { resource: { ...presentResource(row), forecast }, alerts, measurements: measurements.slice(0, 100) });
   }));
   r.post('/v1/resources', requireRole('operator'), h((req, res) => {
     const row = buildResource(req.body);
@@ -982,17 +1013,22 @@ export function buildRouter(): Router {
     audit(operatorName(req), 'RESOURCE_DELETED', 'CAPACITY', row.id, row.name);
     ok(res, { deleted: true });
   }));
-  r.post('/v1/resources/:id/measure', requireRole('operator'), h((req, res) => {
+  r.post('/v1/resources/:id/measure', requireRole('operator'), h(async (req, res) => {
     const row = db.resources.find(x => x.id === req.params.id);
     if (!row) return fail(res, 404, 'Resource not found');
     const result = applyMeasurement(row, req.body);
     if (!result.idempotent) {
       persist();
       audit(operatorName(req), 'RESOURCE_MEASURED', 'CAPACITY', row.id, `${row.name}: ${row.usage} ${row.unit}`);
+      recordResourceMeasurement(row);
     }
     evaluateResourceAlerts();
-    if (!result.idempotent) recordResourceMeasurement(row);
-    ok(res, { ...presentResource(row), idempotent: result.idempotent });
+    const history = await readResourceMeasurements(row.id, 500);
+    const limit = row.unlimited ? null : row.capacity;
+    const forecast = limit !== null
+      ? forecastTimeToFull([...history].reverse().map(m => ({ measuredAt: m.measuredAt, usage: m.usage })), limit)
+      : null;
+    ok(res, { ...presentResource(row), idempotent: result.idempotent, forecast });
   }));
   r.post('/v1/resources/connectors', requireRole('operator'), h(async (req, res) => {
     const report = body(req).endpoints !== undefined ? await pullUsageEndpoints(req.body) : req.body;
@@ -1003,8 +1039,9 @@ export function buildRouter(): Router {
     audit(operatorName(req), 'RESOURCE_MEASURED', 'CAPACITY', rows[0]?.id ?? 'connectors', rows.map(r => `${r.kind} ${r.name}: ${r.usage} ${r.unit}`).join('; '));
     ok(res, rows.map(r => presentResource(r)));
   }));
-  r.post('/v1/resources/evaluate', requireRole('operator'), h((_req, res) => {
+  r.post('/v1/resources/evaluate', requireRole('operator'), h(async (_req, res) => {
     evaluateResourceAlerts();
+    await evaluateResourceForecastAlerts();
     ok(res, db.resources.map(r => presentResource(r)));
   }));
 
@@ -1121,7 +1158,20 @@ export function buildRouter(): Router {
     // Recording a decision never changes traffic: for LB-managed apps the switch is made in Cloudflare by the operator
     audit(operatorName(req), decision === 'APPROVED' ? 'FAILOVER_APPROVED' : 'FAILOVER_REJECTED', 'FAILOVER', a.id,
       `${a.name} → ${target} ${decision}. Reason: ${reason}. Pre-flight: ${failing.length ? 'FAILING ' + failing.join(', ') : 'no failing checks'}; target readiness ${pf.drOverall}. Mode: ${pf.mode}`);
+    pf.lastDecision = latestFailoverDecision(a.id, target);
     ok(res, { recorded: true, decision, preflight: pf });
+  }));
+  r.get('/v1/applications/:id/go-live', (req, res) => {
+    const a = db.applications.find(x => x.id === req.params.id);
+    if (!a) return fail(res, 404, 'Application not found');
+    ok(res, evaluateGoLive(a));
+  });
+  r.post('/v1/applications/:id/go-live', requireRole('operator'), h((req, res) => {
+    const a = db.applications.find(x => x.id === req.params.id);
+    if (!a) return fail(res, 404, 'Application not found');
+    const defect = optStr(body(req), 'defect', 'Defect', 2000);
+    const run = recordGoLive(a, operatorName(req), defect);
+    ok(res, { recorded: true, run, preview: evaluateGoLive(a) });
   }));
   r.post('/v1/applications', requireRole('it_administrator'), h((req, res) => {
     const app = buildApplication(req);
@@ -1168,6 +1218,7 @@ export function buildRouter(): Router {
     db.monitors = db.monitors.filter(m => m.applicationId !== app.id);
     for (const m of removed) { delete db.monitorBuckets[m.id]; forgetMonitor(m.id); }
     db.applications = db.applications.filter(a => a.id !== app.id);
+    for (const c of db.credentials) if (c.applicationId === app.id) c.applicationId = undefined;
     closeIncidentsReferencing([app.id, ...removed.map(m => m.id)], operatorName(req), `application ${app.name} was deleted`);
     for (const s of db.servers) if (s.applicationId === app.id) s.applicationId = '';
     db.workerEvents = db.workerEvents.filter(e => e.applicationId !== app.id);
@@ -1308,6 +1359,89 @@ export function buildRouter(): Router {
     ok(res, db.monitors.map(m => monitorView(req, m)));
   }));
 
+  // ── Expiring credentials (keys, tokens, subscriptions) and TLS certificates ─
+  const CREDENTIAL_KINDS = ['API_KEY', 'TOKEN', 'SUBSCRIPTION'] as const;
+  const SECRET_FIELDS = ['secret', 'apiKey', 'api_key', 'token', 'password', 'value', 'key', 'credential'];
+  const credentialView = (c: TrackedCredential) => ({
+    ...c,
+    daysLeft: daysUntil(c.expiresAt),
+    state: expiryState(c.expiresAt, config.credentialExpiryWarnDays),
+  });
+  const certificateViews = () => db.monitors.filter(m => m.type === 'SSL').map(m => ({
+    monitorId: m.id,
+    name: m.name,
+    target: m.target,
+    applicationId: m.applicationId,
+    environment: m.environment,
+    status: m.status,
+    daysLeft: m.certificateDaysLeft ?? null,
+    validTo: m.certificateValidTo ?? null,
+    state: m.certificateDaysLeft == null ? 'UNKNOWN' : expiryState(m.certificateValidTo || new Date(Date.now() + m.certificateDaysLeft * 86_400_000).toISOString(), config.sslExpiryWarnDays),
+    detail: m.history[0]?.detail ?? '',
+  }));
+  function buildCredential(b: Record<string, unknown>, existing?: TrackedCredential): TrackedCredential {
+    for (const field of SECRET_FIELDS) {
+      if (b[field] !== undefined && b[field] !== null && b[field] !== '') {
+        throw new ValidationError('Do not store the secret. Record only the name, provider, owner and expiry date.');
+      }
+    }
+    const name = existing ? (optStr(b, 'name', 'Name', 120) ?? existing.name) : reqStr(b, 'name', 'Name', 120);
+    const kind = (existing ? (optOneOf(b, 'kind', 'Kind', CREDENTIAL_KINDS) ?? existing.kind) : oneOf(b, 'kind', 'Kind', CREDENTIAL_KINDS)) as CredentialKind;
+    const provider = existing ? (optStr(b, 'provider', 'Provider', 80) ?? existing.provider) : reqStr(b, 'provider', 'Provider', 80);
+    const owner = existing ? (optStr(b, 'owner', 'Owner', 120) ?? existing.owner) : reqStr(b, 'owner', 'Owner', 120);
+    const expiresAt = b.expiresAt !== undefined ? optDate(b, 'expiresAt', 'Expiry') : existing?.expiresAt;
+    if (!expiresAt) throw new ValidationError('Expiry is required');
+    let applicationId = existing?.applicationId;
+    if (b.applicationId !== undefined) {
+      applicationId = b.applicationId === null || b.applicationId === '' ? undefined : optStr(b, 'applicationId', 'Application', 64);
+    }
+    if (applicationId && !db.applications.some(a => a.id === applicationId)) throw new ValidationError('Selected application does not exist');
+    const now = new Date().toISOString();
+    return {
+      id: existing?.id ?? crypto.randomUUID(),
+      name, kind, provider, owner, expiresAt,
+      applicationId,
+      environment: optOneOf(b, 'environment', 'Environment', ENVS) ?? existing?.environment ?? 'PRD',
+      notes: b.notes !== undefined ? (optStr(b, 'notes', 'Notes', 500) ?? '') : (existing?.notes ?? ''),
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+  }
+  r.get('/v1/credentials', (_req, res) => {
+    ok(res, { credentials: db.credentials.map(credentialView), certificates: certificateViews(), warnDays: config.credentialExpiryWarnDays });
+  });
+  r.post('/v1/credentials', requireRole('it_administrator'), h((req, res) => {
+    const row = buildCredential(body(req));
+    db.credentials.push(row);
+    persist();
+    audit(operatorName(req), 'CREDENTIAL_CREATED', 'CREDENTIAL', row.id, `${row.kind} ${row.name} (${row.provider}) expires ${row.expiresAt}; owner ${row.owner}`);
+    const evaluated = evaluateCredentialExpiry();
+    ok(res, { ...credentialView(row), evaluated }, 201);
+  }));
+  r.patch('/v1/credentials/:id', requireRole('it_administrator'), h((req, res) => {
+    const idx = db.credentials.findIndex(c => c.id === req.params.id);
+    if (idx === -1) return fail(res, 404, 'Credential not found');
+    const row = buildCredential(body(req), db.credentials[idx]);
+    db.credentials[idx] = row;
+    persist();
+    audit(operatorName(req), 'CREDENTIAL_UPDATED', 'CREDENTIAL', row.id, `${row.name} expires ${row.expiresAt}`);
+    const evaluated = evaluateCredentialExpiry();
+    ok(res, { ...credentialView(row), evaluated });
+  }));
+  r.delete('/v1/credentials/:id', requireRole('it_administrator'), (req, res) => {
+    const row = db.credentials.find(c => c.id === req.params.id);
+    if (!row) return fail(res, 404, 'Credential not found');
+    db.credentials = db.credentials.filter(c => c.id !== row.id);
+    resolveAlert(`credential-expiry:${row.id}`, 'Credential Monitor', `${row.name} was removed`);
+    resolveAlert(`credential-expired:${row.id}`, 'Credential Monitor', `${row.name} was removed`);
+    persist();
+    audit(operatorName(req), 'CREDENTIAL_DELETED', 'CREDENTIAL', row.id, row.name);
+    ok(res, { deleted: true });
+  });
+  r.post('/v1/credentials/evaluate', requireRole('operator'), (_req, res) => {
+    ok(res, evaluateCredentialExpiry());
+  });
+
   // ── Diagnostic tools (live, nothing is stored) ─────────────────────────────
   r.post('/v1/tools/http', requireRole('operator'), h(async (req, res) => {
     const b = body(req);
@@ -1378,7 +1512,8 @@ export function buildRouter(): Router {
     const applicationId = optStr(b, 'applicationId', 'Application', 64) ?? '';
     if (applicationId && !db.applications.some(a => a.id === applicationId)) return fail(res, 400, 'Application does not exist');
     const op = operatorName(req);
-    const inc: Incident = {
+    const category = optOneOf(b, 'rootCauseCategory', 'Root-cause category', ROOT_CAUSE_CATEGORIES);
+    const inc: Incident = enrichNewIncident({
       id: nextIncidentId(),
       title: reqStr(b, 'title', 'Title', 200),
       severity: oneOf(b, 'severity', 'Severity', SEVERITIES, 'HIGH'),
@@ -1387,6 +1522,7 @@ export function buildRouter(): Router {
       environment: oneOf(b, 'environment', 'Environment', ENVS, 'PRD'),
       fingerprint: `manual:${crypto.randomUUID()}`,
       rootCause: optStr(b, 'description', 'Description', 4000) ?? '',
+      rootCauseCategory: category as RootCauseCategory | undefined,
       startedAt: nowIso(),
       durationMinutes: 0,
       owner: op,
@@ -1399,7 +1535,8 @@ export function buildRouter(): Router {
       timeline: [event(op, 'WARN', 'Incident declared manually')],
       recoveryStatus: 'Investigating',
       notes: [],
-    };
+      fixSteps: [],
+    }, { source: 'Manual' });
     db.incidents.unshift(inc);
     persist();
     broadcast('incident_created', inc);
@@ -1470,6 +1607,10 @@ export function buildRouter(): Router {
     const inc = findIncident(req, res); if (!inc) return;
     const summaryText = optStr(body(req), 'resolution', 'Resolution', 4000) || 'Resolved by operator';
     const op = operatorName(req);
+    const openSteps = (inc.fixSteps ?? []).filter(s => !s.completed);
+    if (openSteps.length && !optBool(body(req), 'force') ) {
+      return fail(res, 400, `${openSteps.length} fix step(s) still open. Complete them or pass force=true to resolve anyway.`);
+    }
     inc.status = 'RESOLVED';
     inc.resolvedAt = nowIso();
     inc.durationMinutes = Math.round((Date.parse(inc.resolvedAt) - Date.parse(inc.startedAt)) / 60000);
@@ -1481,6 +1622,107 @@ export function buildRouter(): Router {
     notifyIncident(inc, 'RESOLVED', `Resolved by ${op}: ${summaryText}`);
     ok(res, inc);
   }));
+
+  /** Set root-cause category and/or description (evidence stays in context / timeline). */
+  r.patch('/v1/incidents/:id/root-cause', requireRole('operator'), h((req, res) => {
+    const inc = findIncident(req, res); if (!inc) return;
+    const b = body(req);
+    const category = oneOf(b, 'rootCauseCategory', 'Root-cause category', ROOT_CAUSE_CATEGORIES);
+    const description = optStr(b, 'description', 'Description', 4000);
+    const op = operatorName(req);
+    const prev = inc.rootCauseCategory ?? 'UNKNOWN';
+    inc.rootCauseCategory = category as RootCauseCategory;
+    if (description !== undefined) inc.rootCause = description;
+    inc.timeline.push(event(op, 'INFO', `Root cause set to ${category}${description ? `: ${description.slice(0, 200)}` : ''}`));
+    saveIncident(inc);
+    audit(op, 'INCIDENT_ROOT_CAUSE', 'INCIDENT', inc.id, `${prev} → ${category}`);
+    ok(res, inc);
+  }));
+
+  /** Link or clear the runbook that holds the required action steps. */
+  r.patch('/v1/incidents/:id/runbook', requireRole('operator'), h((req, res) => {
+    const inc = findIncident(req, res); if (!inc) return;
+    const b = body(req);
+    const runbookId = optStr(b, 'runbookId', 'Runbook', 64);
+    if (runbookId && !db.runbooks.some(r => r.id === runbookId)) return fail(res, 400, 'Runbook not found');
+    const op = operatorName(req);
+    inc.runbookId = runbookId || undefined;
+    inc.timeline.push(event(op, 'INFO', runbookId ? `Runbook linked: ${db.runbooks.find(r => r.id === runbookId)?.title ?? runbookId}` : 'Runbook cleared'));
+    saveIncident(inc);
+    ok(res, inc);
+  }));
+
+  /** Replace the incident fix-step checklist (required actions tracked to completion). */
+  r.put('/v1/incidents/:id/fix-steps', requireRole('operator'), h((req, res) => {
+    const inc = findIncident(req, res); if (!inc) return;
+    const b = body(req);
+    const raw = b.steps;
+    if (!Array.isArray(raw)) throw new ValidationError('steps must be a list');
+    if (raw.length > 40) throw new ValidationError('At most 40 fix steps');
+    const steps: IncidentFixStep[] = [];
+    for (const item of raw) {
+      if (typeof item === 'string') {
+        const t = item.trim();
+        if (!t) continue;
+        if (t.length > 500) throw new ValidationError('Each fix step must be at most 500 characters');
+        steps.push(newFixStep(t));
+        continue;
+      }
+      if (!item || typeof item !== 'object') throw new ValidationError('Each fix step must be text or { text }');
+      const o = item as Record<string, unknown>;
+      const text = typeof o.text === 'string' ? o.text.trim() : '';
+      if (!text) continue;
+      if (text.length > 500) throw new ValidationError('Each fix step must be at most 500 characters');
+      const existing = (inc.fixSteps ?? []).find(s => s.id === o.id);
+      if (existing && typeof o.id === 'string') {
+        steps.push({ ...existing, text });
+      } else {
+        steps.push(newFixStep(text));
+      }
+    }
+    const op = operatorName(req);
+    inc.fixSteps = steps;
+    inc.timeline.push(event(op, 'INFO', `Fix steps updated (${steps.length})`));
+    saveIncident(inc);
+    ok(res, inc);
+  }));
+
+  r.post('/v1/incidents/:id/fix-steps/:stepId/toggle', requireRole('operator'), (req, res) => {
+    const inc = findIncident(req, res); if (!inc) return;
+    const step = (inc.fixSteps ??= []).find(s => s.id === req.params.stepId);
+    if (!step) return fail(res, 404, 'Fix step not found');
+    const op = operatorName(req);
+    step.completed = !step.completed;
+    if (step.completed) { step.completedAt = nowIso(); step.completedBy = op; }
+    else { step.completedAt = undefined; step.completedBy = undefined; }
+    const done = inc.fixSteps.filter(s => s.completed).length;
+    inc.timeline.push(event(op, step.completed ? 'SUCCESS' : 'INFO',
+      `Fix step ${step.completed ? 'done' : 'reopened'}: ${step.text} (${done}/${inc.fixSteps.length})`));
+    if (step.completed && done === inc.fixSteps.length) {
+      inc.recoveryStatus = 'All fix steps completed';
+      if (inc.status === 'MITIGATING' || inc.status === 'INVESTIGATING') inc.status = 'MONITORING';
+    }
+    saveIncident(inc);
+    ok(res, inc);
+  });
+
+  /** Re-pull Impact Analysis from the dependency register onto this incident. */
+  r.post('/v1/incidents/:id/refresh-impact', requireRole('operator'), (req, res) => {
+    const inc = findIncident(req, res); if (!inc) return;
+    const op = operatorName(req);
+    const keptSeverity = inc.severity;
+    enrichNewIncident(inc);
+    inc.severity = keptSeverity;
+    const names = [
+      ...(inc.impactAnalysis?.applications.map(a => a.name) ?? []),
+      ...(inc.impactAnalysis?.features.map(f => f.name) ?? []),
+    ];
+    if (names.length) inc.affectedServices = [...new Set([...inc.affectedServices, ...names])];
+    inc.timeline.push(event(op, 'INFO',
+      `Impact Analysis refreshed: ${inc.impactAnalysis?.hardCount ?? 0} hard / ${inc.impactAnalysis?.softCount ?? 0} soft · users stopped ${inc.impactAnalysis?.usersStopped ?? '—'} · suggested ${inc.suggestedSeverity ?? keptSeverity}`));
+    saveIncident(inc);
+    ok(res, inc);
+  });
 
   // ── Notification channels & escalation ─────────────────────────────────────
   const buildChannel = async (req: Request, existing?: CommunicationChannel): Promise<CommunicationChannel> => {
@@ -1917,6 +2159,27 @@ export function buildRouter(): Router {
     if (!impact) return fail(res, 404, 'Register entry not found');
     ok(res, impact);
   });
+  /** Upstream (depends on) and downstream (affects) paths with live status colours. */
+  r.get('/v1/registry/:id/paths', (req, res) => {
+    const paths = registryPaths(req.params.id);
+    if (!paths) return fail(res, 404, 'Register entry not found');
+    ok(res, paths);
+  });
+  /**
+   * Preview blast radius before planned work: maintenance windows and failover.
+   * Query: applicationId | serverId | registryId, optional environment=PRD|DR.
+   */
+  r.get('/v1/impact/preview', (req, res) => {
+    const applicationId = typeof req.query.applicationId === 'string' ? req.query.applicationId.trim() : '';
+    const serverId = typeof req.query.serverId === 'string' ? req.query.serverId.trim() : '';
+    const registryId = typeof req.query.registryId === 'string' ? req.query.registryId.trim() : '';
+    const envRaw = typeof req.query.environment === 'string' ? req.query.environment.trim().toUpperCase() : '';
+    const environment = envRaw === 'DR' || envRaw === 'PRD' ? envRaw as 'PRD' | 'DR' : undefined;
+    if (!applicationId && !serverId && !registryId) return fail(res, 400, 'Pass applicationId, serverId or registryId');
+    if (applicationId && !db.applications.some(a => a.id === applicationId)) return fail(res, 404, 'Application not found');
+    if (serverId && !db.servers.some(s => s.id === serverId)) return fail(res, 404, 'Server not found');
+    ok(res, previewImpact({ applicationId: applicationId || undefined, serverId: serverId || undefined, registryId: registryId || undefined, environment }));
+  });
   r.post('/v1/registry', requireRole('it_administrator'), h((req, res) => {
     const c = buildComponent(req);
     db.registry.push(c);
@@ -2347,6 +2610,7 @@ export function buildRouter(): Router {
         return `  pool ${(p.name || p.id).padEnd(20)} ${p.role.padEnd(3)} enabled=${p.enabled ?? '?'} healthy=${p.healthy ?? '?'} origin ${o?.address ?? '—'} ${rtt.length ? `rtt ${rtt.join('/')}ms` : 'rtt n/a'}`;
       }),
       `Dead-man heartbeat (monitored infrastructure): ${infraHeartbeat().status}`,
+      `External heartbeat (Ops self): ${externalHeartbeat.status}${externalHeartbeat.configured ? ` → ${externalHeartbeat.nodeLocation} every ${externalHeartbeat.intervalSec}s / tolerance ${externalHeartbeat.toleranceSec}s` : ''}`,
       '',
       'APPLICATION UPTIME (24h / 7d / 30d)',
       ...db.applications.map(a => `  ${a.name.padEnd(28)} ${fmt(a.uptime24h)} / ${fmt(a.uptime7d)} / ${fmt(a.uptime30d)}  [${a.failoverState}]`),

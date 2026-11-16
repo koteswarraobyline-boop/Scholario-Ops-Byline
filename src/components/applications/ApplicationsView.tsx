@@ -13,6 +13,10 @@ import { dnsPointsAt, routeState, servingLabel } from '../ui/routing';
 import { MonitorFormModal } from '../monitors/CreateMonitorModal';
 import { EmptyState } from '../ui/EmptyState';
 import { useDialog } from '../ui/useDialog';
+import { useDependencyDemo } from '../../context/DependencyDemoContext';
+import { DemoBanner } from '../resilience/DemoModeControls';
+import { demoLinksFor, demoNameById, demoVisualLabel, simulateDemoFailure } from '../../mocks/dependencyDemoData';
+import { FailoverImpactPreview } from '../ui/FailoverImpactPreview';
 
 // ── Formatting helpers (null-safe) ──────────────────────────────────────────
 const fmtPct = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : `${v.toFixed(2)}%`);
@@ -59,9 +63,13 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
     openAddMonitorWithContext,
     deleteMonitor,
     deleteApplication,
+    applications,
+    registry,
+    dependencyLinks,
     theme,
   } = useOps();
   const { hasRole, canDo } = useAuth();
+  const demo = useDependencyDemo();
   const navigate = useNavigate();
   const dialog = useDialog(onClose);
 
@@ -72,6 +80,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
   const canDeleteApp = canDo('delete_application');
   const canEditMonitor = canDo('update_monitor');
   const canDeleteMonitor = canDo('delete_monitor');
+  const canRecordDependency = canDo('create_application');
 
   const [activeTab, setActiveTabLocal] = useState<'overview' | 'health' | 'monitors' | 'infra' | 'deps' | 'dr' | 'backups' | 'incidents' | 'deployments' | 'history'>('overview');
   const [confirmFailover, setConfirmFailover] = useState(false);
@@ -87,6 +96,15 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
   const prdServer = servers.find(s => s.id === application.prdServerId);
   const drServer = servers.find(s => s.id === application.drServerId);
   const appMonitors = monitors.filter(m => m.applicationId === application.id);
+  const serviceLinkCount = demo.enabled
+    ? (() => {
+        const { outgoing, incoming } = demoLinksFor(application.name);
+        return outgoing.length + incoming.length;
+      })()
+    : (() => {
+        const comp = registry.find(c => c.kind === 'APPLICATION' && c.applicationId === application.id);
+        return comp ? dependencyLinks.filter(l => l.fromId === comp.id || l.toId === comp.id).length : 0;
+      })();
   const appIncidents = incidents.filter(i => i.applicationId === application.id);
   const appBackups = backups.filter(b => b.applicationId === application.id);
   const appDeployments = deployments.filter(d => d.applicationId === application.id);
@@ -151,16 +169,15 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
         onClick={e => e.stopPropagation()}
       >
         {/* Modal Header */}
-        <div className={`p-4 px-4 sm:px-6 border-b flex items-center justify-between ${
+        <div className={`p-4 px-4 sm:px-6 border-b flex flex-wrap items-start justify-between gap-2 ${
           isDark ? 'border-[#1E293B] bg-[#0A0F1A]' : 'border-slate-200 bg-slate-50'
         }`}>
-          <div className="flex items-center gap-3">
-            <span className={`w-2 h-2 rounded-full ${statusDot(application.status)}`} />
-            <div>
-              <div className="flex items-center gap-2 font-mono">
-                <h2 id="application-detail-title" className={`text-base font-bold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.name}</h2>
-                <span className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>· {application.tier.replace('_', ' ')}</span>
-                <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
+          <div className="flex items-start gap-3 min-w-0 flex-1">
+            <span className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${statusDot(application.status)}`} />
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono">
+                <h2 id="application-detail-title" className={`text-base font-bold font-sans break-words ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{application.name}</h2>
+                <span className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{application.tier.replace('_', ' ')}</span>
                 <span className={`text-xs font-semibold ${statusColor(application.status)}`}>{application.status}</span>
               </div>
               {application.description && (
@@ -169,7 +186,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className={`text-[11px] font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
               Checked {fmtTime(application.lastChecked, 'never')}
             </span>
@@ -230,7 +247,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
             { id: 'health', label: 'Health & Metrics' },
             { id: 'monitors', label: `Monitors (${appMonitors.length})` },
             { id: 'infra', label: 'Infrastructure' },
-            { id: 'deps', label: `Dependencies (${appMonitors.length})` },
+            { id: 'deps', label: `Dependencies (${serviceLinkCount})` },
             { id: 'dr', label: 'PRD / DR' },
             { id: 'backups', label: `Backups (${appBackups.length})` },
             { id: 'incidents', label: `Incidents (${appIncidents.length})` },
@@ -252,7 +269,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
         </div>
 
         {/* Modal Body */}
-        <div className="p-6 overflow-y-auto space-y-5 flex-1 text-xs">
+        <div className="p-4 sm:p-6 overflow-y-auto space-y-5 flex-1 text-xs">
 
           {/* TAB: OVERVIEW */}
           {activeTab === 'overview' && (
@@ -481,49 +498,93 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
             </div>
           )}
 
-          {/* TAB: DEPENDENCIES (derived from monitors) */}
+          {/* TAB: DEPENDENCIES — stored register links, not the monitor list */}
           {activeTab === 'deps' && (
             <div className="space-y-3 font-mono">
-              <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Dependencies (checked by monitors)</div>
-              <p className={`text-[11px] font-sans ${muted}`}>
-                Each monitor attached to this application represents a dependency the system actually checks (endpoints, databases, workers, backups).
-              </p>
-              {appMonitors.length === 0 && registerLinks(application.dependencies).length === 0 ? (
-                <div className={emptyText}>No monitored dependencies. Add monitors for databases, workers and endpoints.</div>
-              ) : (
+              <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Service dependencies (read only)</div>
+              {demo.enabled ? (
                 <div className="space-y-2">
-                  {appMonitors.map(m => (
-                    <div key={m.id} className={`p-3 rounded border flex items-center justify-between ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
-                      <div className="min-w-0">
-                        <div className={`font-semibold flex items-center gap-2 font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
-                          <span className="truncate">{m.name}</span>
-                          <span className={`font-mono text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>· {m.type} [{m.environment}]</span>
-                        </div>
-                        <div className={`text-[11px] truncate ${muted}`}>{m.target}</div>
+                  <DemoBanner />
+                  <p className={`text-[11px] font-sans ${muted}`}>
+                    Illustrative relationships for {application.name}. Not verified. This is not an editor. Hosting stays on the Infrastructure tab.
+                  </p>
+                  {(() => {
+                    const { outgoing, incoming } = demoLinksFor(application.name);
+                    const visual = demo.scenario ? simulateDemoFailure(demo.scenario.rootName)?.visual : undefined;
+                    const statusOf = (id: string) => demoVisualLabel(visual?.get(id) ?? 'UNKNOWN');
+                    if (outgoing.length === 0 && incoming.length === 0) {
+                      return <div className={emptyText}>This application is not in the nine-name demo set. Turn DEMO off to see the live register.</div>;
+                    }
+                    const row = (id: string, consumer: string, provider: string, link: { type: string; method: string | null; notes: string }) => (
+                      <div key={`${id}-${consumer}-${provider}`} className={`p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                        <div className={`font-semibold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{consumer} <span className={muted}>→</span> {provider}</div>
+                        <div className={`text-[11px] break-words ${muted}`}>{link.type} · {link.method ?? 'method not recorded'} · {link.notes} · status {statusOf(id)}</div>
                       </div>
-                      <div className="text-right shrink-0 pl-3 flex items-center gap-2">
-                        <div>
-                          <span className={`font-semibold ${statusColor(m.status)}`}>{m.status}</span>
-                          <div className={`text-[10px] ${muted}`}>{m.lastCheck ? fmtMs(m.responseTimeMs) : '—'}</div>
-                        </div>
-                        <MonitorActions
-                          isDark={isDark}
-                          canEdit={canEditMonitor}
-                          canDelete={canDeleteMonitor}
-                          confirming={confirmDeleteMonitor === m.id}
-                          deleting={deletingMonitor === m.id}
-                          onEdit={() => setEditingMonitor(m)}
-                          onAskDelete={() => setConfirmDeleteMonitor(m.id)}
-                          onCancelDelete={() => setConfirmDeleteMonitor(null)}
-                          onDelete={async () => {
-                            setDeletingMonitor(m.id);
-                            if (await deleteMonitor(m.id)) setConfirmDeleteMonitor(null);
-                            setDeletingMonitor(null);
-                          }}
-                        />
+                    );
+                    return (
+                      <div className="space-y-2">
+                        {outgoing.length > 0 && <div className={`text-[10px] uppercase font-bold ${muted}`}>Outgoing ({outgoing.length})</div>}
+                        {outgoing.map(link => row(link.toId, application.name, demoNameById(link.toId), link))}
+                        {incoming.length > 0 && <div className={`text-[10px] uppercase font-bold ${muted}`}>Incoming ({incoming.length})</div>}
+                        {incoming.map(link => row(link.fromId, demoNameById(link.fromId), application.name, link))}
                       </div>
+                    );
+                  })()}
+                </div>
+              ) : (
+              <>
+              <p className={`text-[11px] font-sans ${muted}`}>
+                Consumer → provider from the dependency register. This list is not an editor. “Runs on” stays on the Infrastructure tab.
+              </p>
+              {(() => {
+                const comp = registry.find(c => c.kind === 'APPLICATION' && c.applicationId === application.id);
+                const outgoing = comp ? dependencyLinks.filter(l => l.fromId === comp.id) : [];
+                const incoming = comp ? dependencyLinks.filter(l => l.toId === comp.id) : [];
+                const regName = (id: string) => registry.find(c => c.id === id)?.name ?? 'Unknown';
+                const liveOf = (id: string) => {
+                  const component = registry.find(c => c.id === id);
+                  if (!component) return 'UNKNOWN';
+                  if (component.kind === 'APPLICATION' && component.applicationId) {
+                    return applications.find(a => a.id === component.applicationId)?.status ?? 'UNKNOWN';
+                  }
+                  if (component.kind === 'SERVER' && component.serverId) {
+                    return servers.find(s => s.id === component.serverId)?.status ?? 'UNKNOWN';
+                  }
+                  return 'UNKNOWN';
+                };
+                const row = (l: typeof dependencyLinks[number], consumer: string, provider: string, otherId: string) => (
+                  <div key={l.id} className={`p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                    <div className={`font-semibold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
+                      {consumer} <span className={muted}>→</span> {provider}
                     </div>
-                  ))}
+                    <div className={`text-[11px] break-words ${muted}`}>
+                      {l.type} · {l.method ?? 'method not recorded'}
+                      {l.featureId ? ` · feature ${regName(l.featureId)}` : ' · feature not limited to one'}
+                      {l.notes ? ` · ${l.notes}` : ' · rationale not recorded'}
+                      {' · '}status {liveOf(otherId)}
+                    </div>
+                  </div>
+                );
+                if (!comp || (outgoing.length === 0 && incoming.length === 0)) {
+                  return <div className={emptyText}>Nothing recorded. This does not mean the application has no dependencies.</div>;
+                }
+                return (
+                  <div className="space-y-2">
+                    {outgoing.length > 0 && <div className={`text-[10px] uppercase font-bold ${muted}`}>Outgoing ({outgoing.length})</div>}
+                    {outgoing.map(l => row(l, application.name, regName(l.toId), l.toId))}
+                    {incoming.length > 0 && <div className={`text-[10px] uppercase font-bold ${muted}`}>Incoming ({incoming.length})</div>}
+                    {incoming.map(l => row(l, regName(l.fromId), application.name, l.fromId))}
+                  </div>
+                );
+              })()}
+              </>
+              )}
+              {registerLinks(application.dependencies).length > 0 && (
+                <div className="space-y-2">
+                  <div className={`text-xs font-semibold pt-2 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Checked signals</div>
+                  <p className={`text-[11px] font-sans ${muted}`}>
+                    These recorded dependencies have a live check and can change this application’s status. UNKNOWN is not DOWN.
+                  </p>
                   {registerLinks(application.dependencies).map(d => (
                     <div key={d.id} className={`p-3 rounded border flex items-center justify-between ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
                       <div className="min-w-0">
@@ -534,6 +595,18 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                     </div>
                   ))}
                 </div>
+              )}
+              <p className={`text-[11px] font-sans ${muted}`}>
+                Monitors for this application are on the Monitors tab ({appMonitors.length}). A monitor is a check. It is not a service dependency.
+              </p>
+              {canRecordDependency && !demo.enabled && (
+                <button
+                  type="button"
+                  onClick={() => navigate('/setup#dependency-register-title')}
+                  className="px-2.5 py-1 rounded text-xs font-mono font-bold bg-blue-600 hover:bg-blue-500 text-white cursor-pointer"
+                >
+                  Record a dependency
+                </button>
               )}
             </div>
           )}
@@ -617,6 +690,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                         {failoverTarget === 'DR' ? 'DR' : 'PRD'} server <strong className="font-mono">{targetServer?.hostname}</strong>{' '}
                         (<strong className="font-mono">{targetServer?.ip}</strong>). Live traffic for {application.name} moves immediately.
                       </p>
+                      <FailoverImpactPreview applicationId={application.id} target={failoverTarget} isDark={isDark} />
                       <input
                         type="text"
                         value={failoverReason}

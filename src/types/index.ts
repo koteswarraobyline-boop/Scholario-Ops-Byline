@@ -676,7 +676,7 @@ export interface VpsServer {
 }
 
 /** Classified result of a single synthetic check */
-export type ProbeStatus = 'UP' | 'DOWN' | 'DEGRADED' | 'TIMEOUT' | 'DNS_ERROR' | 'TLS_ERROR' | 'CONNECTION_ERROR' | 'UNKNOWN';
+export type ProbeStatus = 'UP' | 'DOWN' | 'DEGRADED' | 'TIMEOUT' | 'DNS_ERROR' | 'TLS_ERROR' | 'CONNECTION_ERROR' | 'AUTH_ERROR' | 'UNKNOWN';
 
 export interface MonitorCheckHistory {
   timestamp: string;
@@ -748,7 +748,33 @@ export interface Monitor {
   lastStatusCode?: number | null;
   /** 'app-url' / 'app-ssl': created from an application's PRD/DR URL and updated when the URL changes */
   managedBy?: 'app-url' | 'app-ssl';
+  /** TLS monitors: days remaining and expiry from the last handshake. Null when the certificate was not read. */
+  certificateDaysLeft?: number | null;
+  certificateValidTo?: string | null;
 }
+
+/** Expiry tracked for a key, token, or subscription. The secret itself is never stored. */
+export type CredentialKind = 'API_KEY' | 'TOKEN' | 'SUBSCRIPTION';
+
+export interface TrackedCredential {
+  id: string;
+  name: string;
+  kind: CredentialKind;
+  /** Provider label, for example OpenAI. Never a secret. */
+  provider: string;
+  applicationId?: string;
+  /** Person or team notified through the existing channels. A name or an email. */
+  owner: string;
+  environment: Environment;
+  /** When the credential stops working. */
+  expiresAt: string;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Derived when the credential is read. Not stored. */
+export type CredentialExpiryState = 'OK' | 'EXPIRING' | 'EXPIRED' | 'INVALID';
 
 export interface IncidentTimelineEvent {
   id: string;
@@ -766,6 +792,64 @@ export interface IncidentNote {
   content: string;
 }
 
+/** Structured cause taxonomy for incidents (operator-selected or inferred at open). */
+export type RootCauseCategory =
+  | 'EXPIRED_CREDENTIAL'
+  | 'CAPACITY'
+  | 'DEPLOYMENT'
+  | 'PROVIDER_OUTAGE'
+  | 'CONFIGURATION'
+  | 'NETWORK'
+  | 'APPLICATION_BUG'
+  | 'INFRASTRUCTURE'
+  | 'UNKNOWN';
+
+/** One required action step on an incident, tracked to completion. */
+export interface IncidentFixStep {
+  id: string;
+  text: string;
+  completed: boolean;
+  completedAt?: string;
+  completedBy?: string;
+}
+
+/** Snapshot of Impact Analysis captured onto an incident (apps, features, users). */
+export interface IncidentImpactSnapshot {
+  componentId: string | null;
+  componentName: string | null;
+  applications: Array<{ id: string; name: string; via: 'HARD' | 'SOFT' }>;
+  features: Array<{ id: string; name: string; via: 'HARD' | 'SOFT'; action?: string }>;
+  usersStopped: number | null;
+  usersAffected: number | null;
+  served: string[];
+  hardCount: number;
+  softCount: number;
+  capturedAt: string;
+}
+
+export type CauseSignalSource = 'DEPLOYMENT' | 'CAPACITY' | 'EXPIRY' | 'CLOUDFLARE';
+export type CauseConfidence = 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE';
+
+/** One correlated fact used to suggest an incident cause. */
+export interface CauseEvidence {
+  source: CauseSignalSource;
+  detail: string;
+  at: string | null;
+  score: number;
+}
+
+/**
+ * Suggested cause. Built by correlating deployments, capacity alerts, expiry dates
+ * and Cloudflare origin health. It does not replace an operator-chosen category.
+ */
+export interface LikelyCause {
+  category: RootCauseCategory;
+  summary: string;
+  confidence: CauseConfidence;
+  evidence: CauseEvidence[];
+  correlatedAt: string;
+}
+
 export interface Incident {
   id: string; // e.g. INC-1042
   title: string;
@@ -775,6 +859,8 @@ export interface Incident {
   environment: Environment;
   fingerprint: string; // e.g. mosaic:prd:monitor-mosaic-https:http_500
   rootCause: string;
+  /** Category of the cause (credential, capacity, deployment, …). Defaults to UNKNOWN when unset. */
+  rootCauseCategory?: RootCauseCategory;
   startedAt: string;
   resolvedAt?: string;
   durationMinutes: number;
@@ -795,6 +881,23 @@ export interface Incident {
   affectedServices: string[];
   affectedMonitors: string[];
   dependentFailures: string[];
+  /** Blast radius from the dependency register when the incident opened (or last refreshed). */
+  impactAnalysis?: IncidentImpactSnapshot;
+  /** Severity implied by application tier and how many users the blast radius reaches. */
+  suggestedSeverity?: IncidentSeverity;
+  /** Why that severity was suggested. */
+  severityReason?: string;
+  /**
+   * Suggested cause from recent deployments, capacity alerts, expiry dates and Cloudflare origin health.
+   * Separate from rootCauseCategory, which an operator can set.
+   */
+  likelyCause?: LikelyCause;
+  /** Owners of the affected applications and features, named on notifications and escalation. */
+  notifiedOwners?: string[];
+  /** Outage path: probe cadence, confirmation, Cloudflare origin, DR readiness, notify, escalate. */
+  outage?: IncidentOutage;
+  /** Required fix actions; all must be completed before the incident is fully closed (tracked separately from resolve). */
+  fixSteps?: IncidentFixStep[];
   timeline: IncidentTimelineEvent[];
   recoveryStatus: string;
   runbookId?: string;
@@ -802,6 +905,21 @@ export interface Incident {
   mitigationActionTaken?: string;
   /** Facts captured from monitoring when the incident was raised / updated */
   context?: IncidentContext;
+}
+
+export interface IncidentOutage {
+  /** Seconds between probes. Null when this incident did not come from a monitor. */
+  probeIntervalSec: number | null;
+  confirmedFailures: number | null;
+  confirmationThreshold: number | null;
+  cloudflareOrigin: 'UNHEALTHY' | 'HEALTHY' | 'UNKNOWN' | 'NOT_CHECKED';
+  cloudflareDetail: string;
+  drReadiness: DrOverall | 'NOT_APPLICABLE';
+  drDetail: string;
+  /** A notification was handed to a channel, or is held for the policy delay. */
+  notified: boolean;
+  /** An escalation step is configured for this severity and the incident is still unacknowledged. */
+  escalationReady: boolean;
 }
 
 export interface IncidentContext {
@@ -1056,7 +1174,7 @@ export interface AuditLog {
   operator: string;
   action: string;
   category: 'INCIDENT' | 'FAILOVER' | 'MAINTENANCE' | 'MONITOR' | 'CLOUDFLARE' | 'INFRASTRUCTURE' | 'RUNBOOK'
-    | 'APPLICATION' | 'AUTH' | 'USER' | 'NOTIFICATION' | 'DEPLOYMENT' | 'BACKUP' | 'REGISTRY' | 'CAPACITY';
+    | 'APPLICATION' | 'AUTH' | 'USER' | 'NOTIFICATION' | 'DEPLOYMENT' | 'BACKUP' | 'REGISTRY' | 'CAPACITY' | 'CREDENTIAL';
   targetId: string;
   details: string;
 }
@@ -1083,6 +1201,9 @@ export interface RegistryComponent {
   updatedAt: string;
 }
 
+/** How the consumer reaches the provider. Null means the method has not been recorded. */
+export type DependencyMethod = 'HTTP' | 'API' | 'DATABASE' | 'EMBED' | 'LINK' | 'OTHER';
+
 /** "from depends on to". HARD: from stops working without to. SOFT: from is degraded. */
 export interface DependencyLink {
   id: string;
@@ -1091,8 +1212,11 @@ export interface DependencyLink {
   type: 'HARD' | 'SOFT';
   /** BUSINESS_FEATURE component that needs this dependency, if it is needed by one feature only */
   featureId: string | null;
+  /** Null when the operator has not recorded how the consumer reaches the provider. */
+  method: DependencyMethod | null;
   notes: string;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface RegistryImpact {
@@ -1109,6 +1233,57 @@ export interface RegistryImpact {
   largestUserCountAffected: number | null;
   /** Teams/customers served by the failed component and everything affected */
   served: string[];
+}
+
+/** Live status colour for a register component (from linked app/server when present). */
+export type RegistryLiveStatus = 'HEALTHY' | 'WARNING' | 'CRITICAL' | 'UNKNOWN' | 'MAINTENANCE';
+
+/** One hop on an upstream or downstream dependency path. */
+export interface RegistryPathNode {
+  id: string;
+  name: string;
+  kind: RegistryKind;
+  tier: RegistryComponent['tier'];
+  /** HARD / SOFT for downstream blast radius; for upstream = the link type to the dependency. */
+  via: 'HARD' | 'SOFT';
+  status: RegistryLiveStatus;
+  applicationId: string | null;
+  serverId: string | null;
+  userCount: number | null;
+}
+
+/** Upstream (depends on) and downstream (affects) paths for a register entry, with live status. */
+export interface RegistryPaths {
+  componentId: string;
+  componentName: string;
+  status: RegistryLiveStatus;
+  upstream: RegistryPathNode[];
+  downstream: RegistryPathNode[];
+}
+
+/**
+ * "What will break if this goes down" — for maintenance windows and failover decisions.
+ * Built from Impact Analysis on the matching register component (application or server).
+ */
+export interface ImpactPreview {
+  scope: {
+    applicationId?: string;
+    serverId?: string;
+    registryId?: string;
+    environment?: Environment;
+  };
+  componentId: string | null;
+  componentName: string | null;
+  summary: string;
+  impact: RegistryImpact | null;
+  hardStops: Array<{ id: string; name: string; kind: RegistryKind }>;
+  softDegrades: Array<{ id: string; name: string; kind: RegistryKind }>;
+  /** Business features that stop or degrade, each with the action the dependency implies. */
+  features: Array<{ id: string; name: string; via: 'HARD' | 'SOFT'; action: string }>;
+  usersStopped: number | null;
+  usersAffected: number | null;
+  served: string[];
+  generatedAt: string;
 }
 
 /**
@@ -1173,6 +1348,44 @@ export interface DeadManControlPlane {
   disconnectedAfterSec: number;
   servers: ServerHeartbeat[];
   counts: { healthy: number; degraded: number; failing: number; unknown: number; total: number };
+}
+
+/**
+ * Outbound dead-man heartbeat of THIS control plane (server/deadman.ts).
+ * NOT_CONFIGURED = DEADMAN_HEARTBEAT_URL missing or invalid · PENDING = configured, first ping not finished yet ·
+ * HEALTHY = latest ping succeeded · DEGRADED = recent pings fail but the last success is within the tolerance ·
+ * FAILING = no successful ping within the tolerance.
+ * The heartbeat URL is never part of this object.
+ */
+export type ExternalHeartbeatStatus = 'NOT_CONFIGURED' | 'PENDING' | 'HEALTHY' | 'DEGRADED' | 'FAILING';
+
+export interface ExternalHeartbeat {
+  id: string;
+  name: string;
+  /** Host name of the watchdog (no path, query or credentials); 'Not configured' when unset */
+  nodeLocation: string;
+  /** Same as nodeLocation (kept for compatibility; never the full URL) */
+  targetControlPlane: string;
+  /** Last successful ping ('' = none yet). Same value as lastSuccessAt. */
+  lastHeartbeatReceivedAt: string;
+  intervalSec: number;
+  toleranceSec: number;
+  status: ExternalHeartbeatStatus;
+  /** Consecutive failed pings (same value as consecutiveFailures) */
+  consecutiveMisses: number;
+  lastAlertSentAt?: string;
+  configured: boolean;
+  /** Why the configuration is unusable (e.g. not an http/https URL); null when fine */
+  configError: string | null;
+  /** The heartbeat loop is running in this process */
+  workerRunning: boolean;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastHttpStatus: number | null;
+  lastLatencyMs: number | null;
+  /** Redacted error of the latest failed ping */
+  lastError: string | null;
+  consecutiveFailures: number;
 }
 
 /** NOT_CONFIGURED = the check cannot run because something is not set up yet (never a pass) */
@@ -1291,7 +1504,63 @@ export interface FailoverPreflight {
   /** LOAD_BALANCER_MANUAL: the switch is done in Cloudflare by an operator; DNS_RECORD: Ops switches the record */
   mode: 'LOAD_BALANCER_MANUAL' | 'DNS_RECORD';
   plan: string[];
+  /** What will break if the source environment goes down / is taken offline for this failover. */
+  impactPreview: ImpactPreview | null;
+  /** Latest approve or reject for this direction, from the audit log. Null until one is recorded. */
+  lastDecision: FailoverDecisionRecord | null;
   generatedAt: string;
+}
+
+/** An approve or reject recorded for one failover direction. It does not move traffic. */
+export interface FailoverDecisionRecord {
+  decision: 'APPROVED' | 'REJECTED';
+  target: 'DR' | 'PRIMARY';
+  reason: string;
+  operator: string;
+  at: string;
+}
+
+/** One go-live check. NOT_APPLICABLE is not a failure (no DR, or the app is not on a Load Balancer). */
+export interface GoLiveCheck {
+  key: string;
+  label: string;
+  status: 'PASS' | 'FAIL' | 'NOT_APPLICABLE';
+  detail: string;
+}
+
+/** A defect logged because a go-live check failed and was not fixed before recording. */
+export interface GoLiveDefect {
+  summary: string;
+  loggedBy: string;
+  loggedAt: string;
+}
+
+/** One recorded go-live run. GREEN means every applicable check passed. */
+export interface GoLiveRun {
+  id: string;
+  applicationId: string;
+  applicationName: string;
+  overall: 'GREEN' | 'FAILED';
+  checks: GoLiveCheck[];
+  drOverall: DrOverall;
+  drPassed: number;
+  drTotal: number;
+  defect: GoLiveDefect | null;
+  operator: string;
+  recordedAt: string;
+}
+
+/** Current go-live checks, plus the newest recorded run when one exists. */
+export interface GoLivePreview {
+  applicationId: string;
+  applicationName: string;
+  overall: 'GREEN' | 'FAILED';
+  checks: GoLiveCheck[];
+  drOverall: DrOverall;
+  drPassed: number;
+  drTotal: number;
+  evaluatedAt: string;
+  latest: GoLiveRun | null;
 }
 
 export interface TcpProbeResult {
@@ -1324,6 +1593,17 @@ export interface IntegrationStatus {
   notifications: { status: 'CONFIGURED' | 'NOT_CONFIGURED'; enabledChannels: number };
   loadBalancing: { configured: boolean; status: LbSyncStatus; lastSyncAt: string | null; lastError: string | null; poolCount: number };
   smtp: { configured: boolean; server?: string | null; from?: string | null; problem?: string | null };
+  /** Outbound Ops self-heartbeat. Never includes the URL — only host name and timing. Absent on older servers. */
+  externalHeartbeat?: {
+    configured: boolean;
+    status: ExternalHeartbeatStatus;
+    configError: string | null;
+    intervalSec: number;
+    toleranceSec: number;
+    nodeLocation: string;
+    lastSuccessAt: string | null;
+    workerRunning: boolean;
+  };
   publicUrl: string;
   /** True when PUBLIC_URL is set. The displayed publicUrl may still be the browser address. */
   publicUrlConfigured?: boolean;
@@ -1522,8 +1802,23 @@ export interface ResourceEvaluation {
   critical: number | null;
 }
 
+/** Trend-based days left before a finite capacity is reached (from usage history). */
+export interface ResourceTimeToFull {
+  daysLeft: number | null;
+  etaHours: number | null;
+  slopePerDay: number;
+  current: number;
+  limit: number;
+  r2: number;
+  samples: number;
+  spanHours: number;
+  confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+}
+
 export interface ResourceView extends ResourceLimit {
   evaluation: ResourceEvaluation;
+  /** Present on detail responses when there is enough measurement history. */
+  forecast?: ResourceTimeToFull | null;
 }
 
 /** One accepted usage sample. Missing samples are not filled in. */

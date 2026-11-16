@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Gauge } from 'lucide-react';
 import { api, ApiError } from '../../services/api';
-import type { QuotaWindow, ResourceKind, ResourceMeasurement, ResourceUnit, ResourceView } from '../../types';
+import type { ImpactPreview, Incident, QuotaWindow, ResourceKind, ResourceMeasurement, ResourceUnit, ResourceView } from '../../types';
 import { useAuth } from '../../context/AuthContext';
 import { useOps } from '../../context/OpsContext';
 import { EmptyState } from '../ui/EmptyState';
+import { ImpactPreviewCard } from '../ui/ImpactPreviewCard';
 
 const KINDS: ResourceKind[] = ['CPU', 'MEMORY', 'SERVER_DISK', 'STORAGE', 'SEATS', 'ACTIVE_USERS', 'DATABASE_SIZE', 'DATABASE_CONNECTIONS', 'API_QUOTA', 'LOAD'];
 const UNITS: Record<ResourceKind, ResourceUnit[]> = {
@@ -37,6 +39,7 @@ function shown(n: number | null, unit: string): string {
 export const ResourcesView: React.FC = () => {
   const { hasRole } = useAuth();
   const { theme } = useOps();
+  const navigate = useNavigate();
   const isDark = theme === 'dark';
   const canEdit = hasRole('operator');
   const canDelete = hasRole('it_administrator');
@@ -49,6 +52,10 @@ export const ResourcesView: React.FC = () => {
   const [owner, setOwner] = useState('');
   const [selected, setSelected] = useState<ResourceView | null>(null);
   const [measurements, setMeasurements] = useState<ResourceMeasurement[]>([]);
+  const [alerts, setAlerts] = useState<Incident[]>([]);
+  const [preview, setPreview] = useState<ImpactPreview | null>(null);
+  const [previewError, setPreviewError] = useState('');
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
   const selectedId = useRef<string | null>(null);
   const [formError, setFormError] = useState('');
@@ -56,9 +63,9 @@ export const ResourcesView: React.FC = () => {
   const [draft, setDraft] = useState({ kind: 'STORAGE' as ResourceKind, name: '', owner: '', unit: 'GiB' as ResourceUnit, capacity: '', warningValue: '85', criticalValue: '95', quotaWindow: 'hour' as QuotaWindow });
   const [usage, setUsage] = useState('');
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError('');
+  const load = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true);
+    if (!quiet) setError('');
     const params = new URLSearchParams();
     if (kind) params.set('kind', kind);
     if (status) params.set('status', status);
@@ -68,15 +75,33 @@ export const ResourcesView: React.FC = () => {
     try {
       const res = await api.getResources(`?${params.toString()}`);
       setRows(res.data);
+      setError('');
+      setSelected(prev => {
+        if (!prev) return prev;
+        const fresh = res.data.find(r => r.id === prev.id);
+        if (!fresh) return prev;
+        return {
+          ...prev,
+          usage: fresh.usage,
+          evaluation: fresh.evaluation,
+          alertState: fresh.alertState,
+          freshness: fresh.freshness,
+          measuredAt: fresh.measuredAt,
+        };
+      });
     } catch (err) {
-      setRows([]);
+      if (!quiet) setRows([]);
       setError(err instanceof ApiError ? err.message : 'Could not load resources');
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   }, [kind, status, q, owner]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(false); }, [load]);
+  useEffect(() => {
+    const timer = setInterval(() => { if (!document.hidden) void load(true); }, 15_000);
+    return () => clearInterval(timer);
+  }, [load]);
 
   const card = isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200';
   const input = `w-full rounded border px-2 py-1 text-xs font-mono ${isDark ? 'bg-[#0B0F17] border-[#1E293B]' : 'bg-white border-slate-300'}`;
@@ -91,12 +116,70 @@ export const ResourcesView: React.FC = () => {
       if (selectedId.current !== row.id) return;
       setSelected(detail.resource);
       setMeasurements(detail.measurements);
+      setAlerts(detail.alerts);
     } catch (err) {
       if (selectedId.current !== row.id) return;
       setMeasurements([]);
+      setAlerts([]);
       setHistoryError(err instanceof ApiError ? err.message : 'Could not load measurements');
     }
   };
+
+  useEffect(() => {
+    const id = selected?.id;
+    const applicationId = selected?.applicationId;
+    const serverId = selected?.serverId;
+    if (!id) return;
+    let cancel = false;
+    const refreshDetail = async () => {
+      try {
+        const detail = await api.getResource(id);
+        if (cancel || selectedId.current !== id) return;
+        setMeasurements(detail.measurements);
+        setAlerts(detail.alerts);
+        setSelected(prev => prev && prev.id === id ? {
+          ...prev,
+          usage: detail.resource.usage,
+          evaluation: detail.resource.evaluation,
+          alertState: detail.resource.alertState,
+          freshness: detail.resource.freshness,
+          measuredAt: detail.resource.measuredAt,
+          forecast: detail.resource.forecast,
+        } : prev);
+      } catch { /* the list refresh reports a load failure */ }
+    };
+    const timer = setInterval(() => { if (!document.hidden) void refreshDetail(); }, 15_000);
+    return () => { cancel = true; clearInterval(timer); };
+  }, [selected?.id]);
+
+  useEffect(() => {
+    const applicationId = selected?.applicationId || undefined;
+    const serverId = selected?.serverId || undefined;
+    if (!selected || (!applicationId && !serverId)) {
+      setPreview(null);
+      setPreviewError('');
+      setPreviewLoading(false);
+      return;
+    }
+    let cancel = false;
+    const run = async (first: boolean) => {
+      if (first) setPreviewLoading(true);
+      try {
+        const next = await api.getImpactPreview({ applicationId, serverId });
+        if (!cancel) { setPreview(next); setPreviewError(''); }
+      } catch (err) {
+        if (!cancel) {
+          setPreview(null);
+          setPreviewError(err instanceof Error ? err.message : 'Could not load impact');
+        }
+      } finally {
+        if (!cancel && first) setPreviewLoading(false);
+      }
+    };
+    void run(true);
+    const timer = setInterval(() => { if (!document.hidden) void run(false); }, 30_000);
+    return () => { cancel = true; clearInterval(timer); };
+  }, [selected?.id, selected?.applicationId, selected?.serverId]);
 
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -287,7 +370,7 @@ export const ResourcesView: React.FC = () => {
               <p className="text-[10px] text-slate-500">{selected.resourceKey} · measured {selected.measuredAt ?? 'never'}</p>
               {selected.description && <p className="text-[11px] mt-1">{selected.description}</p>}
             </div>
-            <button type="button" className="text-[10px] font-mono text-slate-400 cursor-pointer" onClick={() => { selectedId.current = null; setSelected(null); setMeasurements([]); }}>Close</button>
+            <button type="button" className="text-[10px] font-mono text-slate-400 cursor-pointer" onClick={() => { selectedId.current = null; setSelected(null); setMeasurements([]); setAlerts([]); setPreview(null); }}>Close</button>
           </div>
           {formError && <div role="alert" className="text-xs text-rose-400">{formError}</div>}
           {canEdit ? (
@@ -318,6 +401,44 @@ export const ResourcesView: React.FC = () => {
             </form>
           )}
           {historyError && <div role="alert" className="text-xs text-rose-400">{historyError}</div>}
+          <div className="space-y-2">
+            <h3 className="text-[10px] font-mono text-slate-500">Capacity incidents</h3>
+            {alerts.filter(a => a.status !== 'RESOLVED' && a.status !== 'CLOSED').length === 0 ? (
+              <p className="text-[11px] text-slate-500">No open capacity incident for this resource.</p>
+            ) : alerts.filter(a => a.status !== 'RESOLVED' && a.status !== 'CLOSED').map(a => (
+              <button
+                key={a.id}
+                type="button"
+                className="block text-left text-[11px] font-mono text-blue-400 hover:underline cursor-pointer"
+                onClick={() => navigate(`/incidents?id=${encodeURIComponent(a.id)}`)}
+              >
+                {a.id} · {a.severity} · {a.title} — open Impact Analysis
+              </button>
+            ))}
+          </div>
+          {(selected.applicationId || selected.serverId) ? (
+            <ImpactPreviewCard
+              preview={preview}
+              loading={previewLoading}
+              error={previewError}
+              isDark={isDark}
+              title="What will break when this fills"
+            />
+          ) : (
+            <p className="text-[11px] text-slate-500">Link this limit to an application or server to show what stops when it fills.</p>
+          )}
+          {selected.forecast && (
+            <div className="text-[11px] font-mono" aria-label="Time to full forecast">
+              <h3 className="text-[10px] font-mono text-slate-500">Forecast · time to full</h3>
+              <p className="mt-1">
+                {selected.forecast.daysLeft === null
+                  ? `No rising trend toward ${selected.forecast.limit} ${selected.unit} (${selected.forecast.confidence} confidence, ${selected.forecast.samples} samples over ${selected.forecast.spanHours} h)`
+                  : selected.forecast.daysLeft <= 0
+                    ? `At or over the limit (${selected.forecast.limit} ${selected.unit})`
+                    : `~${selected.forecast.daysLeft} day(s) left until ${selected.forecast.limit} ${selected.unit} · rising ${selected.forecast.slopePerDay}/day · ${selected.forecast.confidence} confidence`}
+              </p>
+            </div>
+          )}
           <div>
             <h3 className="text-[10px] font-mono text-slate-500">Recorded measurements</h3>
             {measurements.length === 0 ? (

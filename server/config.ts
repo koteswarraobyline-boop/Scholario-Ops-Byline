@@ -140,6 +140,8 @@ export const config = {
   replicationMaxLagSec: int('REPLICATION_MAX_LAG_SEC', 300, 0),
   /** SSL certificates expiring within this many days are DEGRADED (and alert); within 7 days they fail */
   sslExpiryWarnDays: int('SSL_EXPIRY_WARN_DAYS', 21, 1),
+  /** API keys, tokens and subscriptions inside this many days raise a warning. Past the date they raise an incident. */
+  credentialExpiryWarnDays: int('CREDENTIAL_EXPIRY_WARN_DAYS', 14, 1),
   /** Minimum minutes between notifications for the same alert (prevents notification storms) */
   alertCooldownMin: int('ALERT_COOLDOWN_MIN', 15, 0),
   /** A resource measurement older than this is STALE. It is not treated as healthy and it is not replaced with zero. */
@@ -159,8 +161,12 @@ export const config = {
 
   smtp: smtpConfig(),
 
-  /** Deprecated and ignored: DEADMAN_HEARTBEAT_URL / DEADMAN_INTERVAL_SEC / DEADMAN_TOLERANCE_SEC (no external watchdog) */
-  deprecatedDeadManVars: ['DEADMAN_HEARTBEAT_URL', 'DEADMAN_INTERVAL_SEC', 'DEADMAN_TOLERANCE_SEC'].filter(k => (process.env[k] ?? '').trim() !== ''),
+  /** Outbound dead-man heartbeat (e.g. healthchecks.io / UptimeRobot heartbeat URL). Empty = not configured. */
+  deadManHeartbeatUrl: str('DEADMAN_HEARTBEAT_URL'),
+  /** Seconds between outbound pings (default 60). */
+  deadManIntervalSec: int('DEADMAN_INTERVAL_SEC', 60, 10),
+  /** Seconds of silence before the local status is FAILING (default 180 ≈ 3 minutes). */
+  deadManToleranceSec: int('DEADMAN_TOLERANCE_SEC', 180, 10),
 
   /** Agent is STALE after this many seconds without a report, DISCONNECTED after 10x */
   telemetryStaleSec: int('TELEMETRY_STALE_THRESHOLD_SEC', 60, 10),

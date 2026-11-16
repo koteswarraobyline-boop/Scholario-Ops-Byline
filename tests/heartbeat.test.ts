@@ -2,7 +2,7 @@
  * Dead-man heartbeat of the monitored infrastructure (server/heartbeat.ts + alerts): server, application,
  * service and database heartbeats derived from agent reports, across several servers and applications;
  * stale / disconnected servers; failure → incident (deduplicated, escalated, recovered); no external
- * watchdog request even when the deprecated DEADMAN_* variables are set; no secrets in the output.
+ * no secrets in the output. Outbound external heartbeat is covered by deadman.test.ts.
  * In-process, throw-away PostgreSQL schema.
  */
 import { test, before, after } from 'node:test';
@@ -29,8 +29,9 @@ process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'scholario-hbtest-'
 process.env.HOSTINGER_API_TOKEN = '';
 process.env.CLOUDFLARE_API_TOKEN = '';
 process.env.TELEMETRY_STALE_THRESHOLD_SEC = '10';
-process.env.DEADMAN_HEARTBEAT_URL = WATCHDOG_URL; // deprecated: must be ignored
-process.env.DEADMAN_INTERVAL_SEC = '10';
+// Infra heartbeat tests do not configure an outbound watchdog (tested in deadman.test.ts)
+process.env.DEADMAN_HEARTBEAT_URL = '';
+process.env.DEADMAN_INTERVAL_SEC = '3600';
 
 const { initStore, db } = await import('../server/store.ts');
 const { query, closePool, SCHEMA } = await import('../server/db.ts');
@@ -311,14 +312,13 @@ test('stale → disconnected server: one incident, escalated in place; component
   assert.equal(serverHeartbeat(dr).server.state, 'HEALTHY');
 });
 
-test('no external watchdog: deprecated variables are ignored, no outbound request, no URL anywhere', async () => {
-  for (const k of ['DEADMAN_HEARTBEAT_URL', 'DEADMAN_INTERVAL_SEC']) assert.ok(config.deprecatedDeadManVars.includes(k), k);
-  assert.equal('deadManHeartbeatUrl' in config, false);
+test('infrastructure heartbeat never sends outbound and never includes secrets', async () => {
+  assert.equal(config.deadManHeartbeatUrl, '');
   assert.equal(startEngine(), true);
   assert.equal(startEngine(), false, 'no duplicate workers');
   await new Promise(r => setTimeout(r, 1500));
   stopEngine();
-  assert.equal(watchdogHits, 0, 'no request was sent to the configured URL');
+  assert.equal(watchdogHits, 0, 'infra heartbeat does not ping an external URL');
   const json = JSON.stringify(infraHeartbeat());
   for (const s of ['old-secret-uuid', 'old-token', WATCHDOG_URL, prd.agentToken, dr.agentToken]) assert.equal(json.includes(s), false, `heartbeat exposes ${s.slice(0, 12)}…`);
 });

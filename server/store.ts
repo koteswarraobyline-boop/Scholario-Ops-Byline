@@ -14,6 +14,7 @@ import {
   Application, VpsServer, Monitor, Incident, AuditLog, CommunicationChannel,
   EscalationPolicy, MaintenanceWindow, Runbook, Deployment, BackupRecord, OpsUser, ServerMetricPoint, CheckRecord,
   RegistryComponent, DependencyLink, ProviderConnectionRecord, ProviderInstanceRecord, ResourceLimit, WorkerRoutingEvent,
+  TrackedCredential, GoLiveRun,
 } from '../src/types/index.ts';
 import { normalizeRouting } from '../src/lib/trafficHealth.ts';
 import { DATA_DIR, config } from './config.ts';
@@ -77,6 +78,8 @@ export interface StoreData {
   providerInstances: ProviderInstanceRecord[];
   resources: ResourceLimit[];
   workerEvents: WorkerRoutingEvent[];
+  credentials: TrackedCredential[];
+  goLiveRuns: GoLiveRun[];
 }
 
 function emptyStore(): StoreData {
@@ -84,7 +87,8 @@ function emptyStore(): StoreData {
     version: 1, servers: [], applications: [], monitors: [], monitorBuckets: {}, incidents: [], incidentSeq: 1000,
     auditLogs: [], users: [], refreshTokens: [], channels: [], escalationPolicies: [], maintenanceWindows: [],
     runbooks: [], deployments: [], backups: [], registry: [], dependencyLinks: [],
-    providerConnections: [], providerInstances: [], resources: [], workerEvents: [],
+    providerConnections: [], providerInstances: [], resources: [], workerEvents: [], credentials: [],
+    goLiveRuns: [],
   };
 }
 
@@ -136,7 +140,7 @@ const APP_CONFIG_KEYS = ['id', 'name', 'codeName', 'description', 'tier', 'rtoTa
 const MONITOR_CONFIG_KEYS = ['id', 'applicationId', 'serverId', 'name', 'type', 'target', 'environment', 'intervalSec', 'timeoutSec', 'retries', 'warningThresholdMs', 'criticalThresholdMs', 'failureConfirmationThreshold', 'recoveryConfirmationThreshold', 'expectedStatusCode', 'expectedBodyContains', 'enabled', 'runbookId', 'heartbeatToken', 'managedBy'] as const;
 const INCIDENT_COLUMN_KEYS = ['id', 'title', 'severity', 'status', 'applicationId', 'environment', 'fingerprint', 'rootCause', 'startedAt', 'resolvedAt', 'durationMinutes', 'owner', 'acknowledged', 'acknowledgedAt', 'acknowledgedBy', 'recoveryStatus', 'runbookId', 'mitigationActionTaken'] as const;
 
-const docTable = <K extends 'channels' | 'escalationPolicies' | 'maintenanceWindows' | 'runbooks' | 'deployments' | 'backups'>(table: string, prop: K): TableDef<unknown> => ({
+const docTable = <K extends 'channels' | 'escalationPolicies' | 'maintenanceWindows' | 'runbooks' | 'deployments' | 'backups' | 'goLiveRuns'>(table: string, prop: K): TableDef<unknown> => ({
   table, key: ['id'], columns: ['id', 'data'],
   rows: d => (d[prop] as Array<{ id: string }>).map(x => ({ k: x.id, values: [x.id, JSON.stringify(x)] })),
   load: (rows, d) => { (d[prop] as unknown[]) = rows.map(r => r.data); },
@@ -372,15 +376,17 @@ const TABLES: TableDef<unknown>[] = [
   docTable('runbooks', 'runbooks'),
   docTable('deployments', 'deployments'),
   docTable('backups', 'backups'),
+  docTable('go_live_runs', 'goLiveRuns'),
   // Links before components: removed links must be gone before a component delete lets
   // PostgreSQL null their feature_id, which could otherwise collide with a remaining link
   {
-    table: 'dependency_links', key: ['id'], columns: ['id', 'from_id', 'to_id', 'link_type', 'feature_id', 'notes', 'created_at'],
-    rows: d => d.dependencyLinks.map(l => ({ k: l.id, values: [l.id, l.fromId, l.toId, l.type, uuidOrNull(l.featureId), l.notes, l.createdAt] })),
+    table: 'dependency_links', key: ['id'], columns: ['id', 'from_id', 'to_id', 'link_type', 'feature_id', 'method', 'notes', 'created_at', 'updated_at'],
+    rows: d => d.dependencyLinks.map(l => ({ k: l.id, values: [l.id, l.fromId, l.toId, l.type, uuidOrNull(l.featureId), l.method, l.notes, l.createdAt, l.updatedAt] })),
     load: (rows, d) => {
       d.dependencyLinks = rows.map(r => ({
         id: r.id as string, fromId: r.from_id as string, toId: r.to_id as string, type: r.link_type as DependencyLink['type'],
-        featureId: (r.feature_id as string) ?? null, notes: r.notes as string, createdAt: iso(r.created_at),
+        featureId: (r.feature_id as string) ?? null, method: (r.method as DependencyLink['method']) ?? null, notes: r.notes as string,
+        createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
       })).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     },
   },
@@ -479,6 +485,29 @@ const TABLES: TableDef<unknown>[] = [
         createdAt: iso(r.created_at),
         updatedAt: iso(r.updated_at),
       }));
+    },
+  },
+  {
+    table: 'tracked_credentials', key: ['id'],
+    columns: ['id', 'name', 'kind', 'provider', 'application_id', 'owner', 'environment', 'expires_at', 'notes', 'created_at', 'updated_at'],
+    rows: d => d.credentials.map(c => ({
+      k: c.id,
+      values: [c.id, c.name, c.kind, c.provider, uuidOrNull(c.applicationId), c.owner, c.environment, c.expiresAt, c.notes ?? '', c.createdAt, c.updatedAt],
+    })),
+    load: (rows, d) => {
+      d.credentials = rows.map(r => ({
+        id: r.id as string,
+        name: r.name as string,
+        kind: r.kind as TrackedCredential['kind'],
+        provider: (r.provider as string) ?? '',
+        applicationId: (r.application_id as string) ?? undefined,
+        owner: (r.owner as string) ?? '',
+        environment: r.environment as TrackedCredential['environment'],
+        expiresAt: iso(r.expires_at),
+        notes: (r.notes as string) ?? '',
+        createdAt: iso(r.created_at),
+        updatedAt: iso(r.updated_at),
+      })).sort((a, b) => a.expiresAt.localeCompare(b.expiresAt));
     },
   },
   {

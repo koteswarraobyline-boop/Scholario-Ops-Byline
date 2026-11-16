@@ -10,7 +10,7 @@ import { Pagination } from '../ui/Pagination';
 
 const CATEGORIES: Array<AuditLog['category'] | ''> = [
   '', 'INCIDENT', 'FAILOVER', 'MAINTENANCE', 'MONITOR', 'CLOUDFLARE', 'INFRASTRUCTURE', 'RUNBOOK',
-  'APPLICATION', 'AUTH', 'USER', 'NOTIFICATION', 'DEPLOYMENT', 'BACKUP', 'REGISTRY', 'CAPACITY',
+  'APPLICATION', 'AUTH', 'USER', 'NOTIFICATION', 'DEPLOYMENT', 'BACKUP', 'REGISTRY', 'CAPACITY', 'CREDENTIAL',
 ];
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -18,7 +18,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   MAINTENANCE: 'text-purple-400', MONITOR: 'text-cyan-400', CLOUDFLARE: 'text-orange-400',
   INFRASTRUCTURE: 'text-emerald-400', RUNBOOK: 'text-yellow-400', USER: 'text-sky-400',
   NOTIFICATION: 'text-pink-400', APPLICATION: 'text-indigo-400', DEPLOYMENT: 'text-teal-400',
-  BACKUP: 'text-lime-400', REGISTRY: 'text-violet-400', CAPACITY: 'text-cyan-400',
+  BACKUP: 'text-lime-400', REGISTRY: 'text-violet-400', CAPACITY: 'text-cyan-400', CREDENTIAL: 'text-rose-300',
 };
 
 const fmtDateTime = (iso: string) => {
@@ -27,7 +27,7 @@ const fmtDateTime = (iso: string) => {
 };
 
 export const AuditLogsView: React.FC = () => {
-  const { theme } = useOps();
+  const { theme, auditLogs: liveHead } = useOps();
   const isDark = theme === 'dark';
 
   const [logs, setLogs] = useState<AuditLog[]>([]);
@@ -71,6 +71,23 @@ export const AuditLogsView: React.FC = () => {
   }, [page, category, q]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // Rows already loaded from the API are not treated as new. A later live event is prepended on page 1.
+  const seenLive = useRef(new Set<string>());
+  useEffect(() => {
+    for (const row of logs) seenLive.current.add(row.id);
+  }, [logs]);
+  useEffect(() => {
+    const newest = liveHead[0];
+    if (!newest || seenLive.current.has(newest.id)) return;
+    seenLive.current.add(newest.id);
+    const hay = `${newest.operator} ${newest.action} ${newest.targetId} ${newest.details} ${newest.category}`.toLowerCase();
+    if (category && newest.category !== category) return;
+    if (q && !hay.includes(q.toLowerCase())) return;
+    setTotal(t => t + 1);
+    if (page !== 1) return;
+    setLogs(prev => (prev.some(row => row.id === newest.id) ? prev : [newest, ...prev].slice(0, pageSize)));
+  }, [liveHead, page, category, q]);
 
   const handleCategory = (c: string) => { setCategory(c); setPage(1); };
   const filtersActive = Boolean(category || q);

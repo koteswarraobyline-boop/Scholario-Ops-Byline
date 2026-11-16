@@ -1,9 +1,11 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
-import { MaintenanceWindow } from '../../types';
+import { ImpactPreview, MaintenanceWindow } from '../../types';
 import { Calendar, BellOff, Plus, X, CheckCircle2, Trash2, Info } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
+import { ImpactPreviewCard } from '../ui/ImpactPreviewCard';
+import { api } from '../../services/api';
 
 const fmtDateTime = (iso?: string) => {
   if (!iso) return '—';
@@ -39,11 +41,26 @@ const CreateMaintenanceForm: React.FC<{ onClose: () => void; existing?: Maintena
   const [expectedImpact, setExpectedImpact] = useState(existing?.expectedImpact ?? '');
   const [suppress, setSuppress] = useState<string[]>(existing?.suppressMonitors ?? []);
   const [saving, setSaving] = useState(false);
+  const [preview, setPreview] = useState<ImpactPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const appMonitors = useMemo(
     () => monitors.filter(m => m.applicationId === applicationId && m.environment === environment),
     [monitors, applicationId, environment],
   );
+
+  useEffect(() => {
+    if (!applicationId) { setPreview(null); return; }
+    let cancelled = false;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    api.getImpactPreview({ applicationId, environment })
+      .then(p => { if (!cancelled) setPreview(p); })
+      .catch(err => { if (!cancelled) { setPreview(null); setPreviewError(err instanceof Error ? err.message : 'Preview failed'); } })
+      .finally(() => { if (!cancelled) setPreviewLoading(false); });
+    return () => { cancelled = true; };
+  }, [applicationId, environment]);
 
   const startIso = localInputToIso(start);
   const endIso = localInputToIso(end);
@@ -122,9 +139,11 @@ const CreateMaintenanceForm: React.FC<{ onClose: () => void; existing?: Maintena
         <input className={inputCls} maxLength={1000} value={reason} onChange={e => setReason(e.target.value)} placeholder="Why this work is happening" />
       </div>
       <div>
-        <label className={labelCls}>Expected impact</label>
+        <label className={labelCls}>Expected impact (operator notes)</label>
         <input className={inputCls} maxLength={1000} value={expectedImpact} onChange={e => setExpectedImpact(e.target.value)} placeholder="e.g. Site unavailable for up to 10 minutes" />
       </div>
+
+      <ImpactPreviewCard preview={preview} loading={previewLoading} error={previewError} isDark={isDark} />
 
       <div>
         <label className={labelCls}>Monitors to suppress</label>

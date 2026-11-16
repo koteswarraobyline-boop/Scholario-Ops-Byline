@@ -7,8 +7,10 @@
  * GB is 10^9 bytes. GiB is 1024^3 bytes. They are not interchangeable labels.
  * API quota usage is already counted inside the resource's window. This module does not
  * turn an hourly count into a daily count.
+ * forecastTimeToFull — days left before usage reaches a finite limit, from stored usage history.
  */
 import type { ResourceAlertState, ResourceFreshness, ResourceKind, ResourceUnit, ThresholdMode } from '../types/index.ts';
+import { forecastToThreshold, type Confidence, type ForecastOptions } from './insights.ts';
 
 export const RESOURCE_KINDS: ResourceKind[] = [
   'CPU', 'MEMORY', 'SERVER_DISK', 'STORAGE', 'SEATS', 'ACTIVE_USERS', 'DATABASE_SIZE', 'DATABASE_CONNECTIONS', 'API_QUOTA', 'LOAD',
@@ -138,6 +140,50 @@ export interface CapacityResult {
   critical: number | null;
   /** The number compared with the thresholds. Null when the state is not a threshold result. */
   metric: number | null;
+}
+
+/** Trend-based estimate of how long until usage reaches a finite capacity (or other limit). */
+export interface TimeToFullForecast {
+  /** Days until the limit; null when usage is not rising toward it. 0 = already at/over. */
+  daysLeft: number | null;
+  etaHours: number | null;
+  slopePerDay: number;
+  current: number;
+  limit: number;
+  r2: number;
+  samples: number;
+  spanHours: number;
+  confidence: Confidence;
+}
+
+/**
+ * Forecast days left before usage reaches `limit`, from recorded measurements (oldest → newest).
+ * Returns null when there is not enough history for a reliable trend.
+ */
+export function forecastTimeToFull(
+  points: Array<{ measuredAt: string; usage: number }>,
+  limit: number,
+  opts: ForecastOptions = {},
+): TimeToFullForecast | null {
+  if (!(Number.isFinite(limit) && limit > 0)) return null;
+  const series = points
+    .map(p => ({ t: Date.parse(p.measuredAt), v: p.usage }))
+    .filter(p => Number.isFinite(p.t) && Number.isFinite(p.v))
+    .sort((a, b) => a.t - b.t);
+  // Resource measurements are usually fewer than per-minute agent rollups.
+  const f = forecastToThreshold(series, limit, { minSamples: 12, minSpanHours: 6, maxEtaHours: 24 * 90, ...opts });
+  if (!f) return null;
+  return {
+    daysLeft: f.etaHours === null ? null : Math.round((f.etaHours / 24) * 100) / 100,
+    etaHours: f.etaHours,
+    slopePerDay: f.slopePerDay,
+    current: f.current,
+    limit,
+    r2: f.r2,
+    samples: f.samples,
+    spanHours: f.spanHours,
+    confidence: f.confidence,
+  };
 }
 
 function pair(mode: ThresholdMode, warning: number, critical: number, from: CapacityResult['thresholdFrom']): Pick<CapacityResult, 'mode' | 'warning' | 'critical' | 'thresholdFrom'> {

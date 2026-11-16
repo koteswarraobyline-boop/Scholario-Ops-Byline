@@ -10,6 +10,8 @@ In-repo work for multi-app Ops readiness is complete. These steps run on the **l
 - [ ] `GET https://<ops-host>/api/health/live` returns ok.
 - [ ] `GET https://<ops-host>/api/health` shows a recent `schedulerAgeMs` (scheduler is running).
 - [ ] `GET https://<ops-host>/api/health/ready` returns ready (database reachable).
+- [ ] `DEADMAN_HEARTBEAT_URL` is set to a real external watchdog ping URL; `GET /api/v1/external-heartbeat` shows HEALTHY (or PENDING briefly after restart). Interval 60s / tolerance 180s unless intentionally changed.
+- [ ] Capacity resources with history show a forecast on the resource detail (`daysLeft`); rising usage toward a limit opens a Capacity Forecast incident within about 7 days.
 
 ## 2. Agents on each VPS
 

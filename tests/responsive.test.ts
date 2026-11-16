@@ -39,8 +39,6 @@ const LONG = 'very-long-technical-string-without-any-spaces-'.repeat(4);
 
 let server: ChildProcess | null = null;
 let chrome: ChildProcess | null = null;
-let watchdog: http.Server | null = null;
-let watchdogHits = 0;
 let seed: { prdId: string; drId: string; tokens: Record<string, string> } | null = null;
 let token = '';
 let login: { tokens: { accessToken: string; refreshToken: string }; user: unknown } | null = null;
@@ -151,13 +149,11 @@ before(async () => {
   await probe.connect();
   try { await assertConnectedToTestDatabase(probe); } finally { await probe.end().catch(() => {}); }
   verified = true;
-  // Deprecated external watchdog URL is set on purpose: it must be ignored (no request ever reaches it)
-  watchdog = http.createServer((_q, r) => { watchdogHits++; r.end('OK'); });
-  await new Promise<void>(r => watchdog!.listen(0, '127.0.0.1', () => r()));
+  // No outbound external heartbeat in layout tests (covered by deadman.test.ts / production.test.ts)
   server = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
     env: { ...process.env, DATABASE_URL, NODE_ENV: 'production', PORT: String(PORT), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR, ADMIN_EMAIL: ADMIN.email, ADMIN_PASSWORD: ADMIN.password,
       JWT_SECRET: 'r'.repeat(40), PUBLIC_URL: 'https://ops.test.invalid', CLOUDFLARE_API_TOKEN: '', HOSTINGER_API_TOKEN: '', LOG_FORMAT: 'json',
-      DEADMAN_HEARTBEAT_URL: `http://127.0.0.1:${(watchdog.address() as { port: number }).port}/ping/secret-uuid`, DEADMAN_INTERVAL_SEC: '10',
+      DEADMAN_HEARTBEAT_URL: '',
       NOTIFY_ALLOWED_PRIVATE_TARGETS: '127.0.0.1' },
     // SERVER_LOG=<file> keeps the test server's log for debugging
     stdio: process.env.SERVER_LOG ? (fd => ['ignore', fd, fd])(fs.openSync(process.env.SERVER_LOG, 'a')) : ['ignore', 'ignore', 'ignore'],
@@ -232,7 +228,6 @@ after(async () => {
   page?.close();
   chrome?.kill();
   server?.kill();
-  watchdog?.close();
   await sleep(500);
   await dropVerifiedTestSchema(verified, async () => {
     const pgc = new pg.Client({ connectionString: DATABASE_URL });
@@ -375,7 +370,7 @@ ${(await bodyText()).slice(0, 3000)}`);
 
 /** Every page of the app (routes in src/App.tsx) — no page overflow, nothing outside its card, no overlaps */
 const ALL_ROUTES = ['/applications', '/incidents', '/resilience', '/backups', '/dependencies', '/hostinger', '/cloudflare',
-  '/deployments', '/runbooks', '/maintenance', '/communications', '/reliability', '/resources', '/reports', '/audit', '/users'];
+  '/deployments', '/runbooks', '/maintenance', '/communications', '/reliability', '/resources', '/impact', '/reports', '/audit', '/users'];
 for (const width of [1366, 1024]) {
   test(`all other pages render cleanly at ${width}px`, { skip: SKIP }, async () => {
     const failures: string[] = [];
@@ -398,7 +393,7 @@ for (const width of [1366, 1024]) {
   });
 }
 
-test('heartbeat stream in the browser: ICT stopped on PRD → server stays CONNECTED, node FAILING; expand; filters; recovery; no watchdog', { skip: SKIP }, async () => {
+test('heartbeat stream in the browser: ICT stopped on PRD → server stays CONNECTED, node FAILING; expand; filters; recovery', { skip: SKIP }, async () => {
   const svc = [{ name: 'nginx', status: 'active', pid: 1, memoryMb: 20, since: '' }, { name: 'pm2-root', status: 'active', pid: 2, memoryMb: 30, since: '' }];
   const ict = (status: 'HEALTHY' | 'DOWN') => [{ applicationId: 'ict', name: 'ICT Production', environment: 'PRD', port: 4100, path: '/health', listening: status === 'HEALTHY', status,
     statusCode: status === 'HEALTHY' ? 200 : null, latencyMs: status === 'HEALTHY' ? 5 : null, error: status === 'DOWN' ? 'timed out' : null, checkedAt: new Date().toISOString() }];
@@ -440,9 +435,7 @@ test('heartbeat stream in the browser: ICT stopped on PRD → server stays CONNE
   await visit('/overview', 1366, 'Dead-Man');
   assert.ok((await bodyText()).includes('PRD VPS + DR VPS'), 'dead-man card names the monitored servers');
   const html = await page!.eval<string>('document.documentElement.outerHTML');
-  assert.equal(html.includes('secret-uuid'), false, 'old watchdog URL in the DOM');
   for (const tok of Object.values(seed!.tokens)) assert.equal(html.includes(tok), false, 'agent token in the DOM');
-  assert.equal(watchdogHits, 0, 'no request to the deprecated external watchdog');
 });
 
 

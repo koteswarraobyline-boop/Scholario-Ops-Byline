@@ -4,7 +4,7 @@
  * they never mutate `db` themselves.
  */
 import crypto from 'crypto';
-import type { RegistryComponent, RegistryKind, DependencyLink, RegistryImpact } from '../src/types/index.ts';
+import type { RegistryComponent, RegistryKind, DependencyLink, DependencyMethod, RegistryImpact } from '../src/types/index.ts';
 import { db } from './store.ts';
 import { ValidationError, body, reqStr, optStr, oneOf, optOneOf } from './validate.ts';
 import { registryNameKey } from './registryName.ts';
@@ -12,6 +12,8 @@ import { registryNameKey } from './registryName.ts';
 export const REGISTRY_KINDS = ['APPLICATION', 'SERVER', 'DATABASE', 'STORAGE', 'THIRD_PARTY_API', 'PROVIDER', 'BUSINESS_FEATURE'] as const satisfies readonly RegistryKind[];
 export const REGISTRY_TIERS = ['TIER_1', 'TIER_2', 'TIER_3'] as const;
 export const LINK_TYPES = ['HARD', 'SOFT'] as const;
+/** How a consumer reaches a provider. Empty is allowed and stored as null. */
+export const LINK_METHODS = ['HTTP', 'API', 'DATABASE', 'EMBED', 'LINK', 'OTHER'] as const satisfies readonly DependencyMethod[];
 /** Kinds that serve people directly, so they carry a user count and the teams/customers served */
 export const AUDIENCE_KINDS: readonly RegistryKind[] = ['APPLICATION', 'BUSINESS_FEATURE'];
 
@@ -124,12 +126,25 @@ export function buildLink(req: { body?: unknown }, existing?: DependencyLink): D
     if (featureId === toId) throw new ValidationError('The feature that needs it cannot be B itself');
   }
   const notes = b.notes !== undefined ? (optStr(b, 'notes', 'Notes', 500) ?? '') : existing?.notes ?? '';
+  const method = methodOf(b, existing);
 
   const id = existing?.id ?? crypto.randomUUID();
   if (db.dependencyLinks.some(l => l.id !== id && l.fromId === fromId && l.toId === toId && (l.featureId ?? null) === featureId)) {
     throw new RegistryConflict(`"${from.name}" already depends on "${to.name}"${featureId ? ' for that feature' : ''}`);
   }
-  return { id, fromId, toId, type, featureId, notes, createdAt: existing?.createdAt ?? new Date().toISOString() };
+  const now = new Date().toISOString();
+  return { id, fromId, toId, type, featureId, method, notes, createdAt: existing?.createdAt ?? now, updatedAt: now };
+}
+
+/** undefined means "not sent" (keep). null or '' clears. Anything else must be an approved method. */
+function methodOf(b: Record<string, unknown>, existing?: DependencyLink): DependencyMethod | null {
+  if (!Object.prototype.hasOwnProperty.call(b, 'method')) return existing?.method ?? null;
+  const v = b.method;
+  if (v === null || v === '') return null;
+  if (typeof v !== 'string' || !(LINK_METHODS as readonly string[]).includes(v)) {
+    throw new ValidationError(`Method must be one of: ${LINK_METHODS.join(', ')}, or empty`);
+  }
+  return v as DependencyMethod;
 }
 
 /** Removes a component with its links; links that named it as their feature keep existing without one */

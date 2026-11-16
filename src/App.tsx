@@ -2,6 +2,7 @@ import React, { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { OpsProvider, useOps } from './context/OpsContext';
+import { DependencyDemoProvider } from './context/DependencyDemoContext';
 
 import { Shell } from './components/layout/Shell';
 import { LoginPage } from './components/auth/LoginPage';
@@ -13,6 +14,7 @@ import { NotFoundView } from './components/ui/NotFoundView';
 const ApplicationsView = lazy(() => import('./components/applications/ApplicationsView').then(m => ({ default: m.ApplicationsView })));
 const InfrastructureView = lazy(() => import('./components/infrastructure/InfrastructureView').then(m => ({ default: m.InfrastructureView })));
 const MonitorsView = lazy(() => import('./components/monitors/MonitorsView').then(m => ({ default: m.MonitorsView })));
+const CredentialsView = lazy(() => import('./components/monitors/CredentialsView').then(m => ({ default: m.CredentialsView })));
 const IncidentsView = lazy(() => import('./components/incidents/IncidentsView').then(m => ({ default: m.IncidentsView })));
 const DrDashboardView = lazy(() => import('./components/resilience/DrDashboardView').then(m => ({ default: m.DrDashboardView })));
 const BackupsView = lazy(() => import('./components/resilience/BackupsView').then(m => ({ default: m.BackupsView })));
@@ -26,6 +28,7 @@ const CommunicationsView = lazy(() => import('./components/communications/Commun
 const ReportsView = lazy(() => import('./components/analytics/ReportsView').then(m => ({ default: m.ReportsView })));
 const ReliabilityView = lazy(() => import('./components/analytics/ReliabilityView').then(m => ({ default: m.ReliabilityView })));
 const ResourcesView = lazy(() => import('./components/capacity/ResourcesView').then(m => ({ default: m.ResourcesView })));
+const ImpactView = lazy(() => import('./components/impact/ImpactView').then(m => ({ default: m.ImpactView })));
 const AuditLogsView = lazy(() => import('./components/admin/AuditLogsView').then(m => ({ default: m.AuditLogsView })));
 const UsersView = lazy(() => import('./components/admin/UsersView').then(m => ({ default: m.UsersView })));
 const SetupView = lazy(() => import('./components/setup/SetupView').then(m => ({ default: m.SetupView })));
@@ -68,6 +71,7 @@ const DashboardView: React.FC<{ tab: string }> = ({ tab }) => {
     applications:   <ApplicationsView />,
     infrastructure: <InfrastructureView />,
     monitors:       <MonitorsView />,
+    credentials:    <CredentialsView />,
     incidents:      <IncidentsView />,
     resilience:     <DrDashboardView />,
     backups:        <BackupsView />,
@@ -80,6 +84,7 @@ const DashboardView: React.FC<{ tab: string }> = ({ tab }) => {
     communications: <CommunicationsView />,
     reliability:    <ReliabilityView />,
     resources:      <ResourcesView />,
+    impact:         <ImpactView />,
     reports:        <ReportsView />,
     audit:          <AuditLogsView />,
     users:          <UsersView />,
@@ -109,7 +114,9 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <OpsProvider>
-                  <DashboardRoutes />
+                  <DependencyDemoProvider>
+                    <DashboardRoutes />
+                  </DependencyDemoProvider>
                 </OpsProvider>
               </ProtectedRoute>
             }
@@ -130,6 +137,7 @@ const DashboardRoutes: React.FC = () => (
     <Route path="/applications"  element={<DashboardView tab="applications" />} />
     <Route path="/infrastructure"element={<DashboardView tab="infrastructure" />} />
     <Route path="/monitors"      element={<DashboardView tab="monitors" />} />
+    <Route path="/credentials"   element={<DashboardView tab="credentials" />} />
     <Route path="/incidents"     element={<DashboardView tab="incidents" />} />
     <Route path="/resilience"    element={<DashboardView tab="resilience" />} />
     <Route path="/backups"       element={<DashboardView tab="backups" />} />
@@ -142,6 +150,7 @@ const DashboardRoutes: React.FC = () => (
     <Route path="/communications"element={<DashboardView tab="communications" />} />
     <Route path="/reliability"   element={<DashboardView tab="reliability" />} />
     <Route path="/resources"     element={<DashboardView tab="resources" />} />
+    <Route path="/impact"       element={<DashboardView tab="impact" />} />
     <Route path="/reports"       element={<DashboardView tab="reports" />} />
     <Route path="/audit"         element={<DashboardView tab="audit" />} />
     <Route path="/users"         element={<DashboardView tab="users" />} />
