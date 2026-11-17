@@ -863,19 +863,19 @@ test('Setup: dependency register — add entries, record and edit a dependency, 
   // 2. Record "Portal depends on Database" (soft), then edit it to hard
   await clickText('Add dependency');
   await waitFor(async () => Boolean(await page!.eval(`!!document.querySelector('form[aria-label="New dependency"]')`)), 'dependency editor opened');
-  await fill('New dependency', 'A (depends on B)', portal.id);
-  await fill('New dependency', 'B (needed by A)', dbc.id);
+  await fill('New dependency', 'Consumer (depends on the provider)', portal.id);
+  await fill('New dependency', 'Provider (needed by the consumer)', dbc.id);
   await fill('New dependency', 'Type', 'SOFT');
-  await fill('New dependency', 'Notes', 'Read-only mode without the database');
+  await fill('New dependency', 'Business rationale', 'Read-only mode without the database');
   await submit('New dependency');
   await waitFor(async () => (await registry()).links.some(l => l.fromId === portal.id && l.toId === dbc.id && l.type === 'SOFT'), 'soft link saved');
-  await waitFor(async () => /Reg UI Portal depends on Reg UI Database\s*SOFT/.test(await sectionText()), 'link listed as SOFT');
+  await waitFor(async () => /Reg UI Portal\s*→\s*Reg UI Database[\s\S]*?\bSOFT\b/.test(await sectionText()), 'link listed as SOFT');
   await clickLabel('Edit dependency Reg UI Portal on Reg UI Database');
   await waitFor(async () => Boolean(await page!.eval(`!!document.querySelector('form[aria-label="Edit dependency"]')`)), 'link editor opened');
   await fill('Edit dependency', 'Type', 'HARD');
   await submit('Edit dependency');
   await waitFor(async () => (await registry()).links.some(l => l.fromId === portal.id && l.toId === dbc.id && l.type === 'HARD'), 'edited to HARD');
-  await waitFor(async () => /Reg UI Portal depends on Reg UI Database\s*HARD/.test(await sectionText()), 'link listed as HARD');
+  await waitFor(async () => /Reg UI Portal\s*→\s*Reg UI Database[\s\S]*?\bHARD\b/.test(await sectionText()), 'link listed as HARD');
 
   // 3. Impact of the database: the portal stops, with its users and teams
   await clickLabel('Impact of Reg UI Database');
