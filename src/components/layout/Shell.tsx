@@ -25,6 +25,7 @@ import {
   FileText, 
   Sliders, 
   Radio, 
+  KeyRound,
   Cpu,
   Zap,
   ArrowRight,
@@ -34,7 +35,8 @@ import {
   LogOut,
   Settings,
   Users,
-  Gauge
+  Gauge,
+  Waypoints
 } from 'lucide-react';
 import { CommandPalette } from './CommandPalette';
 import { CriticalAlerts } from './CriticalAlerts';
@@ -135,8 +137,10 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       items: [
         { id: 'applications', label: 'Applications', icon: Layers, count: `${systemSummary.healthyApps}/${systemSummary.totalApps}` },
         { id: 'monitors', label: 'Monitors', icon: Radio, count: `${systemSummary.healthyMonitors}/${systemSummary.totalMonitors}` },
+        { id: 'credentials', label: 'Credentials', icon: KeyRound },
         { id: 'infrastructure', label: 'Infrastructure', icon: Server, count: `${systemSummary.healthyServers}/${systemSummary.totalServers}` },
         { id: 'resources', label: 'Capacity', icon: Gauge, },
+        { id: 'impact', label: 'Impact', icon: Waypoints },
         { id: 'dependencies', label: 'Dependencies', icon: Cpu }
       ]
     },

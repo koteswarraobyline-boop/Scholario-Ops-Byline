@@ -9,7 +9,7 @@
  *
  * evaluateAlerts() derives alerts from real state every minute:
  *   server heartbeat stale → offline (one incident, escalated) · database unavailable · replication broken · backup stale/failed ·
- *   DR not ready · SSL certificate expiring · server telemetry conditions (sustained CPU / memory /
+ *   DR not ready · SSL certificate expiring · API key / token / subscription expiry · server telemetry conditions (sustained CPU / memory /
  *   swap, full disk / inodes, failed systemd service, PM2 app errored / restart spike, local health
  *   check failing, clock not synchronised — see server/telemetryHealth.ts, warnings with alert: true). (Application down/recovered and Cloudflare origin
  *   unhealthy are raised by the monitor engine / Load Balancer poller.)
@@ -21,7 +21,7 @@ import { THRESHOLDS } from '../src/lib/thresholds.ts';
 import { broadcast, audit } from './events.ts';
 import { notifyIncident, CHANNEL_FAILING_AFTER } from './notify.ts';
 import { MOCK_INCIDENT_MONITOR_ID } from '../src/lib/mockIncident.ts';
-import { nextIncidentId } from './engine.ts';
+import { nextIncidentId, externalHeartbeat } from './engine.ts';
 import { agentState, backupStatus, databaseHealth } from './health.ts';
 import { readiness } from './readiness.ts';
 import { serverHealth } from './telemetryHealth.ts';
@@ -31,7 +31,13 @@ import { serverInsight, applicationSlo } from './insights.ts';
 import { opsBackupHealth } from './opsBackup.ts';
 import { formatEta } from '../src/lib/insights.ts';
 import { assessment } from './resources.ts';
+import { forecastTimeToFull } from '../src/lib/resources.ts';
+import { readResourceMeasurements } from './resourceHistory.ts';
 import type { ResourceLimit } from '../src/types/index.ts';
+import { enrichNewIncident, buildImpactSnapshot } from './incidentImpact.ts';
+import { daysUntil, expiryState } from '../src/lib/credentialExpiry.ts';
+import { suggestSeverity, severityAtLeast } from '../src/lib/severity.ts';
+import type { TrackedCredential } from '../src/types/index.ts';
 
 export interface AlertInput {
   fingerprint: string;
@@ -71,14 +77,14 @@ export function openAlert(a: AlertInput): { incident: Incident; created: boolean
     return { incident: existing, created: false };
   }
   const now = new Date().toISOString();
-  const incident: Incident = {
+  const incident: Incident = enrichNewIncident({
     id: nextIncidentId(), title: a.title, severity: a.severity, status: 'OPEN',
     applicationId: a.applicationId ?? '', environment: a.environment ?? 'PRD', fingerprint: a.fingerprint,
     rootCause: a.detail, startedAt: now, durationMinutes: 0, owner: 'Unassigned', acknowledged: false,
     affectedServices: a.affected ?? [], affectedMonitors: [], dependentFailures: [],
     timeline: [ev(a.source, a.severity === 'CRITICAL' || a.severity === 'EMERGENCY' ? 'CRITICAL' : 'WARN', a.detail)],
-    recoveryStatus: 'Awaiting recovery', notes: [],
-  };
+    recoveryStatus: 'Awaiting recovery', notes: [], fixSteps: [],
+  }, { source: a.source });
   db.incidents.unshift(incident);
   persist();
   broadcast('incident_created', incident);
@@ -239,6 +245,48 @@ export function evaluateResourceAlerts(): void {
   if (changed) persist();
 }
 
+/**
+ * Trend-based "time to full" alerts from stored resource measurements.
+ * Opens when usage is rising toward capacity within 7 days (not LOW confidence).
+ * Closes when the trend is gone or ETA is beyond 14 days. Already-over-capacity is
+ * evaluateResourceAlerts' job (EXCEEDED), not a forecast.
+ */
+export async function evaluateResourceForecastAlerts(): Promise<void> {
+  for (const r of db.resources) {
+    const fp = `resource-forecast:${r.id}`;
+    if (!r.enabled || r.unlimited || r.capacity === null || !(r.capacity > 0)) {
+      resolveAlert(fp, 'Capacity Forecast', `${r.name} has no finite capacity to forecast`);
+      continue;
+    }
+    const points = await readResourceMeasurements(r.id, 500);
+    const forecast = forecastTimeToFull(
+      [...points].reverse().map(p => ({ measuredAt: p.measuredAt, usage: p.usage })),
+      r.capacity,
+    );
+    const server = r.serverId ? db.servers.find(s => s.id === r.serverId) : undefined;
+    if (
+      forecast
+      && forecast.daysLeft !== null
+      && forecast.daysLeft > 0
+      && forecast.daysLeft <= 7
+      && forecast.confidence !== 'LOW'
+    ) {
+      openOrEscalate({
+        fingerprint: fp,
+        title: `${r.name}: predicted to reach capacity in ~${forecast.daysLeft} day(s)`,
+        severity: forecast.daysLeft <= 2 ? 'HIGH' : 'WARNING',
+        detail: `Usage ${forecast.current} ${r.unit} rising ${forecast.slopePerDay}/day toward ${forecast.limit} ${r.unit} (fit r²=${forecast.r2}, ${forecast.spanHours} h, ${forecast.confidence} confidence)`,
+        applicationId: r.applicationId ?? server?.applicationId ?? undefined,
+        environment: server?.environment ?? 'PRD',
+        source: 'Capacity Forecast',
+        affected: [r.name],
+      });
+    } else if (!forecast || forecast.daysLeft === null || forecast.daysLeft > 14) {
+      resolveAlert(fp, 'Capacity Forecast', `${r.name} is no longer trending to full within two weeks`);
+    }
+  }
+}
+
 /** True when every recent 1-minute rollup is at or above the load-per-core line. A missing core count never counts as held. */
 function agentLoadHeld(serverId: string | null, level: 'warning' | 'critical'): boolean {
   if (!serverId) return false;
@@ -255,6 +303,84 @@ function agentLoadHeld(serverId: string | null, level: 'warning' | 'critical'): 
 }
 
 /** Derives alerts from current state. Unknown / not-configured states never open or close alerts. */
+const KIND_LABEL: Record<TrackedCredential['kind'], string> = {
+  API_KEY: 'API key',
+  TOKEN: 'Token',
+  SUBSCRIPTION: 'Subscription',
+};
+
+function severityForExpiredCredential(c: TrackedCredential): IncidentSeverity {
+  const snap = buildImpactSnapshot({ applicationId: c.applicationId, environment: c.environment });
+  const app = c.applicationId ? db.applications.find(a => a.id === c.applicationId) : undefined;
+  const suggestion = suggestSeverity({
+    tier: app?.tier ?? null,
+    environment: c.environment,
+    usersStopped: snap.usersStopped,
+    usersAffected: snap.usersAffected,
+    hardCount: snap.hardCount,
+    softCount: snap.softCount,
+  });
+  return severityAtLeast(suggestion.confident ? suggestion.severity : 'HIGH', 'HIGH');
+}
+
+/**
+ * One incident per credential. Expiring soon is a warning. Expired is at least HIGH and follows
+ * tier and reach when the register has them. Renewing the date resolves the open incident.
+ */
+export function evaluateCredentialExpiry(now = Date.now()): { opened: number; resolved: number } {
+  const warn = config.credentialExpiryWarnDays;
+  let opened = 0;
+  let resolved = 0;
+  const live = new Set<string>();
+  for (const c of db.credentials) {
+    live.add(c.id);
+    const state = expiryState(c.expiresAt, warn, now);
+    const soon = `credential-expiry:${c.id}`;
+    const dead = `credential-expired:${c.id}`;
+    const label = KIND_LABEL[c.kind];
+    if (state === 'EXPIRED') {
+      if (resolveAlert(soon, 'Credential Monitor', `${c.name} is past its expiry date; the expired-credential incident carries it`)) resolved++;
+      const days = daysUntil(c.expiresAt, now);
+      const { created } = openAlert({
+        fingerprint: dead,
+        title: `${label} "${c.name}" has expired`,
+        severity: severityForExpiredCredential(c),
+        detail: `${c.provider} ${label.toLowerCase()} owned by ${c.owner} expired ${days === null ? c.expiresAt : `${-days} day(s) ago`} (${c.expiresAt}).`,
+        applicationId: c.applicationId,
+        environment: c.environment,
+        source: 'Credential Monitor',
+        affected: [c.name, c.provider].filter(Boolean),
+      });
+      if (created) opened++;
+    } else if (state === 'EXPIRING') {
+      if (resolveAlert(dead, 'Credential Monitor', `${c.name} expiry was extended`)) resolved++;
+      const days = daysUntil(c.expiresAt, now);
+      const { created } = openAlert({
+        fingerprint: soon,
+        title: `${label} "${c.name}" expires in ${days} day(s)`,
+        severity: 'WARNING',
+        detail: `${c.provider} ${label.toLowerCase()} owned by ${c.owner} expires ${c.expiresAt} (warning window ${warn} days).`,
+        applicationId: c.applicationId,
+        environment: c.environment,
+        source: 'Credential Monitor',
+        affected: [c.name, c.provider].filter(Boolean),
+      });
+      if (created) opened++;
+    } else {
+      if (resolveAlert(soon, 'Credential Monitor', `${c.name} is outside the expiry window`)) resolved++;
+      if (resolveAlert(dead, 'Credential Monitor', `${c.name} is valid again`)) resolved++;
+    }
+  }
+  for (const inc of db.incidents) {
+    if (inc.status === 'RESOLVED' || inc.status === 'CLOSED' || !inc.fingerprint) continue;
+    const id = inc.fingerprint.startsWith('credential-expiry:') || inc.fingerprint.startsWith('credential-expired:')
+      ? inc.fingerprint.split(':')[1]
+      : '';
+    if (id && !live.has(id) && resolveAlert(inc.fingerprint, 'Credential Monitor', 'Credential was removed')) resolved++;
+  }
+  return { opened, resolved };
+}
+
 export function evaluateAlerts() {
   try {
     // Server heartbeat (only servers whose agent reported at least once). One incident per outage:
@@ -332,6 +458,7 @@ export function evaluateAlerts() {
     }
 
     evaluateInsightAlerts();
+    void evaluateResourceForecastAlerts().catch(err => log.error('alerts', `resource forecast evaluation failed: ${(err as Error).message}`));
 
     // Notification channels that keep failing: WARNING, so the other channels carry it (the failing one
     // simply fails again). No error text in the incident: it could name the destination.
@@ -385,12 +512,30 @@ export function evaluateAlerts() {
       }
     }
 
+    const credentials = evaluateCredentialExpiry();
+    if (credentials.opened || credentials.resolved) log.info('alerts', `credentials: ${credentials.opened} opened, ${credentials.resolved} resolved`);
+
     // SSL certificates expiring soon (expired / invalid certificates are monitor incidents already)
     for (const m of db.monitors.filter(x => x.type === 'SSL' && x.enabled)) {
       const fp = `ssl-expiry:${m.id}`;
       if (m.status === 'WARNING' && m.lastProbeStatus === 'DEGRADED') {
         openAlert({ fingerprint: fp, title: `SSL certificate for ${m.target} expires soon`, severity: 'WARNING', detail: m.history[0]?.detail ?? 'Certificate close to expiry', applicationId: m.applicationId, environment: m.environment, source: 'SSL Monitor', affected: [m.target] });
       } else if (m.status === 'HEALTHY') resolveAlert(fp, 'SSL Monitor', `Certificate for ${m.target} renewed`);
+    }
+
+    // Outbound external heartbeat: the local worker cannot reach the external watchdog.
+    // (If this process is down, nothing here runs — that case is alerted by the external watchdog itself.)
+    if (externalHeartbeat.status === 'FAILING') {
+      openAlert({
+        fingerprint: 'external-heartbeat',
+        title: 'External dead-man heartbeat to the watchdog is failing',
+        severity: 'HIGH',
+        detail: `No successful outbound heartbeat to ${externalHeartbeat.nodeLocation} for more than ${externalHeartbeat.toleranceSec}s (${externalHeartbeat.consecutiveFailures} failed attempt(s)${externalHeartbeat.lastError ? `, last: ${externalHeartbeat.lastError}` : ''}). The watchdog will alert as if this control plane were down.`,
+        source: 'Dead-Man Switch',
+        affected: ['Scholario Ops control plane'],
+      });
+    } else if (externalHeartbeat.status === 'HEALTHY') {
+      resolveAlert('external-heartbeat', 'Dead-Man Switch', 'Outbound heartbeat succeeding again');
     }
 
     evaluateResourceAlerts();

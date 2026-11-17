@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import {
-  Application, Monitor, Incident, OperationalStatus, DeadManControlPlane, AppDependency, ServerMetricPoint,
+  Application, Monitor, Incident, OperationalStatus, DeadManControlPlane, ExternalHeartbeat, AppDependency, ServerMetricPoint,
   VpsProcess, VpsService, VpsLogEntry, ProbeStatus, IncidentContext, LoadBalancerState, DatabaseReport,
 } from '../src/types/index.ts';
 import { recordCheck } from './history.ts';
@@ -16,10 +16,15 @@ import { switchDnsRecord } from './cloudflare.ts';
 import { log } from './logger.ts';
 import { applyExtendedReport, ExtendedAgentReport } from './telemetry.ts';
 import { infraHeartbeat } from './heartbeat.ts';
+import { DeadManHeartbeat } from './deadman.ts';
 import { agentHealth, serverHealth } from './telemetryHealth.ts';
 import { effectiveRoutingMethod, explainVps, vpsOperationalStatus } from '../src/lib/trafficHealth.ts';
 import { detectFlapping } from '../src/lib/insights.ts';
 import { isMockIncident } from '../src/lib/mockIncident.ts';
+import { enrichNewIncident, refreshIncidentAdvice } from './incidentImpact.ts';
+import { credentialFailureFromResponse } from '../src/lib/credentialFailure.ts';
+import { buildOutageSnapshot, outageTitle } from '../src/lib/outageFlow.ts';
+import { readiness } from './readiness.ts';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Monitor classification
@@ -38,7 +43,7 @@ const worst = (statuses: OperationalStatus[], fallback: OperationalStatus = 'UNK
 // ─────────────────────────────────────────────────────────────────────────────
 // Check execution
 // ─────────────────────────────────────────────────────────────────────────────
-interface CheckOutcome { ok: boolean; degraded: boolean; latencyMs: number; statusCode?: number; detail: string; pending?: boolean; probeStatus?: ProbeStatus }
+interface CheckOutcome { ok: boolean; degraded: boolean; latencyMs: number; statusCode?: number; detail: string; pending?: boolean; probeStatus?: ProbeStatus; daysLeft?: number | null; validTo?: string | null }
 
 const pct = (v: number, fallback: number) => (v > 0 && v <= 100 ? v : fallback);
 
@@ -53,7 +58,15 @@ async function executeCheck(m: Monitor): Promise<CheckOutcome> {
     }
     const statusOk = m.expectedStatusCode ? r.statusCode === m.expectedStatusCode : (r.statusCode ?? 0) < 400;
     if (!statusOk) {
+      const credential = credentialFailureFromResponse(r.statusCode, r.body);
+      if (credential) {
+        return { ok: false, degraded: false, latencyMs: r.latencyMs, statusCode: r.statusCode ?? undefined, probeStatus: 'AUTH_ERROR', detail: credential.detail };
+      }
       return { ok: false, degraded: false, latencyMs: r.latencyMs, statusCode: r.statusCode ?? undefined, probeStatus: 'DOWN', detail: `Unexpected HTTP ${r.statusCode}${m.expectedStatusCode ? ` (expected ${m.expectedStatusCode})` : ''}` };
+    }
+    const credentialOnSuccess = credentialFailureFromResponse(r.statusCode, r.body);
+    if (credentialOnSuccess) {
+      return { ok: false, degraded: false, latencyMs: r.latencyMs, statusCode: r.statusCode ?? undefined, probeStatus: 'AUTH_ERROR', detail: credentialOnSuccess.detail };
     }
     if (m.expectedBodyContains && !r.body.includes(m.expectedBodyContains)) {
       return { ok: false, degraded: false, latencyMs: r.latencyMs, statusCode: r.statusCode ?? undefined, probeStatus: 'DOWN', detail: `Response body does not contain "${m.expectedBodyContains}"` };
@@ -95,10 +108,10 @@ async function executeCheck(m: Monitor): Promise<CheckOutcome> {
         : /ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH/.test(r.detail) || r.detail === 'Invalid target'
           ? 'CONNECTION_ERROR'
           : 'TLS_ERROR';
-      return { ok: false, degraded: false, latencyMs: r.latencyMs, probeStatus: kind, detail: r.detail };
+      return { ok: false, degraded: false, latencyMs: r.latencyMs, probeStatus: kind, detail: r.detail, daysLeft: r.daysLeft, validTo: r.validTo };
     }
     const expiring = r.daysLeft !== null && r.daysLeft < config.sslExpiryWarnDays;
-    return { ok: true, degraded: expiring, latencyMs: r.latencyMs, probeStatus: expiring ? 'DEGRADED' : 'UP', detail: r.detail };
+    return { ok: true, degraded: expiring, latencyMs: r.latencyMs, probeStatus: expiring ? 'DEGRADED' : 'UP', detail: r.detail, daysLeft: r.daysLeft, validTo: r.validTo };
   }
 
   if (INFRA_TYPES.includes(m.type)) {
@@ -254,6 +267,51 @@ function monitorContext(m: Monitor, detail: string, outcome?: CheckOutcome): Inc
   };
 }
 
+function drFacts(app: Application | undefined): { overallStatus: 'READY' | 'DEGRADED' | 'NOT_READY' | 'UNKNOWN' | null; detail: string } {
+  if (!app) return { overallStatus: null, detail: 'No application linked' };
+  const result = readiness(app);
+  const failing = result.checks.filter(c => c.group !== 'capacity' && (c.status === 'FAIL' || c.status === 'WARNING')).slice(0, 5);
+  const detail = failing.length
+    ? `${result.overall.replaceAll('_', ' ')} — ${failing.map(c => `${c.label}: ${c.detail}`).join('; ')}`
+    : `${result.overall.replaceAll('_', ' ')} (${result.passed}/${result.total} core checks passing)`;
+  return { overallStatus: result.overall, detail };
+}
+
+/** Records probe cadence, confirmation, Cloudflare origin health, DR readiness, and whether escalation is armed. */
+function stampOutage(incident: Incident, app: Application | undefined, probe: {
+  intervalSec: number | null;
+  confirmedFailures: number | null;
+  confirmationThreshold: number | null;
+  cloudflareChecked: boolean;
+  originHealthy: boolean | null;
+  originDetail?: string;
+}): void {
+  const dr = drFacts(app);
+  incident.outage = buildOutageSnapshot({
+    probeIntervalSec: probe.intervalSec,
+    confirmedFailures: probe.confirmedFailures,
+    confirmationThreshold: probe.confirmationThreshold,
+    cloudflareChecked: probe.cloudflareChecked,
+    originHealthy: probe.originHealthy,
+    originDetail: probe.originDetail,
+    drOverall: dr.overallStatus,
+    drDetail: dr.detail,
+  });
+  const policy = db.escalationPolicies.find(p => p.severity === incident.severity);
+  incident.outage.escalationReady = Boolean(policy && policySteps(policy).length > 0 && !incident.acknowledged);
+  if (dr.overallStatus) {
+    incident.timeline.push(timelineEvent('DR Readiness', dr.overallStatus === 'NOT_READY' ? 'WARN' : 'INFO', dr.detail));
+  }
+}
+
+function publishOpenedIncident(incident: Incident): void {
+  db.incidents.unshift(incident);
+  const sent = notifyIncident(incident, 'FIRING');
+  if (incident.outage) incident.outage.notified = sent || Boolean(incident.notificationDeferred);
+  lastNotifiedAt.set(incident.id, Date.now());
+  broadcast('incident_created', incident);
+}
+
 function openIncidentForMonitor(m: Monitor, detail: string, outcome?: CheckOutcome) {
   const fingerprint = `monitor:${m.id}`;
   const existing = findOpenIncident(fingerprint);
@@ -271,13 +329,15 @@ function openIncidentForMonitor(m: Monitor, detail: string, outcome?: CheckOutco
   const context = monitorContext(m, detail, outcome);
   // Correlate with Cloudflare: application DOWN + origin unhealthy is a confirmed outage
   const cfc = context.cloudflare;
+  const credential = outcome?.probeStatus === 'AUTH_ERROR';
+  const originUnhealthy = cfc?.originHealthy === false;
   const correlation = !cfc ? null
-    : cfc.originHealthy === false ? `Cloudflare also reports origin ${cfc.originAddress} UNHEALTHY in pool ${cfc.poolName}${cfc.originFailureReason ? ` (${cfc.originFailureReason})` : ''}`
+    : originUnhealthy ? `Cloudflare also reports origin ${cfc.originAddress} UNHEALTHY in pool ${cfc.poolName}${cfc.originFailureReason ? ` (${cfc.originFailureReason})` : ''}`
       : cfc.originHealthy === true ? `Cloudflare reports origin ${cfc.originAddress} healthy in pool ${cfc.poolName} — failure may be application-level or between this monitor and the edge`
         : 'Cloudflare origin health is not available';
-  const incident: Incident = {
+  const incident = enrichNewIncident({
     id: nextIncidentId(),
-    title: cfc?.originHealthy === false ? `${m.name} is DOWN — Cloudflare origin unhealthy` : `${m.name} is DOWN`,
+    title: outageTitle(m.name, { credential, originUnhealthy }),
     context,
     severity: m.environment === 'PRD' ? 'CRITICAL' : 'HIGH',
     status: 'OPEN',
@@ -293,17 +353,24 @@ function openIncidentForMonitor(m: Monitor, detail: string, outcome?: CheckOutco
     affectedMonitors: [m.id],
     dependentFailures: [],
     timeline: [timelineEvent('Monitor Engine', 'CRITICAL',
-      `${m.name} (${m.type} ${m.target}) confirmed DOWN after ${m.consecutiveFailures} consecutive failures: ${detail}`),
-      ...(correlation ? [timelineEvent('Cloudflare', cfc?.originHealthy === false ? 'CRITICAL' : 'INFO', correlation)] : [])],
+      `${m.name} (${m.type} ${m.target}) confirmed DOWN after ${m.consecutiveFailures} consecutive failures (interval ${m.intervalSec}s): ${detail}`),
+      ...(correlation ? [timelineEvent('Cloudflare', originUnhealthy ? 'CRITICAL' : 'INFO', correlation)] : [])],
     recoveryStatus: 'Awaiting recovery',
     runbookId: m.runbookId,
     notes: [],
-  };
-  db.incidents.unshift(incident);
-  lastNotifiedAt.set(incident.id, Date.now());
-  broadcast('incident_created', incident);
+    fixSteps: [],
+  }, { source: 'Monitor Engine', applySuggestion: true });
+  if (credential) incident.rootCauseCategory = 'EXPIRED_CREDENTIAL';
+  stampOutage(incident, app, {
+    intervalSec: m.intervalSec,
+    confirmedFailures: m.consecutiveFailures,
+    confirmationThreshold: m.failureConfirmationThreshold,
+    cloudflareChecked: Boolean(cfc),
+    originHealthy: cfc ? cfc.originHealthy : null,
+    originDetail: correlation ?? undefined,
+  });
+  publishOpenedIncident(incident);
   audit('Monitor Engine', 'INCIDENT_OPENED', 'INCIDENT', incident.id, `${incident.title}: ${detail}`);
-  notifyIncident(incident, 'FIRING');
 }
 
 /** Keeps "latest detected" facts on an open incident current while the failure continues. */
@@ -397,7 +464,7 @@ function evaluateOriginHealth(state: LoadBalancerState) {
       const now = new Date().toISOString();
       if (healthy === false && !open) {
         const appMonitorDown = db.monitors.some(m => m.enabled && m.applicationId === app.id && m.environment === pool.role && HTTP_TYPES.includes(m.type) && m.status === 'CRITICAL');
-        const incident: Incident = {
+        const incident = enrichNewIncident({
           id: nextIncidentId(),
           title: `${app.name} ${pool.role === 'PRD' ? 'Production' : 'DR'} origin ${o.address} unhealthy in Cloudflare pool ${pool.name || pool.id}`,
           severity: pool.role === 'PRD' ? (appMonitorDown ? 'CRITICAL' : 'HIGH') : 'WARNING',
@@ -416,6 +483,7 @@ function evaluateOriginHealth(state: LoadBalancerState) {
           timeline: [timelineEvent('Cloudflare', 'CRITICAL', `Origin ${o.address} unhealthy${failure ? ` at PoP ${failure.pop}` : ''}: ${reason}${failure?.responseCode ? ` (HTTP ${failure.responseCode})` : ''}`)],
           recoveryStatus: 'Awaiting recovery',
           notes: [],
+          fixSteps: [],
           context: {
             application: app.name,
             environment: pool.role,
@@ -434,12 +502,17 @@ function evaluateOriginHealth(state: LoadBalancerState) {
               originAddress: o.address, originHealthy: false, originFailureReason: reason, checkedAt: pool.healthFetchedAt ?? pool.listFetchedAt,
             },
           },
-        };
-        db.incidents.unshift(incident);
-        lastNotifiedAt.set(incident.id, Date.now());
-        broadcast('incident_created', incident);
+        }, { source: 'Cloudflare', applySuggestion: true });
+        stampOutage(incident, app, {
+          intervalSec: null,
+          confirmedFailures: null,
+          confirmationThreshold: null,
+          cloudflareChecked: true,
+          originHealthy: false,
+          originDetail: `Origin ${o.address} unhealthy in pool ${pool.name || pool.id}: ${reason}`,
+        });
+        publishOpenedIncident(incident);
         audit('Cloudflare Monitor', 'INCIDENT_OPENED', 'INCIDENT', incident.id, `${incident.title}: ${reason}`);
-        notifyIncident(incident, 'FIRING');
         changed = true;
       } else if (healthy === false && open?.context) {
         open.context.latestDetectedAt = now;
@@ -497,6 +570,10 @@ export function applyOutcome(m: Monitor, outcome: CheckOutcome) {
   const probeStatus: ProbeStatus = outcome.probeStatus ?? (outcome.ok ? (outcome.degraded ? 'DEGRADED' : 'UP') : 'DOWN');
   m.lastProbeStatus = probeStatus;
   m.lastStatusCode = outcome.statusCode ?? null;
+  if (m.type === 'SSL') {
+    m.certificateDaysLeft = outcome.daysLeft ?? null;
+    m.certificateValidTo = outcome.validTo ?? null;
+  }
   recordCheck({
     t: now, monitorId: m.id, applicationId: m.applicationId, environment: m.environment, target: m.target,
     ok: outcome.ok, probeStatus, statusCode: outcome.statusCode ?? null, latencyMs: outcome.latencyMs, reason: outcome.detail,
@@ -1037,7 +1114,13 @@ export function updateIncidentDurations() {
   const open = new Set<string>();
   // Sending (delayed first pages, escalation steps, reminders) only on the process holding the lock
   const worker = isNotificationWorker();
+  let adviceDirty = false;
   for (const inc of db.incidents) {
+    const stillOpen = inc.status !== 'RESOLVED' && inc.status !== 'CLOSED';
+    if (refreshIncidentAdvice(inc, { refreshCause: stillOpen })) {
+      adviceDirty = true;
+      broadcast('incident_update', inc);
+    }
     // A notification held by quiet hours goes out once they are over (also for incidents resolved meanwhile)
     if (inc.quietHeld && worker) {
       const qp = db.escalationPolicies.find(p => p.severity === inc.severity)?.quietHours;
@@ -1096,6 +1179,7 @@ export function updateIncidentDurations() {
     }
   }
   for (const id of lastNotifiedAt.keys()) if (!open.has(id)) lastNotifiedAt.delete(id);
+  if (adviceDirty) persist();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1203,7 +1287,7 @@ export async function evaluateAutoFailover(m: Monitor) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Dead-man heartbeat of the monitored infrastructure (server/heartbeat.ts): derived from the agent
-// reports above. Nothing is sent anywhere; there is no external watchdog.
+// reports. Separate from the outbound external heartbeat below.
 // ─────────────────────────────────────────────────────────────────────────────
 let lastHeartbeatSignature = '';
 /** Broadcasts the infrastructure heartbeat when any state / timestamp changed. Returns the current value. */
@@ -1218,10 +1302,28 @@ function publishHeartbeat(): DeadManControlPlane {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// External dead-man switch: this server pings an EXTERNAL heartbeat service so someone is alerted
+// if Scholario Ops itself stops (server/deadman.ts). Default every 60 s, silence tolerance 180 s.
+// ─────────────────────────────────────────────────────────────────────────────
+const externalHeartbeatWorker = new DeadManHeartbeat({
+  url: config.deadManHeartbeatUrl,
+  intervalSec: config.deadManIntervalSec,
+  toleranceSec: config.deadManToleranceSec,
+  onChange: (state, previous) => {
+    if (previous !== state.status && state.status !== 'PENDING') {
+      audit('Dead-Man Switch', `EXTERNAL_HEARTBEAT_${state.status}`, 'MONITOR', state.id, `Outbound heartbeat is now ${state.status}${state.lastError ? ` (${state.lastError})` : ''}`);
+    }
+    broadcast('external_heartbeat_update', state);
+  },
+});
+/** Live outbound heartbeat state (never contains the heartbeat URL) */
+export const externalHeartbeat: ExternalHeartbeat = externalHeartbeatWorker.state;
+
+// ─────────────────────────────────────────────────────────────────────────────
 let engineStarted = false;
 const engineTimers: NodeJS.Timeout[] = [];
 
-/** Starts the monitor scheduler and the recompute loop (which also derives the infrastructure heartbeat). Idempotent: a second call does nothing and returns false. */
+/** Starts the monitor scheduler, infrastructure heartbeat recompute, and outbound external heartbeat. Idempotent. */
 export function startEngine(): boolean {
   if (engineStarted) {
     log.warn('engine', 'startEngine called again — ignored (workers already running)');
@@ -1246,19 +1348,28 @@ export function startEngine(): boolean {
     recomputeDerived();
     // Heartbeats age without new reports (stale / disconnected): re-derive on every tick
     const hb = publishHeartbeat();
+    // Outbound status also ages without new attempts (e.g. a hung request)
+    const beforeExt = externalHeartbeat.status;
+    if (externalHeartbeatWorker.evaluate() !== beforeExt) broadcast('external_heartbeat_update', externalHeartbeat);
     updateIncidentDurations();
     broadcast('telemetry_tick', {
       timestamp: new Date().toISOString(),
       deadManStatus: hb.status,
+      externalHeartbeatStatus: externalHeartbeat.status,
       servers: db.servers.map(s => ({ id: s.id, status: s.status, agentStatus: s.agentStatus, lastSeen: s.lastSeen, telemetry: s.telemetry })),
     });
   }), 5000));
   for (const t of engineTimers) t.unref();
+  externalHeartbeatWorker.start();
   return true;
 }
 
-/** Stops the engine loops (graceful shutdown). */
+/** Stops the engine loops and the outbound external heartbeat (graceful shutdown). */
 export function stopEngine() {
   for (const t of engineTimers.splice(0)) clearInterval(t);
+  externalHeartbeatWorker.stop();
   engineStarted = false;
 }
+
+/** For tests / diagnostics: is the outbound external-heartbeat loop running in this process */
+export const externalHeartbeatWorkerRunning = () => externalHeartbeatWorker.running;

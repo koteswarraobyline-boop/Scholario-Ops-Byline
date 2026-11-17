@@ -80,6 +80,40 @@ after(async () => {
   fs.rmSync(DATA_DIR, { recursive: true, force: true });
 });
 
+test('forecast time to full: rising usage history reports days left before capacity', async () => {
+  const created = await api('POST', '/api/v1/resources', {
+    kind: 'STORAGE', name: 'Forecast disk', owner: 'Platform', unit: 'GB', capacity: 100,
+    warningValue: 85, criticalValue: 95, source: 'manual',
+  });
+  assert.equal(created.status, 201, created.raw);
+  const id = created.body.data.id as string;
+  const now = Date.now();
+  // 40 → 60 over the last 24 h (≈ 20 GB/day) → 100 in ~2 days. 96 samples every 15 min.
+  for (let i = 0; i < 96; i++) {
+    const usage = 40 + (20 * i) / 95;
+    const measuredAt = new Date(now - (95 - i) * 15 * 60_000).toISOString();
+    const r = await api('POST', `/api/v1/resources/${id}/measure`, { usage, measuredAt, measurementId: `fc-${i}` });
+    assert.equal(r.status, 200, r.raw);
+  }
+  const detail = await api('GET', `/api/v1/resources/${id}`);
+  assert.equal(detail.status, 200, detail.raw);
+  const forecast = detail.body.data.resource.forecast as { daysLeft: number | null; limit: number; slopePerDay: number; samples: number };
+  assert.ok(forecast, 'forecast present when history exists');
+  assert.equal(forecast.limit, 100);
+  assert.ok(forecast.samples >= 12);
+  assert.ok(forecast.daysLeft !== null && forecast.daysLeft > 1.5 && forecast.daysLeft < 2.5, `daysLeft ${forecast.daysLeft}`);
+  assert.ok(Math.abs(forecast.slopePerDay - 20) < 2, `slope ${forecast.slopePerDay}`);
+
+  // Production path: evaluate opens one Capacity Forecast incident when ETA is within 7 days
+  assert.equal((await api('POST', '/api/v1/resources/evaluate')).status, 200);
+  assert.equal((await api('POST', '/api/v1/resources/evaluate')).status, 200);
+  const open = await api('GET', '/api/v1/incidents?pageSize=200');
+  const forecastInc = (open.body.data as Array<{ fingerprint: string; status: string; severity: string }>)
+    .filter(i => i.fingerprint === `resource-forecast:${id}` && i.status !== 'RESOLVED' && i.status !== 'CLOSED');
+  assert.equal(forecastInc.length, 1, 'one forecast incident');
+  assert.equal(forecastInc[0].severity, 'HIGH', '~2 days left pages HIGH');
+});
+
 test('migration stores the resource table and a server plan becomes three limits with no invented usage', async () => {
   const table = await one(`select to_regclass($1) as name`, [`${SCHEMA}.resource_limits`]);
   assert.ok(table.name);
@@ -469,4 +503,62 @@ test('a load limit uses 1 and 2 per core when no thresholds are sent', async () 
   const critical = await api('POST', `/api/v1/resources/${row.id}/measure`, { usage: 2, measurementId: 'load-critical' });
   assert.equal(critical.status, 200, critical.raw);
   assert.equal(critical.body.data.evaluation.state, 'CRITICAL');
+});
+
+test('a capacity warning opens one incident with impact, and a repeat does not open another', async () => {
+  const srv = await api('POST', '/api/v1/servers', { hostname: 'cap-impact', ip: '192.0.2.79', environment: 'PRD' });
+  assert.equal(srv.status, 201, srv.raw);
+  const app = await api('POST', '/api/v1/applications', { name: 'Capacity App', codeName: 'capapp', tier: 'TIER_1', prdServerId: srv.body.data.id });
+  assert.equal(app.status, 201, app.raw);
+  const reg = await api('POST', '/api/v1/registry', {
+    kind: 'APPLICATION', name: 'Capacity App', owner: 'product@example.com', tier: 'TIER_1',
+    applicationId: app.body.data.id, userCount: 400, served: ['Students'],
+  });
+  assert.equal(reg.status, 201, reg.raw);
+  const feature = await api('POST', '/api/v1/registry', {
+    kind: 'BUSINESS_FEATURE', name: 'Marking', owner: 'product@example.com', tier: 'TIER_1',
+    applicationId: app.body.data.id, userCount: 80, served: ['Students'],
+  });
+  assert.equal(feature.status, 201, feature.raw);
+
+  const created = await api('POST', '/api/v1/resources', {
+    kind: 'STORAGE', name: 'Course files', owner: 'Academic IT', unit: 'GiB', capacity: 100,
+    warningValue: 85, criticalValue: 95, applicationId: app.body.data.id, source: 'manual',
+  });
+  assert.equal(created.status, 201, created.raw);
+  const id = created.body.data.id as string;
+  const warn = await api('POST', `/api/v1/resources/${id}/measure`, { usage: 85, measurementId: 'impact-warn' });
+  assert.equal(warn.body.data.evaluation.state, 'WARNING');
+  const again = await api('POST', `/api/v1/resources/${id}/measure`, { usage: 86, measurementId: 'impact-warn-2' });
+  assert.equal(again.body.data.evaluation.state, 'WARNING');
+
+  const open = await api('GET', '/api/v1/incidents?pageSize=200');
+  const incidents = (open.body.data as Array<{
+    id: string; fingerprint: string; status: string; severity: string; acknowledged: boolean;
+    impactAnalysis?: { componentName: string | null; usersStopped: number | null; applications: Array<{ name: string }>; features: Array<{ name: string }> };
+  }>).filter(i => i.fingerprint === `resource-limit:${id}` && i.status !== 'RESOLVED' && i.status !== 'CLOSED');
+  assert.equal(incidents.length, 1);
+  assert.equal(incidents[0].severity, 'WARNING');
+  assert.equal(incidents[0].acknowledged, false);
+  assert.equal(incidents[0].impactAnalysis?.applications.some(a => a.name === 'Capacity App'), true);
+  assert.equal(incidents[0].impactAnalysis?.features.some(f => f.name === 'Marking'), true);
+  assert.equal(incidents[0].impactAnalysis?.usersStopped, 400);
+
+  const detail = await api('GET', `/api/v1/resources/${id}`);
+  const linked = (detail.body.data.alerts as Array<{ id: string; status: string }>).filter(a => a.status !== 'RESOLVED' && a.status !== 'CLOSED');
+  assert.equal(linked.length, 1);
+  assert.equal(linked[0].id, incidents[0].id);
+
+  const preview = await api('GET', `/api/v1/impact/preview?applicationId=${app.body.data.id}`);
+  assert.equal(preview.status, 200, preview.raw);
+  const stops = preview.body.data.hardStops as Array<{ name: string }>;
+  assert.equal(stops.some(s => s.name === 'Marking'), true);
+
+  const critical = await api('POST', `/api/v1/resources/${id}/measure`, { usage: 96, measurementId: 'impact-critical' });
+  assert.equal(critical.body.data.evaluation.state, 'CRITICAL');
+  const after = await api('GET', '/api/v1/incidents?pageSize=200');
+  const still = (after.body.data as Array<{ fingerprint: string; status: string; severity: string }>)
+    .filter(i => i.fingerprint === `resource-limit:${id}` && i.status !== 'RESOLVED' && i.status !== 'CLOSED');
+  assert.equal(still.length, 1);
+  assert.equal(still[0].severity, 'HIGH');
 });

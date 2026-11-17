@@ -8,9 +8,11 @@ import { Users, Globe, AlertTriangle, RefreshCw, ShieldCheck, Loader2 } from 'lu
 import { EmptyState } from '../ui/EmptyState';
 import { Ago, verdictColor } from '../ui/Freshness';
 import { LbFailoverConsole } from './LbFailoverConsole';
+import { GoLivePanel } from './GoLivePanel';
 import { dnsPointsAt, originFlows, poolReceiving, routeState } from '../ui/routing';
 import { effectiveRoutingMethod, normalizeRouting, ROUTING_METHOD_LABELS } from '../../lib/trafficHealth';
 import { LbPoolCard } from '../providers/LoadBalancerPanel';
+import { FailoverImpactPreview } from '../ui/FailoverImpactPreview';
 
 const validDate = (s?: string | null) => Boolean(s) && !Number.isNaN(Date.parse(s as string));
 const fmtDateTime = (s?: string | null, fallback = '—') => (validDate(s) ? new Date(s as string).toLocaleString() : fallback);
@@ -26,6 +28,7 @@ export const DrDashboardView: React.FC = () => {
   const navigate = useNavigate();
   const isDark = theme === 'dark';
   const canFailover = hasRole('super_admin');
+  const canRecordGoLive = hasRole('operator');
 
   const [selectedAppId, setSelectedAppId] = useState<string>('');
   const [confirmingFailover, setConfirmingFailover] = useState(false);
@@ -267,6 +270,7 @@ export const DrDashboardView: React.FC = () => {
           <div>
             <span className={muted}>Auto-failover:</span>
             <div className={`font-semibold ${selectedApp.autoFailover ? 'text-emerald-500' : ''}`}>{selectedApp.autoFailover ? 'Enabled' : 'Disabled'}</div>
+            <div className={`font-normal ${muted}`}>{lbMapped ? 'Load Balancer failover stays manual.' : selectedApp.autoFailover ? 'The DNS record can switch to DR after a confirmed Production outage. Failback stays manual.' : 'Opt in from Setup for DNS-record failover. Failback stays manual.'}</div>
           </div>
           <div>
             <span className={muted}>Last failover:</span>
@@ -281,6 +285,8 @@ export const DrDashboardView: React.FC = () => {
             <div className="font-semibold">{selectedApp.rtoTargetMin}m / {selectedApp.rpoTargetMin}m</div>
           </div>
         </div>
+
+        <GoLivePanel key={selectedApp.id} applicationId={selectedApp.id} isDark={isDark} canRecord={canRecordGoLive} />
 
         {/* Failover Controls */}
         <div className={`pt-3 border-t space-y-2 text-xs ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
@@ -325,6 +331,7 @@ export const DrDashboardView: React.FC = () => {
                 {target === 'DR' ? 'DR' : 'PRD'} server <strong className="font-mono">{targetServer?.hostname}</strong> (<strong className="font-mono">{targetServer?.ip}</strong>).
                 {target === 'DR' && overall !== null && overall !== 'READY' && <span className="text-rose-500 font-semibold"> DR readiness is {overall.replace('_', ' ')}.</span>}
               </p>
+              <FailoverImpactPreview applicationId={selectedApp.id} target={target} isDark={isDark} />
               <input
                 type="text"
                 value={failoverReason}

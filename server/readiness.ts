@@ -4,7 +4,7 @@
  * Load Balancer state. Missing evidence is UNKNOWN or NOT_CONFIGURED, never PASS.
  */
 import {
-  Application, CheckVerdict, DrOverall, DrReadinessItem, FailoverPreflight, FailoverPreflightCheck, LbPool,
+  Application, CheckVerdict, DrOverall, DrReadinessItem, FailoverDecisionRecord, FailoverPreflight, FailoverPreflightCheck, LbPool,
 } from '../src/types/index.ts';
 import { config } from './config.ts';
 import { db, ServerRecord } from './store.ts';
@@ -14,6 +14,7 @@ import { readChecks, availability, AvailabilityStats } from './history.ts';
 import { THRESHOLDS } from '../src/lib/thresholds.ts';
 import { serverHealth } from './telemetryHealth.ts';
 import { Env, agentState, appHealth, backupStatus, databaseHealth, inventoryFor, serverFor, sslMonitor, urlMonitor } from './health.ts';
+import { previewImpact } from './incidentImpact.ts';
 
 const envLabel = (env: Env) => (env === 'PRD' ? 'Production' : 'DR');
 const item = (key: string, label: string, status: CheckVerdict, detail: string, observedAt: string | null = null, group: 'core' | 'capacity' = 'core'): DrReadinessItem =>
@@ -258,6 +259,24 @@ export function readiness(app: Application): ReadinessResult {
   return { checks: [...core, ...capacityChecks(app)], overall, passed, total: applicable.length, evaluatedAt: new Date().toISOString() };
 }
 
+/** Newest approve or reject for this application and direction. Read from the audit log. */
+export function latestFailoverDecision(appId: string, target: 'DR' | 'PRIMARY'): FailoverDecisionRecord | null {
+  const row = db.auditLogs.find(a =>
+    a.targetId === appId
+    && (a.action === 'FAILOVER_APPROVED' || a.action === 'FAILOVER_REJECTED')
+    && a.details.includes(`→ ${target} `),
+  );
+  if (!row) return null;
+  const reason = row.details.match(/Reason: ([\s\S]*?)\. Pre-flight:/)?.[1] ?? '';
+  return {
+    decision: row.action === 'FAILOVER_APPROVED' ? 'APPROVED' : 'REJECTED',
+    target,
+    reason,
+    operator: row.operator,
+    at: row.timestamp,
+  };
+}
+
 export function failoverPreflight(app: Application, target: 'DR' | 'PRIMARY'): FailoverPreflight {
   const targetEnv: Env = target === 'DR' ? 'DR' : 'PRD';
   const sourceEnv: Env = targetEnv === 'DR' ? 'PRD' : 'DR';
@@ -327,13 +346,23 @@ export function failoverPreflight(app: Application, target: 'DR' | 'PRIMARY'): F
     `Switch DNS record ${app.dnsRecordName ?? '(not configured)'} in zone ${app.cloudflareZone || '(not configured)'} to the ${envLabel(targetEnv)} server IP.`,
   ];
 
+  // Blast radius if the source environment (the side we are leaving) goes down / is taken offline
+  const sourceServer = serverFor(app, sourceEnv);
+  const impactPreview = previewImpact({
+    applicationId: app.id,
+    serverId: sourceServer?.id,
+    environment: sourceEnv,
+  });
+
   return {
     appId: app.id, appName: app.name, target,
     currentPrimary: prdPool?.name || app.loadBalancer?.prdPoolId || serverFor(app, 'PRD')?.hostname || '—',
     currentDr: drPool?.name || app.loadBalancer?.drPoolId || serverFor(app, 'DR')?.hostname || '—',
     routing, checks, drOverall: dr.overall,
     preflightPassed: !checks.some(c => c.status === 'FAIL'),
-    mode, plan, generatedAt: now,
+    mode, plan, impactPreview,
+    lastDecision: latestFailoverDecision(app.id, target),
+    generatedAt: now,
   };
 }
 

@@ -117,6 +117,7 @@ function whyText(input: IncidentMailInput, layer: IssueLayer, warning: boolean, 
   if (input.probeStatus === 'DNS_ERROR') return 'The hostname could not be looked up, so the check never reached the server. The application process may still be running; the name or DNS record is the failure.';
   if (input.probeStatus === 'TLS_ERROR') return 'The secure certificate was rejected. Browsers will warn or refuse the site until the certificate is trusted and in date.';
   if (input.probeStatus === 'CONNECTION_ERROR') return 'The connection was refused or dropped before any answer. The process may be stopped, or a firewall is blocking the port.';
+  if (input.probeStatus === 'AUTH_ERROR') return 'The API rejected the credential. An expired or revoked key, token, or subscription answers this way even when the service itself is up.';
   if (input.responseCode && input.responseCode >= 500) return `The service did answer, with HTTP ${input.responseCode}. It is reachable, but it is reporting that it cannot serve requests.`;
   if (warning || input.probeStatus === 'DEGRADED') return 'It is still responding, but slower, weaker, or closer to a limit than the threshold you set. This is the warning before a full outage.';
   if (layer === 'Database') return 'This is the database the application stores and reads. While it is down or lagging, logins and saves can fail even when the web page itself looks up.';

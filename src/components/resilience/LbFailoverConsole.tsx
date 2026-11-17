@@ -5,6 +5,7 @@ import { useAuth } from '../../context/AuthContext';
 import { api } from '../../services/api';
 import { Application, FailoverPreflight } from '../../types';
 import { Ago, verdictColor } from '../ui/Freshness';
+import { ImpactPreviewCard } from '../ui/ImpactPreviewCard';
 
 /**
  * Failover console for applications routed by a Cloudflare Load Balancer.
@@ -50,7 +51,8 @@ export const LbFailoverConsole: React.FC<{ app: Application }> = ({ app }) => {
     if (!reason.trim()) { notify('error', 'Enter a reason — it is recorded in the audit log'); return; }
     setDeciding(true);
     try {
-      await api.recordFailoverDecision(app.id, target, decision, reason.trim());
+      const recorded = await api.recordFailoverDecision(app.id, target, decision, reason.trim());
+      setPf(recorded.preflight);
       notify('success', `Failover ${decision.toLowerCase()} — recorded in the audit log${decision === 'APPROVED' ? '. Perform the switch in Cloudflare.' : ''}`);
       setReason('');
     } catch (err) {
@@ -107,6 +109,11 @@ export const LbFailoverConsole: React.FC<{ app: Application }> = ({ app }) => {
             <div><span className={muted}>Current DR pool</span><div className="font-semibold">{pf.currentDr}</div></div>
             <div><span className={muted}>{pf.target === 'DR' ? 'DR' : 'Production'} readiness</span><div className={`font-bold ${verdictColor(pf.drOverall)}`}>{pf.drOverall.replace('_', ' ')}</div></div>
           </div>
+          <ImpactPreviewCard
+            preview={pf.impactPreview}
+            isDark={isDark}
+            title={pf.target === 'DR' ? 'What will break if Production goes down' : 'What will break if DR goes down'}
+          />
           <div className="space-y-1">
             {pf.checks.map(c => (
               <div key={c.key} className={`grid grid-cols-[1fr_auto] gap-2 py-1 border-b ${isDark ? 'border-[#1A2332]' : 'border-slate-200'}`}>
@@ -127,6 +134,13 @@ export const LbFailoverConsole: React.FC<{ app: Application }> = ({ app }) => {
               {pf.plan.map((step, i) => <li key={i}>{step}</li>)}
             </ol>
           </div>
+          {pf.lastDecision && (
+            <div className={`p-2 rounded border font-sans ${pf.lastDecision.decision === 'APPROVED' ? (isDark ? 'border-amber-900 text-amber-200' : 'border-amber-300 text-amber-900') : (isDark ? 'border-[#1E293B] text-slate-300' : 'border-slate-300 text-slate-700')}`}>
+              Last decision for this direction: <strong>{pf.lastDecision.decision}</strong> by {pf.lastDecision.operator || '—'}
+              {' · '}<Ago iso={pf.lastDecision.at} />
+              {pf.lastDecision.reason ? <> · {pf.lastDecision.reason}</> : null}
+            </div>
+          )}
           {hasRole('super_admin') ? (
             <div className={`p-2 rounded border space-y-2 ${isDark ? 'bg-[#1F1710] border-amber-900' : 'bg-amber-50 border-amber-200'}`}>
               <div className="flex items-center gap-1.5 font-bold text-amber-500"><AlertTriangle className="w-4 h-4" /> Record decision</div>

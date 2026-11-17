@@ -81,8 +81,10 @@ export function groupedNotification(items: Incident[], windowSec: number, namesF
   const top = ordered[0];
   const also = ordered.slice(1).map(i => ({ id: i.id, title: i.title, detail: i.rootCause || i.title, severity: i.severity }));
   const names = top ? namesFor(top) : {};
+  const owners = [...new Set(ordered.flatMap(i => i.notifiedOwners ?? []))];
+  const ownerBit = owners.length ? ` Owners: ${owners.join(', ')}.` : '';
   const page = top
-    ? renderIncidentMail(toInput(top, 'FIRING', names, `${ordered.length} alerts opened within ${windowSec}s for the same application.`, link, also))
+    ? renderIncidentMail(toInput(top, 'FIRING', names, `${ordered.length} alerts opened within ${windowSec}s for the same application.${ownerBit}`, link, also))
     : { text: '', html: '' };
   const appName = names.application || 'the same application';
   // Every id is in the plain text as "• INC-1 [HIGH] …" so a restart can see the summary was already sent.

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { IncidentMinutes } from '../ui/IncidentMinutes';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
-import { Incident, IncidentStatus, IncidentSeverity } from '../../types';
+import { Incident, IncidentStatus, IncidentSeverity, RootCauseCategory } from '../../types';
 import {
   AlertTriangle,
   X,
@@ -11,11 +11,17 @@ import {
   Plus,
   UserCheck,
   ShieldCheck,
+  RefreshCw,
 } from 'lucide-react';
 import { IncidentFlowChart } from '../visuals/IncidentFlowChart';
 import { IncidentTimelineView } from './IncidentTimelineView';
 import { EmptyState } from '../ui/EmptyState';
 import { useDialog } from '../ui/useDialog';
+import { ROOT_CAUSE_CATEGORIES, ROOT_CAUSE_LABELS } from '../../lib/rootCause';
+import { featureAction } from '../../lib/featureAction';
+import { useDependencyDemo } from '../../context/DependencyDemoContext';
+import { DemoBanner, DemoScenarios, DemoToggle } from '../resilience/DemoModeControls';
+import { demoIncident } from '../../mocks/dependencyDemoData';
 
 const SEVERITIES: IncidentSeverity[] = ['INFO', 'WARNING', 'HIGH', 'CRITICAL', 'EMERGENCY'];
 const STATUSES: IncidentStatus[] = ['OPEN', 'ACKNOWLEDGED', 'INVESTIGATING', 'MITIGATING', 'MONITORING', 'RESOLVED', 'CLOSED'];
@@ -47,6 +53,11 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
     assignIncidentOwner,
     addIncidentNote,
     resolveIncident,
+    updateIncidentRootCause,
+    updateIncidentRunbook,
+    setIncidentFixSteps,
+    toggleIncidentFixStep,
+    refreshIncidentImpact,
     runbooks,
     monitors,
     applications,
@@ -70,6 +81,10 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
   const [showAssignBox, setShowAssignBox] = useState(false);
   const [ownerText, setOwnerText] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
+  const [causeDraft, setCauseDraft] = useState(incident.rootCause || '');
+  const [categoryDraft, setCategoryDraft] = useState<RootCauseCategory>(incident.rootCauseCategory || 'UNKNOWN');
+  const [newStepText, setNewStepText] = useState('');
+  const [forceResolve, setForceResolve] = useState(false);
 
   const attachedRunbook = runbooks.find(r => r.id === incident.runbookId);
   const app = applications.find(a => a.id === incident.applicationId);
@@ -95,10 +110,29 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
 
   const handleResolve = async () => {
     await withBusy('resolve', async () => {
-      if (await resolveIncident(incident.id, resolutionText.trim() || undefined)) {
+      if (await resolveIncident(incident.id, resolutionText.trim() || undefined, forceResolve || undefined)) {
         setShowResolveBox(false);
         setResolutionText('');
+        setForceResolve(false);
       }
+    });
+  };
+
+  const handleSaveRootCause = async () => {
+    await withBusy('root-cause', async () => {
+      await updateIncidentRootCause(incident.id, {
+        rootCauseCategory: categoryDraft,
+        description: causeDraft,
+      });
+    });
+  };
+
+  const handleAddFixStep = async () => {
+    const text = newStepText.trim();
+    if (!text) return;
+    const existing = (incident.fixSteps ?? []).map(s => ({ id: s.id, text: s.text }));
+    await withBusy('fix-steps', async () => {
+      if (await setIncidentFixSteps(incident.id, [...existing, text])) setNewStepText('');
     });
   };
 
@@ -155,6 +189,11 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
               </span>
             </div>
             <h2 id="incident-detail-title" className={`text-base font-bold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{incident.title}</h2>
+            {incident.severityReason && (
+              <p className={`text-[11px] font-sans ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                Suggested {incident.suggestedSeverity ?? incident.severity}: {incident.severityReason}
+              </p>
+            )}
           </div>
 
           <div className="flex items-center gap-2 font-mono shrink-0">
@@ -294,6 +333,12 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
                 isDark ? 'bg-[#08100C] border-emerald-800 text-slate-100' : 'bg-white border-emerald-300 text-slate-900'
               }`}
             />
+            {(incident.fixSteps ?? []).some(s => !s.completed) && (
+              <label className={`flex items-center gap-2 text-[11px] font-sans cursor-pointer ${isDark ? 'text-amber-300' : 'text-amber-800'}`}>
+                <input type="checkbox" checked={forceResolve} onChange={e => setForceResolve(e.target.checked)} />
+                Force resolve with {(incident.fixSteps ?? []).filter(s => !s.completed).length} open fix step(s)
+              </label>
+            )}
             <div className="flex items-center gap-2 pt-1 font-sans">
               <button
                 onClick={handleResolve}
@@ -346,13 +391,232 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({ incide
           {activeTab === 'summary' && (
             <div className="space-y-4">
               <div className={panelCls}>
-                <div className={`text-xs font-bold uppercase ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Root Cause / Detail</div>
-                <p className={`leading-relaxed font-sans text-xs whitespace-pre-wrap ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
-                  {incident.rootCause || <span className={mutedText}>No root cause recorded yet.</span>}
-                </p>
+                <div className={`text-xs font-bold uppercase ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Root cause</div>
+                <div className="flex flex-col sm:flex-row gap-2 items-start sm:items-center">
+                  <label className={`text-[10px] uppercase shrink-0 ${mutedText}`}>Category</label>
+                  <select
+                    className={selectCls}
+                    value={categoryDraft}
+                    disabled={!canAssign || closed || busy !== null}
+                    onChange={e => setCategoryDraft(e.target.value as RootCauseCategory)}
+                  >
+                    {ROOT_CAUSE_CATEGORIES.map(c => (
+                      <option key={c} value={c}>{ROOT_CAUSE_LABELS[c]}</option>
+                    ))}
+                  </select>
+                  <span className={`text-[11px] ${mutedText}`}>
+                    Current: {ROOT_CAUSE_LABELS[incident.rootCauseCategory || 'UNKNOWN']}
+                  </span>
+                </div>
+                {incident.likelyCause && (
+                  <div className={`rounded border p-2 space-y-1 ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+                    <div className={`text-[10px] uppercase ${mutedText}`}>
+                      Likely cause · {incident.likelyCause.confidence}
+                    </div>
+                    <p className={isDark ? 'text-slate-200' : 'text-slate-800'}>{incident.likelyCause.summary}</p>
+                    {incident.likelyCause.evidence.length > 0 && (
+                      <ul className="space-y-0.5">
+                        {incident.likelyCause.evidence.map(item => (
+                          <li key={`${item.source}-${item.detail}`} className={mutedText}>
+                            {item.source}: {item.detail}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+                <textarea
+                  className={`w-full min-h-[72px] p-2 rounded border text-xs font-sans focus:outline-none focus:border-blue-500 ${
+                    isDark ? 'bg-[#0A0F1A] border-[#1E293B] text-slate-200' : 'bg-white border-slate-300 text-slate-800'
+                  }`}
+                  value={causeDraft}
+                  disabled={!canAssign || closed}
+                  onChange={e => setCauseDraft(e.target.value)}
+                  placeholder="Description and evidence from checks, metrics and logs"
+                />
+                {canAssign && !closed && (
+                  <button
+                    type="button"
+                    disabled={busy !== null}
+                    onClick={() => void handleSaveRootCause()}
+                    className="px-2.5 py-1 rounded text-[11px] font-semibold bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white cursor-pointer self-start"
+                  >
+                    {busy === 'root-cause' ? 'Saving…' : 'Save root cause'}
+                  </button>
+                )}
                 {incident.fingerprint && (
                   <div className={`text-[11px] pt-1 border-t ${isDark ? 'border-[#1E293B] text-slate-400' : 'border-slate-200 text-slate-600'}`}>
                     Deduplication fingerprint: <span className={isDark ? 'text-slate-200' : 'text-slate-800'}>{incident.fingerprint}</span>
+                  </div>
+                )}
+              </div>
+
+              <div className={panelCls}>
+                <div className="flex items-center justify-between gap-2">
+                  <div className={`text-xs font-bold uppercase ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Impact Analysis</div>
+                  {canAssign && (
+                    <button
+                      type="button"
+                      title="Refresh from dependency register"
+                      disabled={busy !== null}
+                      onClick={() => void withBusy('impact', () => refreshIncidentImpact(incident.id))}
+                      className={`p-1 rounded border cursor-pointer disabled:opacity-50 ${isDark ? 'border-[#1E293B] text-slate-300' : 'border-slate-300 text-slate-600'}`}
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${busy === 'impact' ? 'animate-spin' : ''}`} />
+                    </button>
+                  )}
+                </div>
+                {!incident.impactAnalysis || (!incident.impactAnalysis.componentId && incident.impactAnalysis.hardCount === 0 && incident.impactAnalysis.softCount === 0) ? (
+                  <p className={mutedText}>
+                    No register match yet. Link this application in Setup → Dependencies, then refresh.
+                  </p>
+                ) : (
+                  <>
+                    <p className={isDark ? 'text-slate-300' : 'text-slate-700'}>
+                      From <strong>{incident.impactAnalysis.componentName ?? 'register'}</strong>
+                      {' · '}hard {incident.impactAnalysis.hardCount} / soft {incident.impactAnalysis.softCount}
+                      {incident.impactAnalysis.usersStopped != null && <> · users stopped ≥{incident.impactAnalysis.usersStopped.toLocaleString()}</>}
+                      {incident.impactAnalysis.usersAffected != null && incident.impactAnalysis.usersAffected !== incident.impactAnalysis.usersStopped && <> · users affected ≥{incident.impactAnalysis.usersAffected.toLocaleString()}</>}
+                      {incident.impactAnalysis.served.length > 0 && <> · {incident.impactAnalysis.served.join(', ')}</>}
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div>
+                        <div className={`text-[10px] uppercase ${mutedText}`}>Applications</div>
+                        {(incident.impactAnalysis.applications.length === 0)
+                          ? <div className={mutedText}>None</div>
+                          : incident.impactAnalysis.applications.map(a => (
+                            <div key={a.id}>{a.name} <span className={a.via === 'HARD' ? 'text-rose-500' : 'text-amber-500'}>{a.via}</span></div>
+                          ))}
+                      </div>
+                      <div>
+                        <div className={`text-[10px] uppercase ${mutedText}`}>Features</div>
+                        {(incident.impactAnalysis.features.length === 0)
+                          ? <div className={mutedText}>None</div>
+                          : incident.impactAnalysis.features.map(f => (
+                            <div key={f.id}>
+                              {f.name} <span className={f.via === 'HARD' ? 'text-rose-500' : 'text-amber-500'}>{f.via}</span>
+                              <div className={mutedText}>{f.action || featureAction(f.name, f.via, incident.impactAnalysis?.componentName || f.name)}</div>
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                    {incident.notifiedOwners && incident.notifiedOwners.length > 0 && (
+                      <p className={isDark ? 'text-slate-300' : 'text-slate-700'}>
+                        Owners notified: {incident.notifiedOwners.join(', ')}
+                      </p>
+                    )}
+                  </>
+                )}
+                <div className={`text-[11px] space-y-1 break-words ${mutedText}`}>
+                  <div>Root provider: {incident.impactAnalysis?.componentName ?? 'Not captured on this incident'}</div>
+                  <div>Incident status: {incident.status}. Recovery status: {incident.recoveryStatus || 'Not recorded'}.</div>
+                  <div>
+                    {incident.resolvedAt
+                      ? `Resolved ${fmtDateTime(incident.resolvedAt)}. Closing still follows the existing incident lifecycle.`
+                      : 'Not resolved. A provider becoming healthy does not close this incident by itself.'}
+                  </div>
+                  <div>
+                    Dependent rechecks use the triggering monitors
+                    {affectedMonitors.length === 0
+                      ? ' (none recorded).'
+                      : `: ${affectedMonitors.map(id => {
+                        const mon = monitors.find(m => m.id === id);
+                        return mon ? `${mon.name} ${mon.consecutiveRecoveries}/${mon.recoveryConfirmationThreshold} passes, status ${mon.status}` : id;
+                      }).join('; ')}.`}
+                  </div>
+                  <div>There is no separate feature-verification field. Feature impact is the captured register snapshot, not a new recovery engine.</div>
+                </div>
+              </div>
+
+              {incident.outage && (
+                <div className={panelCls}>
+                  <div className={`text-xs font-bold uppercase ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Outage path</div>
+                  <p className={isDark ? 'text-slate-300' : 'text-slate-700'}>
+                    {incident.outage.probeIntervalSec != null
+                      ? `Probe every ${incident.outage.probeIntervalSec}s`
+                      : 'Not a timed probe'}
+                    {incident.outage.confirmedFailures != null && <> · confirmed after {incident.outage.confirmedFailures} failure{incident.outage.confirmedFailures === 1 ? '' : 's'}</>}
+                    {incident.outage.confirmationThreshold != null && <> (threshold {incident.outage.confirmationThreshold})</>}
+                  </p>
+                  <p className={isDark ? 'text-slate-300' : 'text-slate-700'}>
+                    Cloudflare origin: {incident.outage.cloudflareOrigin.replaceAll('_', ' ')}. {incident.outage.cloudflareDetail}
+                  </p>
+                  <p className={isDark ? 'text-slate-300' : 'text-slate-700'}>
+                    DR readiness: {incident.outage.drReadiness.replaceAll('_', ' ')}. {incident.outage.drDetail}
+                  </p>
+                  <p className={mutedText}>
+                    {incident.outage.notified ? 'Notification handed to the channels for this severity.' : 'Notification not sent yet (no channel, or still inside the initial delay).'}
+                    {' '}
+                    {incident.outage.escalationReady ? 'Escalation is armed while this stays unacknowledged.' : 'No escalation step is armed for this severity.'}
+                  </p>
+                </div>
+              )}
+
+              <div className={panelCls}>
+                <div className={`text-xs font-bold uppercase ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+                  Required action · fix steps
+                  {(incident.fixSteps?.length ?? 0) > 0 && (
+                    <span className={`ml-2 font-normal normal-case ${mutedText}`}>
+                      {(incident.fixSteps ?? []).filter(s => s.completed).length}/{incident.fixSteps!.length} done
+                    </span>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`text-[11px] ${mutedText}`}>Owner:</span>
+                  <strong className={incident.owner && incident.owner !== 'Unassigned' ? (isDark ? 'text-slate-200' : 'text-slate-800') : 'text-amber-500'}>
+                    {incident.owner || 'Unassigned'}
+                  </strong>
+                  <span className={`text-[11px] ${mutedText}`}>· Runbook:</span>
+                  <select
+                    className={selectCls}
+                    value={incident.runbookId || ''}
+                    disabled={!canAssign || closed || busy !== null}
+                    onChange={e => void withBusy('runbook', () => updateIncidentRunbook(incident.id, e.target.value || null))}
+                  >
+                    <option value="">None linked</option>
+                    {runbooks.map(rb => <option key={rb.id} value={rb.id}>{rb.title}</option>)}
+                  </select>
+                </div>
+                <ul className="space-y-1.5">
+                  {(incident.fixSteps ?? []).length === 0 ? (
+                    <li className={mutedText}>No fix steps yet. Add the actions required to close this incident.</li>
+                  ) : (incident.fixSteps ?? []).map(step => (
+                    <li key={step.id} className="flex items-start gap-2">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 cursor-pointer"
+                        checked={step.completed}
+                        disabled={!canAssign || closed || busy !== null}
+                        onChange={() => void withBusy(`step-${step.id}`, () => toggleIncidentFixStep(incident.id, step.id))}
+                      />
+                      <span className={step.completed ? `line-through ${mutedText}` : (isDark ? 'text-slate-200' : 'text-slate-800')}>
+                        {step.text}
+                        {step.completed && step.completedBy && (
+                          <span className={`ml-1 text-[10px] ${mutedText}`}>· {step.completedBy}</span>
+                        )}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                {canAssign && !closed && (
+                  <div className="flex gap-2">
+                    <input
+                      className={`flex-1 p-1.5 rounded border text-xs focus:outline-none focus:border-blue-500 ${
+                        isDark ? 'bg-[#0A0F1A] border-[#1E293B] text-slate-200' : 'bg-white border-slate-300'
+                      }`}
+                      value={newStepText}
+                      onChange={e => setNewStepText(e.target.value)}
+                      placeholder="Add a fix step"
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void handleAddFixStep(); } }}
+                    />
+                    <button
+                      type="button"
+                      disabled={!newStepText.trim() || busy !== null}
+                      onClick={() => void handleAddFixStep()}
+                      className="px-2 py-1 rounded text-[11px] font-semibold bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white cursor-pointer"
+                    >
+                      Add
+                    </button>
                   </div>
                 )}
               </div>
@@ -730,6 +994,7 @@ const DeclareIncidentModal: React.FC<{ onClose: () => void }> = ({ onClose }) =>
 export const IncidentsView: React.FC = () => {
   const { incidents, selectedIncidentId, setSelectedIncidentId, applications, theme } = useOps();
   const { hasRole } = useAuth();
+  const demo = useDependencyDemo();
   const isDark = theme === 'dark';
   const [filter, setFilter] = useState<'ALL' | 'OPEN' | 'CRITICAL' | 'RESOLVED'>('ALL');
   const [showDeclare, setShowDeclare] = useState(false);
@@ -742,6 +1007,42 @@ export const IncidentsView: React.FC = () => {
     if (filter === 'RESOLVED') return isClosed(inc);
     return true;
   });
+
+  if (demo.enabled) {
+    const picture = demo.scenario ? demoIncident(demo.scenario) : null;
+    return (
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h1 className="text-lg font-bold font-mono">INCIDENT COMMAND WORKSPACE</h1>
+          <DemoToggle isDark={isDark} />
+        </div>
+        <DemoBanner />
+        <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+          HYPOTHETICAL SIMULATION. This is not a confirmed live incident. Live incidents are hidden until DEMO mode is off. Nothing is created or resolved.
+        </p>
+        <div className={`rounded-lg p-3 ${isDark ? 'bg-slate-950' : 'bg-slate-900'}`}>
+          <DemoScenarios />
+        </div>
+        {!picture && <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Select a scenario to see an illustrative blast radius.</p>}
+        {picture && (
+          <article className={`rounded border p-4 space-y-2 text-xs font-mono ${isDark ? 'border-violet-800 bg-[#111726]' : 'border-violet-300 bg-white'}`}>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="px-2 py-0.5 rounded bg-violet-600 text-white text-[10px] font-bold">DEMO</span>
+              <span className={isDark ? 'text-slate-400' : 'text-slate-500'}>{picture.id}</span>
+            </div>
+            <h2 className="text-base font-bold font-sans">{picture.title}</h2>
+            <div>Root provider: {picture.simulation.rootName}</div>
+            <div>Detection time: {fmtDateTime(picture.detectedAt)}</div>
+            <div>Direct {picture.simulation.direct.length} · indirect {picture.simulation.indirect.length} · applications {picture.simulation.affectedApplications}</div>
+            <div>Recovery status: {picture.recovery}</div>
+            <ul className="space-y-1">
+              {picture.timeline.map(event => <li key={event.at}>{event.at} · {event.text}</li>)}
+            </ul>
+          </article>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

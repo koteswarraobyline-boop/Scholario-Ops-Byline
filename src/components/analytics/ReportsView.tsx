@@ -11,7 +11,7 @@ const fmtDateTime = (iso: string | null | undefined) => {
 };
 
 export const ReportsView: React.FC = () => {
-  const { systemSummary, theme, notify } = useOps();
+  const { systemSummary, incidents, deployments, backups, theme, notify } = useOps();
   const isDark = theme === 'dark';
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -33,6 +33,37 @@ export const ReportsView: React.FC = () => {
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
+
+  // The summary cards already follow the live stream. Regenerate the report text when those numbers change.
+  const liveSignature = [
+    systemSummary.openIncidents,
+    systemSummary.criticalIncidents,
+    systemSummary.healthyApps,
+    systemSummary.totalApps,
+    systemSummary.healthyServers,
+    systemSummary.totalServers,
+    systemSummary.healthyMonitors,
+    systemSummary.totalMonitors,
+    systemSummary.backupsCurrentCount,
+    systemSummary.drReadinessCount,
+    systemSummary.overallHealth,
+    systemSummary.cloudflareStatus,
+    incidents.map(i => `${i.id}:${i.status}:${i.severity}:${i.resolvedAt ?? ''}`).join(','),
+    deployments.length, deployments[0]?.id ?? '', deployments[0]?.status ?? '',
+    backups.length, backups[0]?.id ?? '', backups[0]?.status ?? '',
+  ].join('|');
+  const skipFirst = useRef(true);
+  useEffect(() => {
+    if (skipFirst.current) {
+      skipFirst.current = false;
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (document.hidden) return;
+      void api.getDailyReport().then(next => { setReport(next); setError(null); }).catch(e => setError(e));
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [liveSignature]);
 
   const handleCopy = async () => {
     if (!report) return;

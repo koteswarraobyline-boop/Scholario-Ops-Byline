@@ -429,8 +429,16 @@ export const MonitorsView: React.FC = () => {
                         <td className={`py-2.5 px-3.5 tabular-nums text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                           {lastCheckStr}
                           {m.lastProbeStatus && (
-                            <div className={m.lastProbeStatus === 'UP' ? 'text-emerald-500' : m.lastProbeStatus === 'DEGRADED' ? 'text-amber-500' : 'text-rose-500'}>
-                              {m.lastProbeStatus}{m.lastStatusCode ? ` · ${m.lastStatusCode}` : ''}
+                            <div className={m.lastProbeStatus === 'UP' ? 'text-emerald-500' : m.lastProbeStatus === 'DEGRADED' ? 'text-amber-500' : m.lastProbeStatus === 'UNKNOWN' ? (isDark ? 'text-slate-400' : 'text-slate-500') : 'text-rose-500'}>
+                              {m.lastProbeStatus}{m.lastStatusCode ? ` · HTTP ${m.lastStatusCode}` : ''}{m.responseTimeMs ? ` · ${m.responseTimeMs} ms` : ''}
+                            </div>
+                          )}
+                          <div>Last success: {m.lastSuccess && !Number.isNaN(Date.parse(m.lastSuccess)) ? new Date(m.lastSuccess).toLocaleString() : 'none'}</div>
+                          <div>Last failure: {m.lastFailure && !Number.isNaN(Date.parse(m.lastFailure)) ? new Date(m.lastFailure).toLocaleString() : 'none'}</div>
+                          {(m.type === 'SSL' || m.certificateDaysLeft != null || m.certificateValidTo) && (
+                            <div>
+                              Certificate: {m.certificateDaysLeft == null ? 'not read' : `${m.certificateDaysLeft} days left`}
+                              {m.certificateValidTo ? ` · expires ${m.certificateValidTo}` : ''}
                             </div>
                           )}
                         </td>

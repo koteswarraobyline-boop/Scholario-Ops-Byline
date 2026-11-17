@@ -6,9 +6,12 @@ This document records what the code does. It does not change application behavio
 
 **Facts** are what the files and previous test runs show. **Recommendations** are separate and are not implemented.
 
-## Status after this audit (26–27 October 2026)
+## Status after this audit (26–29 October 2026)
 
 The sections below are the 17 October record. This has landed since then:
+
+- Forecast time to full: `forecastTimeToFull` from `resource_measurements` estimates days left before a finite capacity; API/UI expose it; Capacity Forecast alerts open within ~7 days. Tests: `tests/resources.test.ts`, `tests/resource-limits.test.ts`.
+- External Ops heartbeat: `server/deadman.ts` pings `DEADMAN_HEARTBEAT_URL` every 60s (tolerance 180s); status at `GET /api/v1/external-heartbeat` (URL never returned). Separate from the infrastructure dead-man stream. Tests: `tests/deadman.test.ts`, `tests/production.test.ts`.
 
 - The agent update script is `buildUpdater` in `server/agent.ts`. It keeps the installed config and restores `agent.py.bak` when the new process does not report. The loose `agent-3.3.1.py` file has been removed. Setup is the only copy.
 - Cloudflare sync is an error when the token cannot list zones, including when the account load-balancer list is empty.

@@ -4,7 +4,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { convertUnit, evaluateCapacity, monitorBand, thresholdProblem, type CapacityInput } from '../src/lib/resources.ts';
+import { convertUnit, evaluateCapacity, forecastTimeToFull, monitorBand, thresholdProblem, type CapacityInput } from '../src/lib/resources.ts';
 
 const base = (over: Partial<CapacityInput> = {}): CapacityInput => ({
   kind: 'STORAGE',
@@ -129,4 +129,24 @@ test('invalid threshold pairs are rejected and unlimited is not a percent of a m
     kind: 'API_QUOTA', unlimited: true, capacity: null, usage: 5000, thresholdMode: 'absolute', warningValue: 1000, criticalValue: 9000,
   }));
   assert.equal(open.state, 'WARNING');
+});
+
+test('forecast time to full: rising usage estimates days left; flat or short history does not', () => {
+  const now = Date.now();
+  // 40 → 60 over 24 h (≈ 20 /day) → 100 in ~2 days
+  const rising = Array.from({ length: 24 * 4 }, (_, i) => ({
+    measuredAt: new Date(now - (24 * 4 - i) * 15 * 60_000).toISOString(),
+    usage: 40 + (20 * i) / (24 * 4),
+  }));
+  const f = forecastTimeToFull(rising, 100)!;
+  assert.ok(f, 'enough history yields a forecast');
+  assert.ok(f.daysLeft !== null && f.daysLeft > 1.5 && f.daysLeft < 2.5, `daysLeft ${f.daysLeft}`);
+  assert.ok(Math.abs(f.slopePerDay - 20) < 1, `slope ${f.slopePerDay}`);
+  assert.equal(f.limit, 100);
+
+  const flat = rising.map(p => ({ ...p, usage: 50 }));
+  assert.equal(forecastTimeToFull(flat, 100)!.daysLeft, null, 'flat series has no ETA');
+  assert.equal(forecastTimeToFull(rising.slice(-5), 100), null, 'too few samples');
+  assert.equal(forecastTimeToFull(rising, 0), null, 'invalid limit');
+  assert.equal(forecastTimeToFull([...rising.slice(0, -1), { measuredAt: new Date(now).toISOString(), usage: 101 }], 100)!.daysLeft, 0, 'already full');
 });

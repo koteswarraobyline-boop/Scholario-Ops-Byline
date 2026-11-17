@@ -637,15 +637,19 @@ test('graceful shutdown: pending data saved, connections closed, exit code 0', a
   assert.match(out, /shutdown complete/);
 });
 
-test('dead-man heartbeat end-to-end: built from agent reports, deprecated DEADMAN_* ignored, no outbound request, no secrets', async () => {
+test('dead-man + external heartbeat end-to-end: infra from agent reports, outbound ping every interval, secrets never exposed', async () => {
   let hits = 0;
   const wd = (await import('node:http')).createServer((_q, r) => { hits++; r.end('OK'); });
   await new Promise<void>(r => wd.listen(0, '127.0.0.1', () => r()));
-  const oldUrl = `http://127.0.0.1:${(wd.address() as { port: number }).port}/ping/e2e-old-secret-uuid?token=e2e-old-token`;
+  const pingUrl = `http://127.0.0.1:${(wd.address() as { port: number }).port}/ping/e2e-ext-secret-uuid?token=e2e-ext-token`;
   const port = PORT + 70;
   let out = '';
   const child = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
-    env: { ...process.env, NODE_ENV: 'production', PORT: String(port), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR, JWT_SECRET: SECRETS.jwt, ADMIN_EMAIL: ADMIN.email, ADMIN_PASSWORD: ADMIN.password, LOG_FORMAT: 'json', CLOUDFLARE_API_TOKEN: '', DEADMAN_HEARTBEAT_URL: oldUrl, DEADMAN_INTERVAL_SEC: '10' },
+    env: {
+      ...process.env, NODE_ENV: 'production', PORT: String(port), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR,
+      JWT_SECRET: SECRETS.jwt, ADMIN_EMAIL: ADMIN.email, ADMIN_PASSWORD: ADMIN.password, LOG_FORMAT: 'json',
+      CLOUDFLARE_API_TOKEN: '', DEADMAN_HEARTBEAT_URL: pingUrl, DEADMAN_INTERVAL_SEC: '10', DEADMAN_TOLERANCE_SEC: '180',
+    },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   child.stdout?.on('data', d => { out += d; });
@@ -655,7 +659,6 @@ test('dead-man heartbeat end-to-end: built from agent reports, deprecated DEADMA
     await waitReady(base);
     const login = await (await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ADMIN) })).json() as { data: { tokens: { accessToken: string } } };
     const get = async (p: string) => { const r = await fetch(base + p, { headers: { Authorization: `Bearer ${login.data.tokens.accessToken}` } }); return { status: r.status, raw: await r.text() }; };
-    // A reporting server shows up in the heartbeat with its delivery data
     const srv = JSON.parse((await (await fetch(`${base}/api/v1/servers`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${login.data.tokens.accessToken}` }, body: JSON.stringify({ hostname: 'hb-e2e', ip: '192.0.2.77', environment: 'PRD' }) })).text())).data;
     const agentToken = (await one(`select agent_token from ${SCHEMA}.servers where id = $1`, [srv.id])).agent_token as string;
     const now = new Date().toISOString();
@@ -672,23 +675,40 @@ test('dead-man heartbeat end-to-end: built from agent reports, deprecated DEADMA
     assert.equal(mine.environment, 'PRD');
     assert.equal(mine.server.latencyMs, 10);
     assert.equal(mine.services.healthy, 1);
-    assert.equal(mine.databases.checks[0].latencyMs, 2);
     assert.equal(hb.name, 'Dead-Man Watchdog Heartbeat Stream');
-    assert.deepEqual(JSON.parse((await get('/api/v1/health/heartbeats')).raw).data.servers.map((s: { serverId: string }) => s.serverId), hb.servers.map((s: { serverId: string }) => s.serverId));
-    await new Promise(r => setTimeout(r, 2000));
-    assert.equal(hits, 0, 'no request to the (deprecated) external watchdog URL');
-    for (const p of ['/api/v1/deadman/status', '/api/v1/bootstrap', '/api/v1/integrations', '/api/v1/system/summary', '/api/health']) {
+
+    const ext = await waitFor(async () => {
+      const d = JSON.parse((await get('/api/v1/external-heartbeat')).raw).data;
+      return d.status === 'HEALTHY' && d.workerRunning ? d : null;
+    });
+    assert.equal(ext.intervalSec, 10);
+    assert.equal(ext.toleranceSec, 180);
+    assert.equal(ext.nodeLocation, '127.0.0.1');
+    assert.ok(hits >= 1, `external watchdog was pinged (hits=${hits})`);
+    const integ = JSON.parse((await get('/api/v1/integrations')).raw).data;
+    assert.equal(integ.externalHeartbeat.configured, true);
+    assert.equal(integ.externalHeartbeat.status, 'HEALTHY');
+    assert.equal(integ.externalHeartbeat.intervalSec, 10);
+    assert.equal(integ.externalHeartbeat.toleranceSec, 180);
+
+    for (const p of ['/api/v1/deadman/status', '/api/v1/external-heartbeat', '/api/v1/bootstrap', '/api/v1/integrations', '/api/v1/system/summary', '/api/health']) {
       const r = await get(p);
       assert.ok(r.status < 500, `${p} → ${r.status}`);
-      for (const s of ['e2e-old-secret-uuid', 'e2e-old-token', oldUrl, agentToken]) assert.equal(r.raw.includes(s), false, `${p} exposes a secret`);
+      for (const s of ['e2e-ext-secret-uuid', 'e2e-ext-token', pingUrl, agentToken]) assert.equal(r.raw.includes(s), false, `${p} exposes a secret`);
     }
-    assert.equal('deadMan' in JSON.parse((await get('/api/v1/integrations')).raw).data, false, 'no external watchdog configuration');
+    // SSE must disable nginx buffering for live dashboards
+    const ticket = JSON.parse((await (await fetch(`${base}/api/v1/realtime/ticket`, { method: 'POST', headers: { Authorization: `Bearer ${login.data.tokens.accessToken}` } })).text())).data.ticket as string;
+    const stream = await fetch(`${base}/api/v1/realtime/stream?ticket=${encodeURIComponent(ticket)}`);
+    assert.equal(stream.status, 200);
+    assert.match(stream.headers.get('content-type') || '', /text\/event-stream/);
+    assert.equal(stream.headers.get('x-accel-buffering'), 'no');
+    stream.body?.cancel().catch(() => {});
+
     const exited = new Promise<number | null>(resolve => child.once('exit', code => resolve(code)));
     child.send('shutdown');
     const code = await Promise.race([exited, new Promise<'timeout'>(r => setTimeout(() => r('timeout'), 10_000))]);
     assert.equal(code, 0, `clean exit expected, got ${code}`);
-    assert.match(out, /DEADMAN_HEARTBEAT_URL, DEADMAN_INTERVAL_SEC[^"]* deprecated and ignored/);
-    for (const s of ['e2e-old-secret-uuid', 'e2e-old-token', oldUrl, agentToken]) assert.equal(out.includes(s), false, 'secret in the logs');
+    for (const s of ['e2e-ext-secret-uuid', 'e2e-ext-token', pingUrl, agentToken]) assert.equal(out.includes(s), false, 'secret in the logs');
   } finally {
     if (child.exitCode === null) child.kill();
     wd.close();

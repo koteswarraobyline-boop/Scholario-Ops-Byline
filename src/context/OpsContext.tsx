@@ -66,8 +66,13 @@ interface OpsContextType {
   changeIncidentSeverity: (incidentId: string, severity: IncidentSeverity) => Promise<boolean>;
   assignIncidentOwner: (incidentId: string, owner: string) => Promise<boolean>;
   addIncidentNote: (incidentId: string, noteText: string) => Promise<boolean>;
-  resolveIncident: (incidentId: string, resolutionSummary?: string) => Promise<boolean>;
-  createIncident: (data: { title: string; severity: IncidentSeverity; applicationId?: string; environment?: 'PRD' | 'DR'; description?: string }) => Promise<Incident | null>;
+  resolveIncident: (incidentId: string, resolutionSummary?: string, force?: boolean) => Promise<boolean>;
+  updateIncidentRootCause: (incidentId: string, data: { rootCauseCategory: string; description?: string }) => Promise<boolean>;
+  updateIncidentRunbook: (incidentId: string, runbookId: string | null) => Promise<boolean>;
+  setIncidentFixSteps: (incidentId: string, steps: Array<string | { id?: string; text: string }>) => Promise<boolean>;
+  toggleIncidentFixStep: (incidentId: string, stepId: string) => Promise<boolean>;
+  refreshIncidentImpact: (incidentId: string) => Promise<boolean>;
+  createIncident: (data: { title: string; severity: IncidentSeverity; applicationId?: string; environment?: 'PRD' | 'DR'; description?: string; rootCauseCategory?: string }) => Promise<Incident | null>;
 
   // Failover
   triggerFailover: (appId: string, targetOrigin: 'DR' | 'PRIMARY', reason?: string) => Promise<boolean>;
@@ -434,6 +439,9 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         case 'backups_changed': refetch('backups', async () => setBackups(await api.getBackups())); break;
         case 'cloudflare_update': setCloudflareZones(raw as CloudflareZone[]); refetch('integrations', async () => setIntegrations(await api.integrations())); break;
         case 'deadman_update': setDeadMan(normalizeDeadMan(raw)); break;
+        case 'external_heartbeat_update':
+          refetch('integrations', async () => setIntegrations(await api.integrations()));
+          break;
         case 'loadbalancer_update':
           setLoadBalancer(raw as LoadBalancerState);
           refetch('integrations', async () => setIntegrations(await api.integrations()));
@@ -494,7 +502,18 @@ export const OpsProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (!note.trim()) return Promise.resolve(false);
     return incidentAction(() => api.addIncidentNote(id, note.trim()));
   }, [incidentAction]);
-  const resolveIncident = useCallback((id: string, summary?: string) => incidentAction(() => api.resolveIncident(id, summary), `${id} resolved`), [incidentAction]);
+  const resolveIncident = useCallback((id: string, summary?: string, force?: boolean) =>
+    incidentAction(() => api.resolveIncident(id, summary, force), `${id} resolved`), [incidentAction]);
+  const updateIncidentRootCause = useCallback((id: string, data: { rootCauseCategory: string; description?: string }) =>
+    incidentAction(() => api.updateIncidentRootCause(id, data), `${id} root cause updated`), [incidentAction]);
+  const updateIncidentRunbook = useCallback((id: string, runbookId: string | null) =>
+    incidentAction(() => api.updateIncidentRunbook(id, runbookId), runbookId ? `${id} runbook linked` : `${id} runbook cleared`), [incidentAction]);
+  const setIncidentFixSteps = useCallback((id: string, steps: Array<string | { id?: string; text: string }>) =>
+    incidentAction(() => api.setIncidentFixSteps(id, steps), `${id} fix steps updated`), [incidentAction]);
+  const toggleIncidentFixStep = useCallback((id: string, stepId: string) =>
+    incidentAction(() => api.toggleIncidentFixStep(id, stepId)), [incidentAction]);
+  const refreshIncidentImpact = useCallback((id: string) =>
+    incidentAction(() => api.refreshIncidentImpact(id), `${id} impact refreshed`), [incidentAction]);
   const createIncident = useCallback(async (data: Parameters<OpsContextType['createIncident']>[0]) => {
     const inc = await run(() => api.createIncident(data), 'Incident declared');
     if (inc) setIncidents(prev => upsert(prev, inc));
@@ -737,7 +756,8 @@ Fail over anyway? The override is recorded in the audit log.`)) {
         activeTab, setActiveTab, selectedAppId, setSelectedAppId, selectedServerId, setSelectedServerId,
         selectedIncidentId, setSelectedIncidentId, selectedRunbookId, setSelectedRunbookId,
         isCommandPaletteOpen, setIsCommandPaletteOpen, lastEventAtRef: lastEventAt,
-        acknowledgeIncident, changeIncidentStatus, changeIncidentSeverity, assignIncidentOwner, addIncidentNote, resolveIncident, createIncident,
+        acknowledgeIncident, changeIncidentStatus, changeIncidentSeverity, assignIncidentOwner, addIncidentNote, resolveIncident,
+        updateIncidentRootCause, updateIncidentRunbook, setIncidentFixSteps, toggleIncidentFixStep, refreshIncidentImpact, createIncident,
         triggerFailover,
         runProbeCheck, runAllProbes, addMonitor, updateMonitor, deleteMonitor, toggleMonitorStatus,
         isAddMonitorModalOpen, setIsAddMonitorModalOpen, addMonitorInitialContext, openAddMonitorWithContext,

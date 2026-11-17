@@ -18,6 +18,7 @@ import {
   Send,
   Terminal,
   Radio,
+  KeyRound,
   Check,
   FileText,
   Database,
@@ -32,6 +33,7 @@ import {
   Network,
   Loader2,
   Gauge,
+  Waypoints,
 } from 'lucide-react';
 
 export type PaletteCategory =
@@ -70,7 +72,9 @@ const ROUTES: Array<{ tab: string; title: string; subtitle: string; icon: Comman
   { tab: 'applications', title: 'Applications', subtitle: 'Applications with PRD/DR mapping and failover state', icon: Layers, keywords: 'applications apps catalog' },
   { tab: 'infrastructure', title: 'Infrastructure', subtitle: 'Registered VPS servers and agent telemetry', icon: Server, keywords: 'infrastructure servers vps nodes cpu ram disk telemetry' },
   { tab: 'resources', title: 'Capacity', subtitle: 'Resource limits, usage and thresholds', icon: Gauge, keywords: 'capacity limits seats storage quota database disk cpu memory warning critical' },
+  { tab: 'impact', title: 'Impact', subtitle: 'What stops or degrades if a component fails', icon: Waypoints, keywords: 'impact blast radius hard soft users features applications' },
   { tab: 'monitors', title: 'Monitors', subtitle: 'HTTP/TCP/DNS/SSL and heartbeat monitors', icon: Radio, keywords: 'monitors probes checks uptime' },
+  { tab: 'credentials', title: 'Credentials', subtitle: 'API keys, tokens, subscriptions and TLS certificate expiry', icon: KeyRound, keywords: 'credentials api key token subscription certificate expiry ssl' },
   { tab: 'incidents', title: 'Incidents', subtitle: 'Open and resolved incidents', icon: AlertTriangle, keywords: 'incidents tickets triage acknowledge resolve' },
   { tab: 'resilience', title: 'PRD / DR Readiness', subtitle: 'Disaster recovery readiness and traffic failover', icon: ShieldCheck, keywords: 'resilience dr disaster recovery readiness failover' },
   { tab: 'backups', title: 'Backups', subtitle: 'Backup records and freshness', icon: Database, keywords: 'backups restore snapshots' },

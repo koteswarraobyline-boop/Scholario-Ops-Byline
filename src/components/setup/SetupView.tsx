@@ -128,17 +128,38 @@ const IntegrationsPanel: React.FC = () => {
         : <>Optional. Set <code className={st.code}>SMTP_FROM</code> and <code className={st.code}>SMTP_SERVICE</code> (Gmail, Outlook365, SendGrid…), <code className={st.code}>SMTP_URL</code> or <code className={st.code}>SMTP_HOST</code>, plus user/pass, for email alerts.</>,
     },
     {
-      // Built in: derived from the agents' reports — nothing to configure, no external watchdog
-      key: 'deadman', icon: HeartPulse, title: 'Dead-man heartbeat', ok: deadMan.status === 'HEALTHY', configured: deadMan.servers.length > 0,
+      // Built in: derived from the agents' reports
+      key: 'deadman', icon: HeartPulse, title: 'Infrastructure heartbeat', ok: deadMan.status === 'HEALTHY', configured: deadMan.servers.length > 0,
       detail: (
         <span className="block space-y-1 break-words">
           <span className="block">
             Status: <b>{deadManLabel(deadMan.status)}</b>
             {deadMan.servers.length > 0 && <> · {deadMan.servers.map(s => `${s.environment} VPS ${deadManLabel(s.state).toLowerCase()}`).join(' · ')}</>}
           </span>
-          <span className="block">Built in — no setup needed. Heartbeats of the monitored PRD / DR servers, their applications, services and databases come from the telemetry agent's reports; a heartbeat that goes stale or fails opens an incident.</span>
+          <span className="block">Built in — heartbeats of the monitored PRD / DR servers, their applications, services and databases come from the telemetry agent's reports; a heartbeat that goes stale or fails opens an incident.</span>
         </span>
       ),
+    },
+    {
+      key: 'external-heartbeat', icon: HeartPulse, title: 'External Ops heartbeat',
+      ok: integrations?.externalHeartbeat?.status === 'HEALTHY',
+      configured: Boolean(integrations?.externalHeartbeat?.configured),
+      detail: integrations?.externalHeartbeat?.configured
+        ? (
+          <span className="block space-y-1 break-words">
+            <span className="block">
+              Status: <b>{integrations.externalHeartbeat.status}</b>
+              {' · '}pings {integrations.externalHeartbeat.nodeLocation} every {integrations.externalHeartbeat.intervalSec}s
+              {' · '}tolerance {integrations.externalHeartbeat.toleranceSec}s
+            </span>
+            <span className="block">
+              {integrations.externalHeartbeat.configError
+                ? integrations.externalHeartbeat.configError
+                : 'Outbound ping so an external watchdog alerts within about 3 minutes if Scholario Ops itself stops. Status is also at GET /api/v1/external-heartbeat (URL never exposed).'}
+            </span>
+          </span>
+        )
+        : <>Optional. Set <code className={st.code}>DEADMAN_HEARTBEAT_URL</code> (and optionally <code className={st.code}>DEADMAN_INTERVAL_SEC</code>=60, <code className={st.code}>DEADMAN_TOLERANCE_SEC</code>=180) so an external watchdog is alerted if this Ops process stops.</>,
     },
     {
       key: 'url', icon: Link2, title: 'Public URL', ok: agentBase.ok, configured: agentBase.ok,
