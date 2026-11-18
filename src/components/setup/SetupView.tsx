@@ -1140,9 +1140,9 @@ export const SetupView: React.FC = () => {
   return (
     <div className="space-y-6">
       <div className={`pb-3 border-b ${st.isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
-        <h1 className="text-lg font-bold font-mono tracking-tight">SETUP &amp; CONNECTIONS</h1>
-        <p className={`text-xs font-mono mt-0.5 ${st.muted}`}>
-          Register your real VPS servers and applications, install the telemetry agent, connect Cloudflare DNS failover and verify connectivity.
+        <h1 className="text-lg font-bold tracking-tight">Setup</h1>
+        <p className={`text-xs mt-0.5 ${st.muted}`}>
+          Add servers, applications, and the monitoring agent.
         </p>
       </div>
 

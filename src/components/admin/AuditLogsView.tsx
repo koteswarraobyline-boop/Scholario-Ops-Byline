@@ -97,10 +97,9 @@ export const AuditLogsView: React.FC = () => {
       {/* Header */}
       <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
         <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">AUDIT LOGS</h1>
-          <p className={`text-xs font-mono mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Record of operator actions: incidents, failovers, monitors, configuration and account changes
-            {!loading && !error && <> · {total} entr{total === 1 ? 'y' : 'ies'}{filtersActive ? ' matching' : ''}</>}
+          <h1 className="text-lg font-bold tracking-tight">Audit logs</h1>
+          <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            {!loading && !error && <>{total} entr{total === 1 ? 'y' : 'ies'}{filtersActive ? ' matching' : ''}</>}
           </p>
         </div>
         <button

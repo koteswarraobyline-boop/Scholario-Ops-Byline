@@ -3,8 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
 import { LbFailoverConsole } from '../resilience/LbFailoverConsole';
 import { useAuth } from '../../context/AuthContext';
-import { Application, Monitor, OperationalStatus, VpsServer } from '../../types';
-import { X, AlertTriangle, ArrowRight, Plus, Layers, Loader2, Pencil, Trash2 } from 'lucide-react';
+import { Application, ApplicationServiceDependency, Monitor, OperationalStatus, VpsServer } from '../../types';
+import { X, AlertTriangle, Plus, Layers, Loader2, Pencil, Trash2 } from 'lucide-react';
 import { AppEditor } from '../setup/SetupView';
 import { HealthDimensions } from './HealthDimensions';
 import { effectiveRoutingMethod, explainVps, ROUTING_METHOD_LABELS } from '../../lib/trafficHealth';
@@ -12,11 +12,27 @@ import { registerLinks, statusCause } from '../../lib/statusCause';
 import { dnsPointsAt, routeState, servingLabel } from '../ui/routing';
 import { MonitorFormModal } from '../monitors/CreateMonitorModal';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 import { useDialog } from '../ui/useDialog';
-import { useDependencyDemo } from '../../context/DependencyDemoContext';
-import { DemoBanner } from '../resilience/DemoModeControls';
-import { demoLinksFor, demoNameById, demoVisualLabel, simulateDemoFailure } from '../../mocks/dependencyDemoData';
 import { FailoverImpactPreview } from '../ui/FailoverImpactPreview';
+import { dependencyMethodLabel, projectServiceDependencies } from '../../lib/serviceDependencies';
+
+/** The same recorded facts on every dependency row, so a read-only tab matches the register. */
+function dependencyFacts(link: ApplicationServiceDependency, includeFeature = false): string {
+  return [
+    link.type,
+    dependencyMethodLabel(link.method),
+    link.criticality ?? '',
+    includeFeature && link.featureName ? `feature ${link.featureName}` : '',
+    link.otherEndpoint ?? '',
+    link.failureBehaviour ? `users see ${link.failureBehaviour}` : '',
+    link.owner ? `owner ${link.owner}` : '',
+    link.recoveryExpectation ? `recovery ${link.recoveryExpectation}` : '',
+    link.healthCheck ? `check ${link.healthCheck}` : '',
+    link.notes || 'rationale not recorded',
+    `status ${link.status}`,
+  ].filter(Boolean).join(' · ');
+}
 
 // ── Formatting helpers (null-safe) ──────────────────────────────────────────
 const fmtPct = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : `${v.toFixed(2)}%`);
@@ -69,7 +85,6 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
     theme,
   } = useOps();
   const { hasRole, canDo } = useAuth();
-  const demo = useDependencyDemo();
   const navigate = useNavigate();
   const dialog = useDialog(onClose);
 
@@ -96,15 +111,11 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
   const prdServer = servers.find(s => s.id === application.prdServerId);
   const drServer = servers.find(s => s.id === application.drServerId);
   const appMonitors = monitors.filter(m => m.applicationId === application.id);
-  const serviceLinkCount = demo.enabled
-    ? (() => {
-        const { outgoing, incoming } = demoLinksFor(application.name);
-        return outgoing.length + incoming.length;
-      })()
-    : (() => {
-        const comp = registry.find(c => c.kind === 'APPLICATION' && c.applicationId === application.id);
-        return comp ? dependencyLinks.filter(l => l.fromId === comp.id || l.toId === comp.id).length : 0;
-      })();
+  const serviceDeps = projectServiceDependencies(application.id, {
+    applications, servers, registry, links: dependencyLinks,
+  });
+  const applicationLevel = serviceDeps.applicationLevel;
+  const serviceLinkCount = serviceDeps.outgoing.length + serviceDeps.incoming.length;
   const appIncidents = incidents.filter(i => i.applicationId === application.id);
   const appBackups = backups.filter(b => b.applicationId === application.id);
   const appDeployments = deployments.filter(d => d.applicationId === application.id);
@@ -298,6 +309,23 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                 </p>
               )}
 
+              <div className={`p-4 rounded border space-y-2 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                <div className={`text-xs font-bold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Whole application ({applicationLevel.length})</div>
+                <p className={`text-[11px] font-sans ${muted}`}>Hard stops this application. Soft degrades it. A Soft link limited to one feature does not change the application.</p>
+                {applicationLevel.length === 0 ? (
+                  <div className={emptyText}>Nothing recorded for the whole application. This does not mean the application has no dependencies.</div>
+                ) : applicationLevel.map(l => {
+                  const fromFeature = serviceDeps.outgoing.some(o => o.id === l.id)
+                    ? null
+                    : serviceDeps.features.find(f => f.uses.some(u => u.id === l.id));
+                  return (
+                    <div key={l.id} className={`font-semibold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
+                      {fromFeature?.name ?? application.name} <span className={`font-normal ${muted}`}>→ {l.otherName} · {l.type} · {l.status}</span>
+                    </div>
+                  );
+                })}
+              </div>
+
               <HealthDimensions
                 application={application}
                 servers={servers}
@@ -348,35 +376,19 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
           {/* TAB: HEALTH & METRICS */}
           {activeTab === 'health' && (
             <div className="space-y-4 font-mono">
-              <div className="grid grid-cols-3 gap-3">
-                <div className={card}>
-                  <div className={label}>Latency P50</div>
-                  <div className={value}>{fmtMs(application.p50Ms)}</div>
+              {(application.p50Ms != null || application.p95Ms != null || application.p99Ms != null) && (
+                <div className="grid grid-cols-3 gap-3">
+                  {application.p50Ms != null && <div className={card}><div className={label}>Latency p50</div><div className={value}>{fmtMs(application.p50Ms)}</div></div>}
+                  {application.p95Ms != null && <div className={card}><div className={label}>Latency p95</div><div className={value}>{fmtMs(application.p95Ms)}</div></div>}
+                  {application.p99Ms != null && <div className={card}><div className={label}>Latency p99</div><div className={value}>{fmtMs(application.p99Ms)}</div></div>}
                 </div>
-                <div className={card}>
-                  <div className={label}>Latency P95</div>
-                  <div className={value}>{fmtMs(application.p95Ms)}</div>
-                </div>
-                <div className={card}>
-                  <div className={label}>Latency P99</div>
-                  <div className={value}>{fmtMs(application.p99Ms)}</div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-3">
-                <div className={card}>
-                  <div className={label}>Uptime 24h</div>
-                  <div className={value}>{fmtPct(application.uptime24h)}</div>
-                </div>
+              )}
+              {application.uptime7d != null && (
                 <div className={card}>
                   <div className={label}>Uptime 7d</div>
                   <div className={value}>{fmtPct(application.uptime7d)}</div>
                 </div>
-                <div className={card}>
-                  <div className={label}>Uptime 30d</div>
-                  <div className={value}>{fmtPct(application.uptime30d)}</div>
-                </div>
-              </div>
+              )}
 
               <div className={`p-4 rounded border space-y-2 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
                 <div className={`text-xs font-bold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Failed Check Rate (24h)</div>
@@ -501,108 +513,75 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
           {/* TAB: DEPENDENCIES — stored register links, not the monitor list */}
           {activeTab === 'deps' && (
             <div className="space-y-3 font-mono">
-              <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Service dependencies (read only)</div>
-              {demo.enabled ? (
-                <div className="space-y-2">
-                  <DemoBanner />
-                  <p className={`text-[11px] font-sans ${muted}`}>
-                    Illustrative relationships for {application.name}. Not verified. This is not an editor. Hosting stays on the Infrastructure tab.
-                  </p>
-                  {(() => {
-                    const { outgoing, incoming } = demoLinksFor(application.name);
-                    const visual = demo.scenario ? simulateDemoFailure(demo.scenario.rootName)?.visual : undefined;
-                    const statusOf = (id: string) => demoVisualLabel(visual?.get(id) ?? 'UNKNOWN');
-                    if (outgoing.length === 0 && incoming.length === 0) {
-                      return <div className={emptyText}>This application is not in the nine-name demo set. Turn DEMO off to see the live register.</div>;
-                    }
-                    const row = (id: string, consumer: string, provider: string, link: { type: string; method: string | null; notes: string }) => (
-                      <div key={`${id}-${consumer}-${provider}`} className={`p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
-                        <div className={`font-semibold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{consumer} <span className={muted}>→</span> {provider}</div>
-                        <div className={`text-[11px] break-words ${muted}`}>{link.type} · {link.method ?? 'method not recorded'} · {link.notes} · status {statusOf(id)}</div>
-                      </div>
-                    );
-                    return (
-                      <div className="space-y-2">
-                        {outgoing.length > 0 && <div className={`text-[10px] uppercase font-bold ${muted}`}>Outgoing ({outgoing.length})</div>}
-                        {outgoing.map(link => row(link.toId, application.name, demoNameById(link.toId), link))}
-                        {incoming.length > 0 && <div className={`text-[10px] uppercase font-bold ${muted}`}>Incoming ({incoming.length})</div>}
-                        {incoming.map(link => row(link.fromId, demoNameById(link.fromId), application.name, link))}
-                      </div>
-                    );
-                  })()}
-                </div>
+              <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>What this application uses</div>
+              {serviceDeps.features.length === 0 && serviceDeps.outgoing.length === 0 && serviceDeps.incoming.length === 0 ? (
+                <div className={emptyText}>Nothing recorded. This does not mean the application has no dependencies.</div>
               ) : (
-              <>
-              <p className={`text-[11px] font-sans ${muted}`}>
-                Consumer → provider from the dependency register. This list is not an editor. “Runs on” stays on the Infrastructure tab.
-              </p>
-              {(() => {
-                const comp = registry.find(c => c.kind === 'APPLICATION' && c.applicationId === application.id);
-                const outgoing = comp ? dependencyLinks.filter(l => l.fromId === comp.id) : [];
-                const incoming = comp ? dependencyLinks.filter(l => l.toId === comp.id) : [];
-                const regName = (id: string) => registry.find(c => c.id === id)?.name ?? 'Unknown';
-                const liveOf = (id: string) => {
-                  const component = registry.find(c => c.id === id);
-                  if (!component) return 'UNKNOWN';
-                  if (component.kind === 'APPLICATION' && component.applicationId) {
-                    return applications.find(a => a.id === component.applicationId)?.status ?? 'UNKNOWN';
-                  }
-                  if (component.kind === 'SERVER' && component.serverId) {
-                    return servers.find(s => s.id === component.serverId)?.status ?? 'UNKNOWN';
-                  }
-                  return 'UNKNOWN';
-                };
-                const row = (l: typeof dependencyLinks[number], consumer: string, provider: string, otherId: string) => (
-                  <div key={l.id} className={`p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
-                    <div className={`font-semibold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
-                      {consumer} <span className={muted}>→</span> {provider}
+                <div className="space-y-3">
+                  <div className={`text-[10px] uppercase font-bold ${muted}`}>Whole application ({applicationLevel.length})</div>
+                  <div className={`text-[11px] ${muted}`}>Hard stops this application. Soft degrades it. A Soft link limited to one feature is listed under that feature and does not change the application.</div>
+                  {applicationLevel.length === 0 ? (
+                    <div className={emptyText}>Nothing recorded for the whole application. This does not mean the application has no dependencies.</div>
+                  ) : applicationLevel.map(l => {
+                    const fromFeature = serviceDeps.outgoing.some(o => o.id === l.id)
+                      ? null
+                      : serviceDeps.features.find(f => f.uses.some(u => u.id === l.id));
+                    return (
+                    <div key={l.id} className={`p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                      <div className={`font-semibold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
+                        {fromFeature?.name ?? application.name} <span className={muted}>→</span> {l.otherName}
+                      </div>
+                      <div className={`text-[11px] break-words ${muted}`}>{dependencyFacts(l, !fromFeature)}</div>
                     </div>
-                    <div className={`text-[11px] break-words ${muted}`}>
-                      {l.type} · {l.method ?? 'method not recorded'}
-                      {l.featureId ? ` · feature ${regName(l.featureId)}` : ' · feature not limited to one'}
-                      {l.notes ? ` · ${l.notes}` : ' · rationale not recorded'}
-                      {' · '}status {liveOf(otherId)}
+                    );
+                  })}
+                  <div className={`text-[10px] uppercase font-bold ${muted}`}>Features ({serviceDeps.features.length})</div>
+                  {serviceDeps.features.length === 0 ? (
+                    <div className={emptyText}>No features yet. Add them in Setup.</div>
+                  ) : serviceDeps.features.map(feature => (
+                    <div key={feature.id} className="space-y-2">
+                      <div className={`font-semibold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{feature.name} <span className={`font-normal ${muted}`}>· {feature.owner}</span></div>
+                      {feature.uses.length === 0 ? (
+                        <div className={emptyText}>Nothing recorded for this feature. That does not mean the feature has no dependencies.</div>
+                      ) : feature.uses.map(l => (
+                        <div key={l.id} className={`p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                          <div className={`font-semibold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
+                            {feature.name} <span className={muted}>→</span> {l.otherName}
+                          </div>
+                          <div className={`text-[11px] break-words ${muted}`}>{dependencyFacts(l)}</div>
+                        </div>
+                      ))}
                     </div>
-                  </div>
-                );
-                if (!comp || (outgoing.length === 0 && incoming.length === 0)) {
-                  return <div className={emptyText}>Nothing recorded. This does not mean the application has no dependencies.</div>;
-                }
-                return (
-                  <div className="space-y-2">
-                    {outgoing.length > 0 && <div className={`text-[10px] uppercase font-bold ${muted}`}>Outgoing ({outgoing.length})</div>}
-                    {outgoing.map(l => row(l, application.name, regName(l.toId), l.toId))}
-                    {incoming.length > 0 && <div className={`text-[10px] uppercase font-bold ${muted}`}>Incoming ({incoming.length})</div>}
-                    {incoming.map(l => row(l, regName(l.fromId), application.name, l.fromId))}
-                  </div>
-                );
-              })()}
-              </>
+                  ))}
+                  {serviceDeps.incoming.length > 0 && <div className={`text-[10px] uppercase font-bold ${muted}`}>Incoming ({serviceDeps.incoming.length})</div>}
+                  {serviceDeps.incoming.map(l => (
+                    <div key={l.id} className={`p-3 rounded border ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
+                      <div className={`font-semibold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
+                        {l.otherName} <span className={muted}>→</span> {application.name}
+                      </div>
+                      <div className={`text-[11px] break-words ${muted}`}>{dependencyFacts(l, true)}</div>
+                    </div>
+                  ))}
+                </div>
               )}
               {registerLinks(application.dependencies).length > 0 && (
                 <div className="space-y-2">
-                  <div className={`text-xs font-semibold pt-2 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Checked signals</div>
-                  <p className={`text-[11px] font-sans ${muted}`}>
-                    These recorded dependencies have a live check and can change this application’s status. UNKNOWN is not DOWN.
-                  </p>
+                  <div className={`text-xs font-semibold pt-2 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Live checks</div>
                   {registerLinks(application.dependencies).map(d => (
                     <div key={d.id} className={`p-3 rounded border flex items-center justify-between ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
                       <div className="min-w-0">
                         <div className={`font-semibold font-sans truncate ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{d.name}</div>
-                        <div className={`text-[11px] ${muted}`}>Register link with a real check</div>
+                        <div className={`text-[11px] ${muted}`}>Can change this application's status</div>
                       </div>
                       <span className={`font-semibold shrink-0 pl-3 ${statusColor(d.status)}`}>{d.status}</span>
                     </div>
                   ))}
                 </div>
               )}
-              <p className={`text-[11px] font-sans ${muted}`}>
-                Monitors for this application are on the Monitors tab ({appMonitors.length}). A monitor is a check. It is not a service dependency.
-              </p>
-              {canRecordDependency && !demo.enabled && (
+              {canRecordDependency && (
                 <button
                   type="button"
-                  onClick={() => navigate('/setup#dependency-register-title')}
+                  onClick={() => navigate(`/setup?record=${encodeURIComponent(application.id)}#dependency-register-title`)}
                   className="px-2.5 py-1 rounded text-xs font-mono font-bold bg-blue-600 hover:bg-blue-500 text-white cursor-pointer"
                 >
                   Record a dependency
@@ -621,15 +600,14 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
-                  <div className={`p-2.5 rounded border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
-                    <span className={label}>Replication Lag</span>
-                    <div className={`font-bold text-sm mt-0.5 ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
-                      {application.currentReplicationLagSec === null ? 'No data' : `${application.currentReplicationLagSec} seconds`}
+                  {application.currentReplicationLagSec != null && (
+                    <div className={`p-2.5 rounded border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
+                      <span className={label}>Replication lag</span>
+                      <div className={`font-bold text-sm mt-0.5 ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
+                        {application.currentReplicationLagSec} seconds
+                      </div>
                     </div>
-                    {application.currentReplicationLagSec === null && (
-                      <div className={`text-[10px] font-sans ${muted}`}>Add a DB_REPLICATION monitor to report lag</div>
-                    )}
-                  </div>
+                  )}
                   <div className={`p-2.5 rounded border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
                     <span className={label}>Last Failover</span>
                     <div className={`font-bold text-sm mt-0.5 ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
@@ -884,14 +862,9 @@ const MonitorActions: React.FC<{
 };
 
 export const ApplicationsView: React.FC = () => {
-  const { applications, servers, monitors, cloudflareZones, loadBalancer, setSelectedAppId, selectedAppId, deleteApplication, theme, isLoading } = useOps();
-  const { canDo } = useAuth();
+  const { applications, servers, cloudflareZones, loadBalancer, setSelectedAppId, selectedAppId, theme, isLoading } = useOps();
   const navigate = useNavigate();
   const isDark = theme === 'dark';
-  const canEditApp = canDo('update_application');
-  const canDeleteApp = canDo('delete_application');
-  const [editingApp, setEditingApp] = useState<Application | null>(null);
-  const [confirmDeleteApp, setConfirmDeleteApp] = useState<string | null>(null);
   const [filter, setFilter] = useState<'ALL' | 'TIER_1' | 'TIER_2' | 'TIER_3' | 'HEALTHY' | 'DEGRADED' | 'NO_DR'>('ALL');
   const [search, setSearch] = useState('');
 
@@ -913,6 +886,7 @@ export const ApplicationsView: React.FC = () => {
     return [a.name, a.codeName, a.prdUrl, a.drUrl, a.dnsRecordName, prd?.hostname, prd?.ip, dr?.hostname, dr?.ip]
       .some(v => (v ?? '').toLowerCase().includes(q));
   });
+  const appPaging = useClientPagination(filteredApps, 10, `${filter}|${search}`);
 
   return (
     <div className="space-y-6">
@@ -928,12 +902,7 @@ export const ApplicationsView: React.FC = () => {
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
       }`}>
         <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">
-            APPLICATIONS
-          </h1>
-          <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            {applications.length} registered application{applications.length === 1 ? '' : 's'} across Primary and Disaster Recovery servers
-          </p>
+          <h1 className="text-lg font-bold tracking-tight">Applications</h1>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -980,8 +949,9 @@ export const ApplicationsView: React.FC = () => {
       ) : filteredApps.length === 0 ? (
         <EmptyState title="No applications match this filter" />
       ) : (
+        <>
         <div className="grid grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] gap-3">
-          {filteredApps.map(app => {
+          {appPaging.slice.map(app => {
             const prdServer = servers.find(s => s.id === app.prdServerId);
             const isHealthy = app.status === 'HEALTHY';
             const isBad = app.status === 'CRITICAL' || app.status === 'WARNING';
@@ -1018,78 +988,48 @@ export const ApplicationsView: React.FC = () => {
                 </div>
 
                 {/* Metrics */}
-                <div className={`space-y-1.5 pt-2 border-t font-mono text-xs ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
+                <div className={`space-y-1.5 pt-2 border-t text-xs ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
+                  {lag != null && Number.isFinite(lag) && (
+                    <div className={`flex justify-between items-center ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                      <span className="text-[10px] uppercase">Replication lag</span>
+                      <span className={`tabular-nums ${lag > 30 ? 'text-amber-500 font-bold' : ''}`}>{fmtLag(lag)}</span>
+                    </div>
+                  )}
+                  {app.uptime30d != null && (
+                    <div className={`flex justify-between items-center ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                      <span className="text-[10px] uppercase">Uptime 30d</span>
+                      <span className="tabular-nums font-semibold">{fmtPct(app.uptime30d)}</span>
+                    </div>
+                  )}
+                  {app.p95Ms != null && (
+                    <div className={`flex justify-between items-center ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                      <span className="text-[10px] uppercase">Latency p95</span>
+                      <span className="tabular-nums">{fmtMs(app.p95Ms)}</span>
+                    </div>
+                  )}
                   <div className={`flex justify-between items-center ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                    <span className="text-[10px] uppercase">Replication Lag</span>
-                    <span className={`tabular-nums ${lag !== null && lag > 30 ? 'text-amber-500 font-bold' : ''}`}>{fmtLag(lag)}</span>
-                  </div>
-                  <div className={`flex justify-between items-center ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                    <span className="text-[10px] uppercase">Uptime (30d)</span>
-                    <span className="tabular-nums font-semibold">{fmtPct(app.uptime30d)}</span>
-                  </div>
-                  <div className={`flex justify-between items-center ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                    <span className="text-[10px] uppercase">Latency P95</span>
-                    <span className="tabular-nums">{fmtMs(app.p95Ms)}</span>
-                  </div>
-                  <div className={`flex justify-between items-center ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                    <span className="text-[10px] uppercase">Routing Target</span>
+                    <span className="text-[10px] uppercase">Routing</span>
                     <span className={route === 'DR' ? 'text-rose-500 font-bold' : route === 'PRD' ? 'text-emerald-500 font-semibold' : route === 'MOVING' || route === 'SPLIT' ? 'text-amber-500 font-bold' : (isDark ? 'text-slate-400' : 'text-slate-500')}>
                       {servingLabel(route)}
                     </span>
                   </div>
                   <div className={`flex justify-between items-center ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                    <span className="text-[10px] uppercase">Auto-Failover</span>
+                    <span className="text-[10px] uppercase">Auto-failover</span>
                     <span>{app.autoFailover ? 'On' : 'Off'}</span>
                   </div>
                 </div>
 
-                {/* Footer */}
-                <div className={`pt-2 border-t flex items-center justify-between gap-2 text-[11px] font-mono ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
-                  <span title={prdServer?.hostname} className={`truncate min-w-0 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                    {prdServer ? prdServer.hostname.split('.')[0] : 'No PRD server'}
-                  </span>
-                  <span className="flex items-center gap-1 shrink-0">
-                    {canEditApp && (
-                      <button type="button" onClick={e => { e.stopPropagation(); setEditingApp(app); }} className="px-1.5 py-0.5 rounded text-blue-500 hover:bg-blue-500/10 cursor-pointer inline-flex items-center gap-1" title={`Edit ${app.name}`}>
-                        <Pencil className="w-3 h-3" /> Edit
-                      </button>
-                    )}
-                    {canDeleteApp && (confirmDeleteApp === app.id ? (
-                      <button
-                        type="button"
-                        onClick={async e => {
-                          e.stopPropagation();
-                          if (await deleteApplication(app.id)) {
-                            setConfirmDeleteApp(null);
-                            if (selectedAppId === app.id) setSelectedAppId(null);
-                          }
-                        }}
-                        className="px-1.5 py-0.5 rounded bg-rose-600 text-white cursor-pointer"
-                      >
-                        Delete
-                      </button>
-                    ) : (
-                      <button type="button" onClick={e => { e.stopPropagation(); setConfirmDeleteApp(app.id); }} className="px-1.5 py-0.5 rounded text-rose-500 hover:bg-rose-500/10 cursor-pointer inline-flex items-center gap-1" title={`Delete ${app.name}`}>
-                        <Trash2 className="w-3 h-3" /> Delete
-                      </button>
-                    ))}
-                    <span className="text-blue-500 font-semibold flex items-center gap-1">
-                      <span>Inspect</span>
-                      <ArrowRight className="w-3 h-3" />
-                    </span>
+                <div className={`pt-2 border-t text-[11px] ${isDark ? 'border-[#1A2332]' : 'border-slate-100'}`}>
+                  <span title={prdServer?.hostname} className={`truncate ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                    {prdServer ? prdServer.hostname.split('.')[0] : 'No production server'}
                   </span>
                 </div>
               </div>
             );
           })}
         </div>
-      )}
-      {editingApp && (
-        <div className="fixed inset-0 z-[60] overflow-y-auto bg-black/60 p-4" onMouseDown={() => setEditingApp(null)}>
-          <div className="max-w-5xl mx-auto" onMouseDown={e => e.stopPropagation()}>
-            <AppEditor key={editingApp.id} initial={editingApp} onDone={() => setEditingApp(null)} />
-          </div>
-        </div>
+        <Pagination page={appPaging.page} totalPages={appPaging.totalPages} total={appPaging.total} pageSize={appPaging.pageSize} onPage={appPaging.setPage} />
+        </>
       )}
     </div>
   );

@@ -5,6 +5,7 @@ import { useAuth } from '../../context/AuthContext';
 import { api, CertificateRow, CredentialInput, CredentialRow } from '../../services/api';
 import { CredentialKind } from '../../types';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 
 const KINDS: CredentialKind[] = ['API_KEY', 'TOKEN', 'SUBSCRIPTION'];
 const KIND_LABEL: Record<CredentialKind, string> = {
@@ -36,6 +37,8 @@ export const CredentialsView: React.FC = () => {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
+  const credentialPaging = useClientPagination(rows, 10);
+  const certificatePaging = useClientPagination(certificates, 10);
 
   const load = useCallback(async () => {
     setError('');
@@ -99,10 +102,10 @@ export const CredentialsView: React.FC = () => {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className={`text-lg font-bold font-sans flex items-center gap-2 ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
-            <KeyRound className="w-5 h-5" /> Credentials and certificates
+            <KeyRound className="w-5 h-5" /> Credentials
           </h1>
           <p className={`mt-1 max-w-3xl font-sans ${muted}`}>
-            TLS certificates stay on the SSL monitors. API keys, tokens and subscriptions are tracked by expiry date only — the secret is never stored.
+            Expiry dates only. The secret itself is not stored.
             Inside {warnDays} days they raise a warning. After the date, and when an API answers with an expired key, Ops opens one incident and notifies the owner through the existing channels.
           </p>
         </div>
@@ -125,6 +128,7 @@ export const CredentialsView: React.FC = () => {
         {rows.length === 0 ? (
           <EmptyState title="No expiry dates yet" description="Add an API key, token or subscription with the date it stops working. Do not paste the secret." />
         ) : (
+          <>
           <div className="overflow-x-auto">
             <table className="w-full text-left">
               <thead className={muted}>
@@ -139,7 +143,7 @@ export const CredentialsView: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {rows.map(row => (
+                {credentialPaging.slice.map(row => (
                   <tr key={row.id} className={isDark ? 'border-t border-[#1E293B]' : 'border-t border-slate-200'}>
                     <td className="py-2 pr-3">{row.name}</td>
                     <td className="py-2 pr-3">{KIND_LABEL[row.kind]}</td>
@@ -159,6 +163,8 @@ export const CredentialsView: React.FC = () => {
               </tbody>
             </table>
           </div>
+          <Pagination page={credentialPaging.page} totalPages={credentialPaging.totalPages} total={credentialPaging.total} pageSize={credentialPaging.pageSize} onPage={credentialPaging.setPage} />
+          </>
         )}
       </section>
 
@@ -168,6 +174,7 @@ export const CredentialsView: React.FC = () => {
         {certificates.length === 0 ? (
           <EmptyState title="No TLS monitors" description="Turn on TLS certificate monitoring for an application URL, or add an SSL monitor." />
         ) : (
+          <>
           <div className="overflow-x-auto">
             <table className="w-full text-left">
               <thead className={muted}>
@@ -179,7 +186,7 @@ export const CredentialsView: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {certificates.map(row => (
+                {certificatePaging.slice.map(row => (
                   <tr key={row.monitorId} className={isDark ? 'border-t border-[#1E293B]' : 'border-t border-slate-200'}>
                     <td className="py-2 pr-3">{row.name}</td>
                     <td className="py-2 pr-3">{row.target}</td>
@@ -190,6 +197,8 @@ export const CredentialsView: React.FC = () => {
               </tbody>
             </table>
           </div>
+          <Pagination page={certificatePaging.page} totalPages={certificatePaging.totalPages} total={certificatePaging.total} pageSize={certificatePaging.pageSize} onPage={certificatePaging.setPage} />
+          </>
         )}
       </section>
     </div>

@@ -83,13 +83,12 @@ export const LoginPage: React.FC = () => {
           <div className="inline-flex items-center justify-center w-12 h-12 bg-blue-600 rounded-xl mb-4 shadow-lg shadow-blue-900/40">
             <Activity className="w-6 h-6 text-white" />
           </div>
-          <h1 className="text-xl font-bold text-white font-mono tracking-tight">SCHOLARIO OPS</h1>
-          <p className="text-slate-500 text-xs font-mono mt-1">IT Operations Control Center</p>
+          <h1 className="text-xl font-bold text-white tracking-tight">Scholario Ops</h1>
         </div>
 
         {/* Card */}
         <div className="bg-[#0F1520] border border-[#1E293B] rounded-xl p-6 shadow-2xl">
-          <h2 className="text-sm font-semibold text-slate-200 font-mono mb-5">Sign in to your account</h2>
+          <h2 className="text-sm font-semibold text-slate-200 mb-5">Sign in</h2>
 
           {error && (
             <div className="flex items-start gap-2.5 p-3 bg-rose-950/60 border border-rose-800/60 rounded-lg mb-4 text-xs text-rose-300 font-mono">

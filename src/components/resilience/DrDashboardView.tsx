@@ -81,7 +81,7 @@ export const DrDashboardView: React.FC = () => {
     return (
       <div className="space-y-6">
         <div className={`pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
-          <h1 className="text-lg font-bold font-mono tracking-tight">PRD / DR READINESS</h1>
+          <h1 className="text-lg font-bold tracking-tight">Readiness</h1>
         </div>
         {isLoading ? (
           <div className={`text-xs font-mono animate-pulse ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Loading PRD / DR readiness…</div>
@@ -180,11 +180,9 @@ export const DrDashboardView: React.FC = () => {
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
       }`}>
         <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">
-            PRD / DR READINESS
-          </h1>
-          <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            DR readiness from live checks. Failover follows the application's routing method. Worker and custom routes are not switched here.
+          <h1 className="text-lg font-bold tracking-tight">Readiness</h1>
+          <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            Whether each application can fail over.
           </p>
         </div>
 

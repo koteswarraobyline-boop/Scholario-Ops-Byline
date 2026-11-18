@@ -2,8 +2,6 @@ import React, { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { OpsProvider, useOps } from './context/OpsContext';
-import { DependencyDemoProvider } from './context/DependencyDemoContext';
-
 import { Shell } from './components/layout/Shell';
 import { LoginPage } from './components/auth/LoginPage';
 import { ViewErrorBoundary } from './components/ui/ViewErrorBoundary';
@@ -114,9 +112,7 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <OpsProvider>
-                  <DependencyDemoProvider>
-                    <DashboardRoutes />
-                  </DependencyDemoProvider>
+                  <DashboardRoutes />
                 </OpsProvider>
               </ProtectedRoute>
             }

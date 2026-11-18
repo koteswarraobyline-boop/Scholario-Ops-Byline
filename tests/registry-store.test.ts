@@ -27,9 +27,9 @@ const { query, withTransaction, closePool, SCHEMA, T, MigrationError } = await i
 const save = async () => { persist(); return flush(); };
 const now = new Date().toISOString();
 const comp = (name: string, kind: RegistryComponent['kind'] = 'DATABASE'): RegistryComponent => ({
-  id: crypto.randomUUID(), kind, name, owner: 'Test', tier: 'TIER_2', description: '', applicationId: null, serverId: null, userCount: null, served: [], createdAt: now, updatedAt: now,
+  id: crypto.randomUUID(), kind, name, owner: 'Test', tier: 'TIER_2', description: '', applicationId: null, serverId: null, userCount: null, served: [], endpoint: '', createdAt: now, updatedAt: now,
 });
-const lnk = (fromId: string, toId: string, featureId: string | null): DependencyLink => ({ id: crypto.randomUUID(), fromId, toId, type: 'SOFT', featureId, method: null, notes: '', createdAt: now, updatedAt: now });
+const lnk = (fromId: string, toId: string, featureId: string | null): DependencyLink => ({ id: crypto.randomUUID(), fromId, toId, type: 'SOFT', featureId, method: null, criticality: null, healthCheck: '', failureBehaviour: '', owner: '', recoveryExpectation: '', notes: '', createdAt: now, updatedAt: now });
 const names = async () => Object.fromEntries((await query(`select id, name from ${T('registry_components')}`)).rows.map(r => [r.id, r.name]));
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 

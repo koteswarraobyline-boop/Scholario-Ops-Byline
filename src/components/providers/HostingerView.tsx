@@ -7,6 +7,7 @@ import { api } from '../../services/api';
 import { ProviderConnectionView, ProviderInstanceView, VpsServer } from '../../types';
 import { PROVIDER_DISPLAY_LABEL, filterProviderInstances, providerRegionFilterValue } from '../../lib/providerInventory';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 import { ErrorState } from '../ui/ErrorState';
 import { SkeletonTable } from '../ui/Skeleton';
 
@@ -70,6 +71,7 @@ export const HostingerView: React.FC = () => {
     () => filterProviderInstances(instances, connections, filters),
     [instances, connections, filters],
   );
+  const vmPaging = useClientPagination(filtered, 10, `${filters.provider}|${filters.connectionId}|${filters.connectionStatus}|${filters.region}|${filters.status}|${filters.q}`);
   const filtersActive = Object.values(filters).some(Boolean);
   const regions = useMemo(() => [...new Set(instances.map(v => v.region).filter((r): r is string => Boolean(r)))].sort(), [instances]);
 
@@ -95,9 +97,9 @@ export const HostingerView: React.FC = () => {
   const header = (
     <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
       <div>
-        <h1 className="text-lg font-bold font-mono tracking-tight">PROVIDER VPS INVENTORY</h1>
-        <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-          Each Hostinger account stays separate. Tokens stay in server environment variables and are never shown here.
+        <h1 className="text-lg font-bold tracking-tight">Provider VPS</h1>
+        <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+          Each account is separate. Tokens are not shown.
         </p>
       </div>
     </div>
@@ -253,7 +255,7 @@ export const HostingerView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className={`divide-y ${isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
-                {filtered.map(vm => {
+                {vmPaging.slice.map(vm => {
                   const matches = [...vm.ipv4, ...vm.ipv6].map(ip => serverByIp.get(ip)).filter((s): s is VpsServer => Boolean(s));
                   const sc = stateColor(vm.status, vm.absent);
                   return (
@@ -302,6 +304,7 @@ export const HostingerView: React.FC = () => {
               </tbody>
             </table>
           </div>
+          <Pagination page={vmPaging.page} totalPages={vmPaging.totalPages} total={vmPaging.total} pageSize={vmPaging.pageSize} onPage={vmPaging.setPage} />
         </div>
       )}
 

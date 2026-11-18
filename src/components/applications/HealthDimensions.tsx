@@ -88,7 +88,13 @@ export const HealthDimensions: React.FC<{
       )}
       <div className={`text-[11px] font-sans space-y-1 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
         {cfg.method === 'direct_dns' && (
-          <p>PRD host {cfg.direct.prdHostname || 'not set'} · DR host {cfg.direct.drHostname || 'not set'} · record {cfg.direct.dnsRecordName || application.dnsRecordName || 'not set'} · manual failover {cfg.direct.manualFailoverStatus} · last verified {cfg.direct.lastVerifiedAt ? new Date(cfg.direct.lastVerifiedAt).toLocaleString() : 'not recorded'}</p>
+          <p>{[
+            `Production host ${cfg.direct.prdHostname || 'not set'}`,
+            `Recovery host ${cfg.direct.drHostname || 'not set'}`,
+            `Record ${cfg.direct.dnsRecordName || application.dnsRecordName || 'not set'}`,
+            `Manual failover ${cfg.direct.manualFailoverStatus}`,
+            cfg.direct.lastVerifiedAt ? `Last verified ${new Date(cfg.direct.lastVerifiedAt).toLocaleString()}` : '',
+          ].filter(Boolean).join(' · ')}</p>
         )}
         {cfg.method === 'cloudflare_lb' && (
           <p>Load Balancer {application.loadBalancer?.hostname || 'not set'} · last successful sync {loadBalancer?.lastSuccessAt ? new Date(loadBalancer.lastSuccessAt).toLocaleString() : 'none'} · pool sync {loadBalancer?.status ?? 'not loaded'}</p>

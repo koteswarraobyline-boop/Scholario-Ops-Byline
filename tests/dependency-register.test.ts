@@ -154,6 +154,9 @@ test('invalid register entries are refused with a clear message', async () => {
     [{ kind: 'PROVIDER', name: 'Served provider', owner: 'x', tier: 'TIER_1', served: ['Students'] }, 400, /Teams or customers served/],
     [{ kind: 'APPLICATION', name: 'Negative', owner: 'x', tier: 'TIER_1', userCount: -1 }, 400, /User count must be a whole number/],
     [{ kind: 'SERVER', name: 'ghost', owner: 'x', tier: 'TIER_1', serverId: '00000000-0000-4000-8000-000000000000' }, 400, /Server not found/],
+    [{ kind: 'APPLICATION', name: 'Ghost app', owner: 'x', tier: 'TIER_1', applicationId: '00000000-0000-4000-8000-000000000000' }, 400, /Application not found/],
+    [{ kind: 'APPLICATION', name: 'Server as app', owner: 'x', tier: 'TIER_1', applicationId: id.srvPrd }, 400, /That id is a server/],
+    [{ kind: 'DATABASE', name: 'db with app', owner: 'x', tier: 'TIER_1', applicationId: id.appRecord }, 400, /Only applications and business features/],
     [{ kind: 'DATABASE', name: 'linked db', owner: 'x', tier: 'TIER_1', serverId: id.srvPrd }, 400, /Only servers can be linked/],
     [{ kind: 'DATABASE', name: 'lms postgres', owner: 'x', tier: 'TIER_1' }, 409, /already registered/],
     [{ kind: 'APPLICATION', name: 'Second LP entry', owner: 'x', tier: 'TIER_1', applicationId: id.appRecord }, 409, /application is already in the register/],
@@ -172,30 +175,91 @@ test('invalid register entries are refused with a clear message', async () => {
 
 test('"A depends on B" links with type and the feature that needs it', async () => {
   await link('lpDb', { fromId: id.lp, toId: id.db, type: 'HARD' });
-  await link('lpSrv', { fromId: id.lp, toId: id.srv, type: 'HARD' });
+  const hosting = await api('POST', '/api/v1/dependency-links', { fromId: id.lp, toId: id.srv, type: 'HARD' });
+  assert.equal(hosting.status, 400, hosting.raw);
+  assert.match(hosting.body.message, /Hosting is recorded on the application/);
+  assert.match(hosting.body.message, /production server/);
+  const featureHosting = await api('POST', '/api/v1/dependency-links', { fromId: id.tutor, toId: id.srv, type: 'SOFT' });
+  assert.equal(featureHosting.status, 400, featureHosting.raw);
+  assert.match(featureHosting.body.message, /Hosting is recorded on the application/);
+  const drComp = await api('POST', '/api/v1/registry', { kind: 'SERVER', name: 'reg-dr', owner: 'Infrastructure', tier: 'TIER_2', serverId: id.srvDr });
+  assert.equal(drComp.status, 201, drComp.raw);
+  const drHosting = await api('POST', '/api/v1/dependency-links', { fromId: id.lp, toId: drComp.body.data.id, type: 'SOFT' });
+  assert.equal(drHosting.status, 400, drHosting.raw);
+  assert.match(drHosting.body.message, /recovery server/);
+  assert.equal((await api('DELETE', `/api/v1/registry/${drComp.body.data.id}`)).status, 200);
   await link('dbSrv', { fromId: id.db, toId: id.srv, type: 'HARD', notes: 'Database runs on the PRD VPS' });
   await link('lpCf', { fromId: id.lp, toId: id.cf, type: 'HARD' });
   await link('lpMedia', { fromId: id.lp, toId: id.media, type: 'SOFT' });
-  const l = await link('lpAi', { fromId: id.lp, toId: id.openai, type: 'SOFT', featureId: id.tutor });
+  const l = await link('lpAi', { fromId: id.lp, toId: id.openai, type: 'SOFT', featureId: id.tutor, method: ' API ', notes: 'Tutor calls the API' });
   assert.equal(l.featureId, id.tutor);
+  assert.equal(l.fromId, id.lp);
+  assert.equal(l.toId, id.openai);
+  assert.equal(l.type, 'SOFT');
+  assert.equal(l.method, 'API');
+  assert.equal(l.notes, 'Tutor calls the API');
+  assert.equal(l.createdAt, l.updatedAt);
+
+  const listed = await api('GET', '/api/v1/dependency-links');
+  assert.equal(listed.status, 200, listed.raw);
+  assert.equal(listed.body.success, true);
+  assert.ok(listed.body.data.some((row: { id: string }) => row.id === id.lpAi));
+
+  const one = await api('GET', `/api/v1/dependency-links/${id.lpAi}`);
+  assert.equal(one.status, 200, one.raw);
+  assert.equal(one.body.success, true);
+  assert.equal(one.body.data.id, id.lpAi);
+  assert.equal(one.body.data.fromId, id.lp);
+  assert.equal(one.body.data.toId, id.openai);
+  assert.equal(one.body.data.type, 'SOFT');
+  assert.equal(one.body.data.featureId, id.tutor);
+
+  const missing = await api('GET', '/api/v1/dependency-links/00000000-0000-4000-8000-000000000000');
+  assert.equal(missing.status, 404, missing.raw);
+  assert.equal(missing.body.success, false);
+  assert.match(missing.body.message, /Dependency link not found/);
+  const anon = await api('GET', '/api/v1/dependency-links', undefined, '');
+  assert.equal(anon.status, 401, anon.raw);
+  assert.equal(anon.body.success, false);
+  assert.equal(anon.body.code, 'UNAUTHORIZED');
+  assert.match(anon.body.message, /Authentication required/);
   await link('examsDb', { fromId: id.exams, toId: id.db, type: 'HARD' });
   await link('tutorAi', { fromId: id.tutor, toId: id.openai, type: 'HARD' });
 
   const cases: Array<[Record<string, unknown>, number, RegExp]> = [
     [{ fromId: id.lp, toId: id.lp, type: 'HARD' }, 400, /cannot depend on itself/],
     [{ fromId: id.lp, toId: '00000000-0000-4000-8000-000000000000', type: 'HARD' }, 400, /not in the register/],
+    [{ fromId: id.appRecord, toId: id.db, type: 'HARD' }, 400, /application's register entry/],
+    [{ fromId: id.lp, toId: id.srvPrd, type: 'HARD' }, 400, /server's register entry/],
     [{ fromId: id.lp, toId: id.db, type: 'MAYBE' }, 400, /Type must be one of/],
     [{ fromId: id.lp, toId: id.db, type: 'HARD', featureId: id.db }, 400, /must be a business feature/],
+    [{ fromId: id.lp, toId: id.media, type: 'SOFT', featureId: id.appRecord }, 400, /That id is an application/],
+    [{ fromId: id.lp, toId: id.media, type: 'SOFT', featureId: id.srvPrd }, 400, /That id is a server/],
+    [{ fromId: id.lp, toId: id.media, type: 'SOFT', featureId: id.exams }, 400, /belong to the consumer application/],
+    [{ fromId: id.db, toId: id.media, type: 'SOFT', featureId: id.tutor }, 400, /belong to the consumer application/],
+    [{ fromId: id.lp, toId: id.media, type: 'SOFT', notes: 'x'.repeat(501) }, 400, /Notes must be at most 500/],
+    [{ fromId: id.lp, toId: id.media, type: 'SOFT', notes: 'password=hunter2' }, 400, /password or token/],
+    [{ fromId: id.lp, toId: id.media, type: 'SOFT', applicationId: id.appRecord }, 400, /does not take an application id/],
     [{ fromId: id.tutor, toId: id.db, type: 'SOFT', featureId: id.tutor }, 400, /cannot be A itself/],
     [{ fromId: id.lp, toId: id.tutor, type: 'SOFT', featureId: id.tutor }, 400, /cannot be B itself/],
     [{ fromId: id.lp, toId: id.db, type: 'SOFT' }, 409, /already depends on/],
+    [{ fromId: id.lp, toId: id.db, type: 'HARD', method: 'DATABASE' }, 409, /already depends on/],
+    [{ fromId: id.exams, toId: id.media, type: 'SOFT', method: 'FTP' }, 400, /Method must be one of/],
     [{ toId: id.db, type: 'HARD' }, 400, /Choose what depends/],
+    [{ fromId: id.db, type: 'HARD' }, 400, /Choose what it depends on/],
   ];
   for (const [body, status, msg] of cases) {
     const r = await api('POST', '/api/v1/dependency-links', body);
     assert.equal(r.status, status, `${JSON.stringify(body)} → ${r.raw}`);
+    assert.equal(r.body.success, false);
+    assert.equal(r.body.code, status === 409 ? 'CONFLICT' : 'VALIDATION');
     assert.match(r.body.message, msg);
+    assert.equal(r.body.data, undefined);
   }
+  const badShape = await api('POST', '/api/v1/dependency-links', ['not-an-object']);
+  assert.equal(badShape.status, 400, badShape.raw);
+  assert.equal(badShape.body.code, 'VALIDATION');
+  assert.match(badShape.body.message, /JSON object/);
 
   // Editable: a soft link becomes hard, notes change
   const e = await api('PATCH', `/api/v1/dependency-links/${id.lpMedia}`, { type: 'HARD', notes: 'Lessons fail without media' });
@@ -204,6 +268,103 @@ test('"A depends on B" links with type and the feature that needs it', async () 
   const back = await api('PATCH', `/api/v1/dependency-links/${id.lpMedia}`, { type: 'SOFT' });
   assert.equal(back.body.data.type, 'SOFT');
   assert.equal(back.body.data.notes, 'Lessons fail without media', 'fields not sent are kept');
+  assert.equal(e.body.success, true);
+
+  const missingWrite = await api('PATCH', '/api/v1/dependency-links/00000000-0000-4000-8000-000000000000', { type: 'HARD' });
+  assert.equal(missingWrite.status, 404, missingWrite.raw);
+  assert.equal(missingWrite.body.success, false);
+  assert.equal(missingWrite.body.code, 'NOT_FOUND');
+  assert.match(missingWrite.body.message, /Dependency link not found/);
+  const missingDelete = await api('DELETE', '/api/v1/dependency-links/00000000-0000-4000-8000-000000000000');
+  assert.equal(missingDelete.status, 404, missingDelete.raw);
+  assert.equal(missingDelete.body.success, false);
+
+  const beforeMethod = (await api('GET', `/api/v1/dependency-links/${id.lpMedia}`)).body.data;
+  await new Promise(r => setTimeout(r, 5));
+  const withMethod = await api('PATCH', `/api/v1/dependency-links/${id.lpMedia}`, { method: ' EMBED ' });
+  assert.equal(withMethod.status, 200, withMethod.raw);
+  assert.equal(withMethod.body.data.method, 'EMBED');
+  assert.equal(withMethod.body.data.createdAt, beforeMethod.createdAt);
+  assert.notEqual(withMethod.body.data.updatedAt, beforeMethod.updatedAt);
+  const cleared = await api('PATCH', `/api/v1/dependency-links/${id.lpMedia}`, { method: '   ' });
+  assert.equal(cleared.status, 200, cleared.raw);
+  assert.equal(cleared.body.data.method, null);
+  assert.equal(cleared.body.data.createdAt, beforeMethod.createdAt);
+  const moved = await api('PATCH', `/api/v1/dependency-links/${id.lpCf}`, { toId: id.db });
+  assert.equal(moved.status, 409, moved.raw);
+  assert.match(moved.body.message, /already depends on/);
+  assert.equal((await api('GET', `/api/v1/dependency-links/${id.lpCf}`)).body.data.toId, id.cf);
+  const movedHost = await api('PATCH', `/api/v1/dependency-links/${id.lpCf}`, { toId: id.srv });
+  assert.equal(movedHost.status, 400, movedHost.raw);
+  assert.match(movedHost.body.message, /Hosting is recorded on the application/);
+  assert.equal((await api('GET', `/api/v1/dependency-links/${id.lpCf}`)).body.data.toId, id.cf);
+
+  const other = await api('POST', '/api/v1/applications', { name: 'Other Portal', codeName: 'other-portal', tier: 'TIER_2' });
+  assert.equal(other.status, 201, other.raw);
+  const otherFeature = await api('POST', '/api/v1/registry', { kind: 'BUSINESS_FEATURE', name: 'Other uploads', owner: 'x', tier: 'TIER_2', applicationId: other.body.data.id });
+  assert.equal(otherFeature.status, 201, otherFeature.raw);
+  const wrongFeature = await api('POST', '/api/v1/dependency-links', { fromId: id.lp, toId: id.media, type: 'SOFT', featureId: otherFeature.body.data.id });
+  assert.equal(wrongFeature.status, 400, wrongFeature.raw);
+  assert.equal(wrongFeature.body.success, false);
+  assert.match(wrongFeature.body.message, /belong to the consumer application/);
+  assert.equal((await api('DELETE', `/api/v1/registry/${otherFeature.body.data.id}`)).status, 200);
+  assert.equal((await api('DELETE', `/api/v1/applications/${other.body.data.id}`)).status, 200);
+});
+
+test('an application record exposes the register dependencies that reference it', async () => {
+  const got = await api('GET', `/api/v1/applications/${id.appRecord}`);
+  assert.equal(got.status, 200, got.raw);
+  assert.equal(got.body.success, true);
+  const view = got.body.data.serviceDependencies;
+  assert.equal(view.applicationId, id.appRecord);
+  assert.equal(view.componentId, id.lp);
+  const outgoing = view.outgoing as Array<{ id: string; type: string; method: string | null; otherId: string; otherKind: string; otherApplicationId: string | null; featureId: string | null; featureName: string | null }>;
+  const dbLink = outgoing.find(l => l.id === id.lpDb);
+  assert.ok(dbLink, 'outgoing hard link to the database');
+  assert.equal(dbLink.type, 'HARD');
+  assert.equal(dbLink.otherId, id.db);
+  assert.equal(dbLink.otherKind, 'DATABASE');
+  assert.equal(dbLink.otherApplicationId, null);
+  const ai = outgoing.find(l => l.id === id.lpAi);
+  assert.equal(ai?.method, 'API');
+  assert.equal(ai?.featureId, id.tutor);
+  assert.equal(ai?.featureName, 'AI Tutor');
+  assert.equal(view.incoming.length, 0);
+  const applicationLevel = view.applicationLevel as Array<{ id: string }>;
+  assert.deepEqual(applicationLevel.map(l => l.id), [id.lpDb, id.lpCf, id.lpMedia, id.tutorAi]);
+  assert.equal(got.body.data.dependencies.some((d: { id: string }) => d.id === id.lpDb), false, 'register links stay out of the monitor dependency list');
+  const listed = (await api('GET', '/api/v1/applications')).body.data as Array<{ id: string; serviceDependencies?: unknown }>;
+  assert.equal(listed.find(a => a.id === id.appRecord)?.serviceDependencies, undefined, 'the list stays the stored application rows');
+  const missing = await api('GET', '/api/v1/applications/00000000-0000-4000-8000-000000000000');
+  assert.equal(missing.status, 404, missing.raw);
+
+  const labelled = await api('PATCH', `/api/v1/registry/${id.lp}`, { name: 'Register label' });
+  assert.equal(labelled.status, 200, labelled.raw);
+  const described = await api('PATCH', `/api/v1/applications/${id.appRecord}`, { description: 'Catalog text only' });
+  assert.equal(described.status, 200, described.raw);
+  let lp = (await api('GET', '/api/v1/registry')).body.data.components.find((c: { id: string }) => c.id === id.lp);
+  assert.equal(lp.name, 'Register label', 'a description edit does not rewrite the register name');
+  assert.equal(lp.owner, 'Academic IT');
+
+  const occupied = await api('POST', '/api/v1/registry', { kind: 'APPLICATION', name: 'Occupied Name', owner: 'x', tier: 'TIER_3' });
+  assert.equal(occupied.status, 201, occupied.raw);
+  const clash = await api('PATCH', `/api/v1/applications/${id.appRecord}`, { name: 'occupied name' });
+  assert.equal(clash.status, 409, clash.raw);
+  assert.match(clash.body.message, /already in the register/);
+  assert.equal((await api('GET', `/api/v1/applications/${id.appRecord}`)).body.data.name, 'Learning Platform');
+  assert.equal((await api('DELETE', `/api/v1/registry/${occupied.body.data.id}`)).status, 200);
+
+  const renamed = await api('PATCH', `/api/v1/applications/${id.appRecord}`, { name: 'Learning Platform West', tier: 'TIER_2' });
+  assert.equal(renamed.status, 200, renamed.raw);
+  lp = (await api('GET', '/api/v1/registry')).body.data.components.find((c: { id: string }) => c.id === id.lp);
+  assert.equal(lp.name, 'Learning Platform West');
+  assert.equal(lp.tier, 'TIER_2');
+  assert.equal(lp.owner, 'Academic IT', 'owner stays on the register');
+  const restored = await api('PATCH', `/api/v1/applications/${id.appRecord}`, { name: 'Learning Platform', tier: 'TIER_1', description: '' });
+  assert.equal(restored.status, 200, restored.raw);
+  lp = (await api('GET', '/api/v1/registry')).body.data.components.find((c: { id: string }) => c.id === id.lp);
+  assert.equal(lp.name, 'Learning Platform');
+  assert.equal(lp.tier, 'TIER_1');
 });
 
 test('who is affected: dependents, hard vs degraded, user counts and teams served', async () => {
@@ -215,11 +376,11 @@ test('who is affected: dependents, hard vs degraded, user counts and teams serve
   assert.equal(s.largestUserCountAffected, 1200);
   assert.deepEqual(s.served, ['Students', 'Teachers', 'Exam office']);
 
-  // OpenAI: the AI Tutor feature stops (hard), the platform is only degraded (soft)
+  // OpenAI is a soft link named on AI Tutor: that feature stops, the platform does not
   const ai = (await api('GET', `/api/v1/registry/${id.openai}/impact`)).body.data;
-  assert.deepEqual(by(ai), { [id.lp]: 'SOFT', [id.tutor]: 'HARD' });
+  assert.deepEqual(by(ai), { [id.tutor]: 'HARD' });
   assert.equal(ai.largestUserCountStopped, 300);
-  assert.equal(ai.largestUserCountAffected, 1200);
+  assert.equal(ai.largestUserCountAffected, 300);
 
   // Storage degrades the platform, and with it the feature it provides
   const media = (await api('GET', `/api/v1/registry/${id.media}/impact`)).body.data;
@@ -234,7 +395,7 @@ test('who is affected: dependents, hard vs degraded, user counts and teams serve
 });
 
 test('stored in PostgreSQL columns, in bootstrap and in the audit log', async () => {
-  await waitFor(async () => (await rows(`select count(*)::int n from ${SCHEMA}.dependency_links`))[0].n === 8, 'links flushed');
+  await waitFor(async () => (await rows(`select count(*)::int n from ${SCHEMA}.dependency_links`))[0].n === 7, 'links flushed');
   const lp = (await rows(`select * from ${SCHEMA}.registry_components where id = $1`, [id.lp]))[0];
   assert.equal(lp.kind, 'APPLICATION');
   assert.equal(lp.owner, 'Academic IT');
@@ -251,21 +412,86 @@ test('stored in PostgreSQL columns, in bootstrap and in the audit log', async ()
 
   const boot = (await api('GET', '/api/v1/bootstrap')).body.data;
   assert.equal(boot.registry.length, 9);
-  assert.equal(boot.dependencyLinks.length, 8);
+  assert.equal(boot.dependencyLinks.length, 7);
   const audit = (await api('GET', '/api/v1/audit?category=REGISTRY&pageSize=100')).body.data as Array<{ action: string; details: string }>;
   assert.ok(audit.some(a => a.action === 'REGISTRY_COMPONENT_CREATED' && a.details.includes('Learning Platform') && a.details.includes('Academic IT')));
   assert.ok(audit.some(a => a.action === 'DEPENDENCY_LINK_CREATED' && a.details === 'Learning Platform → OpenAI API (SOFT) for AI Tutor'));
   assert.ok(audit.some(a => a.action === 'DEPENDENCY_LINK_UPDATED'));
 });
 
-test('only IT administrators edit the register; viewers can read it', async () => {
+test('dependency writes follow the platform roles: viewer and operator read, IT administrator writes', async () => {
   const u = await api('POST', '/api/v1/users', { email: 'reg-viewer@example.com', password: 'RegViewerPassw0rd!', fullName: 'Reg Viewer', roleName: 'viewer' });
   assert.equal(u.status, 201, u.raw);
   const viewer = await loginAs({ email: 'reg-viewer@example.com', password: 'RegViewerPassw0rd!' });
   assert.equal((await api('GET', '/api/v1/registry', undefined, viewer)).status, 200);
+  assert.equal((await api('GET', '/api/v1/dependency-links', undefined, viewer)).status, 200);
+  assert.equal((await api('GET', `/api/v1/dependency-links/${id.lpDb}`, undefined, viewer)).status, 200);
+  assert.equal((await api('GET', `/api/v1/applications/${id.appRecord}`, undefined, viewer)).status, 200);
+  const anonApp = await api('GET', `/api/v1/applications/${id.appRecord}`, undefined, '');
+  assert.equal(anonApp.status, 401, anonApp.raw);
+  assert.equal(anonApp.body.code, 'UNAUTHORIZED');
+  assert.equal(anonApp.body.data, undefined);
+  const registerAsApp = await api('GET', `/api/v1/applications/${id.lp}`, undefined, viewer);
+  assert.equal(registerAsApp.status, 404, registerAsApp.raw);
+  assert.equal(registerAsApp.body.code, 'NOT_FOUND');
+  assert.equal(registerAsApp.body.data, undefined);
+  const codeAsApp = await api('GET', '/api/v1/applications/lms', undefined, viewer);
+  assert.equal(codeAsApp.status, 404, codeAsApp.raw);
+  assert.equal(codeAsApp.body.code, 'NOT_FOUND');
+  const serverAsApp = await api('GET', `/api/v1/applications/${id.srvPrd}`, undefined, viewer);
+  assert.equal(serverAsApp.status, 404, serverAsApp.raw);
+  const linkAsApp = await api('GET', `/api/v1/dependency-links/${id.appRecord}`, undefined, viewer);
+  assert.equal(linkAsApp.status, 404, linkAsApp.raw);
+  assert.equal(linkAsApp.body.code, 'NOT_FOUND');
+  const previewCode = await api('GET', '/api/v1/impact/preview?applicationId=lms', undefined, viewer);
+  assert.equal(previewCode.status, 404, previewCode.raw);
+  assert.equal(previewCode.body.code, 'NOT_FOUND');
+  const viewerAppWrite = await api('PATCH', `/api/v1/applications/${id.appRecord}`, { description: 'no' }, viewer);
+  assert.equal(viewerAppWrite.status, 403, viewerAppWrite.raw);
+  assert.equal(viewerAppWrite.body.code, 'FORBIDDEN');
   assert.equal((await api('POST', '/api/v1/registry', { kind: 'DATABASE', name: 'v', owner: 'v', tier: 'TIER_1' }, viewer)).status, 403);
   assert.equal((await api('PATCH', `/api/v1/registry/${id.db}`, { owner: 'v' }, viewer)).status, 403);
+  assert.equal((await api('POST', '/api/v1/dependency-links', { fromId: id.lp, toId: id.db, type: 'SOFT' }, viewer)).status, 403);
+  assert.equal((await api('PATCH', `/api/v1/dependency-links/${id.lpDb}`, { type: 'SOFT' }, viewer)).status, 403);
   assert.equal((await api('DELETE', `/api/v1/dependency-links/${id.lpDb}`, undefined, viewer)).status, 403);
+
+  const op = await api('POST', '/api/v1/users', { email: 'reg-operator@example.com', password: 'RegOperatorPassw0rd!', fullName: 'Reg Operator', roleName: 'operator' });
+  assert.equal(op.status, 201, op.raw);
+  const operator = await loginAs({ email: 'reg-operator@example.com', password: 'RegOperatorPassw0rd!' });
+  assert.equal((await api('GET', '/api/v1/dependency-links', undefined, operator)).status, 200);
+  const opWrite = await api('POST', '/api/v1/dependency-links', { fromId: id.lp, toId: id.media, type: 'HARD', featureId: id.tutor }, operator);
+  assert.equal(opWrite.status, 403, opWrite.raw);
+  assert.match(opWrite.body.message, /it_administrator/);
+  assert.equal((await api('PATCH', `/api/v1/dependency-links/${id.lpDb}`, { type: 'SOFT' }, operator)).status, 403);
+  assert.equal((await api('DELETE', `/api/v1/dependency-links/${id.lpDb}`, undefined, operator)).status, 403);
+  assert.equal((await api('POST', '/api/v1/registry', { kind: 'DATABASE', name: 'op', owner: 'op', tier: 'TIER_1' }, operator)).status, 403);
+  const opDeleteApp = await api('DELETE', `/api/v1/applications/${id.appRecord}`, undefined, operator);
+  assert.equal(opDeleteApp.status, 403, opDeleteApp.raw);
+  assert.equal(opDeleteApp.body.code, 'FORBIDDEN');
+  assert.equal((await api('GET', `/api/v1/applications/${id.appRecord}`, undefined, operator)).status, 200);
+
+  const admin = await api('POST', '/api/v1/users', { email: 'reg-it@example.com', password: 'RegItAdminPassw0rd!', fullName: 'Reg IT', roleName: 'it_administrator' });
+  assert.equal(admin.status, 201, admin.raw);
+  const it = await loginAs({ email: 'reg-it@example.com', password: 'RegItAdminPassw0rd!' });
+  const badMethod = await api('POST', '/api/v1/dependency-links', { fromId: id.lp, toId: id.cf, type: 'SOFT', method: 'ftp' }, it);
+  assert.equal(badMethod.status, 400, badMethod.raw);
+  assert.match(badMethod.body.message, /Method must be one of/);
+  const duplicate = await api('POST', '/api/v1/dependency-links', { fromId: id.lp, toId: id.db, type: 'SOFT', method: 'DATABASE' }, it);
+  assert.equal(duplicate.status, 409, duplicate.raw);
+  assert.match(duplicate.body.message, /already depends on/);
+  const created = await api('POST', '/api/v1/dependency-links', { fromId: id.lp, toId: id.db, type: 'SOFT', featureId: id.tutor, method: 'DATABASE', notes: 'exams path stays separate' }, it);
+  assert.equal(created.status, 201, created.raw);
+  const read = await api('GET', `/api/v1/dependency-links/${created.body.data.id}`, undefined, it);
+  assert.equal(read.status, 200, read.raw);
+  assert.equal(read.body.data.featureId, id.tutor);
+  const edited = await api('PATCH', `/api/v1/dependency-links/${created.body.data.id}`, { notes: 'kept for the role check' }, it);
+  assert.equal(edited.status, 200, edited.raw);
+  assert.equal(edited.body.data.notes, 'kept for the role check');
+  assert.equal(edited.body.data.method, 'DATABASE');
+  const removed = await api('DELETE', `/api/v1/dependency-links/${created.body.data.id}`, undefined, it);
+  assert.equal(removed.status, 200, removed.raw);
+  assert.equal(removed.body.data.deleted, true);
+  assert.equal((await api('GET', '/api/v1/dependency-links')).body.data.length, 7);
 });
 
 test('edits and the register survive a server restart (loaded from PostgreSQL)', async () => {
@@ -278,7 +504,7 @@ test('edits and the register survive a server restart (loaded from PostgreSQL)',
   token = await loginAs(ADMIN);
   const r = (await api('GET', '/api/v1/registry')).body.data;
   assert.equal(r.components.length, 9);
-  assert.equal(r.links.length, 8);
+  assert.equal(r.links.length, 7);
   const lp = r.components.find((c: { id: string }) => c.id === id.lp);
   assert.equal(lp.owner, 'Digital Learning');
   assert.deepEqual(lp.served, ['Students', 'Teachers', 'Parents']);
@@ -286,7 +512,11 @@ test('edits and the register survive a server restart (loaded from PostgreSQL)',
 });
 
 test('deleting: entries take their links along; features and registered apps/servers are unlinked, not deleted', async () => {
-  // A second Learning Platform → media link for the exam feature; when the feature goes it would duplicate the plain one
+  // A second Learning Platform → media link for the exam feature; when the feature goes it would duplicate the plain one.
+  // The feature has to belong to the consumer application before that link is accepted.
+  const bound = await api('PATCH', `/api/v1/registry/${id.exams}`, { applicationId: id.appRecord });
+  assert.equal(bound.status, 200, bound.raw);
+  assert.equal(bound.body.data.applicationId, id.appRecord);
   await link('lpMediaExams', { fromId: id.lp, toId: id.media, type: 'SOFT', featureId: id.exams });
   const del = await api('DELETE', `/api/v1/registry/${id.exams}`);
   assert.equal(del.status, 200, del.raw);
@@ -302,6 +532,14 @@ test('deleting: entries take their links along; features and registered apps/ser
 
   const dl = await api('DELETE', `/api/v1/dependency-links/${id.lpCf}`);
   assert.equal(dl.status, 200, dl.raw);
+  assert.equal(dl.body.success, true);
+  assert.equal(dl.body.data.deleted, true);
+  const gone = await api('GET', `/api/v1/dependency-links/${id.lpCf}`);
+  assert.equal(gone.status, 404, gone.raw);
+  assert.equal(gone.body.success, false);
+  const remaining = await api('GET', '/api/v1/dependency-links');
+  assert.equal(remaining.body.success, true);
+  assert.ok(!remaining.body.data.some((row: { id: string }) => row.id === id.lpCf));
 
   // Deleting the registered application / server keeps the register entries, without the reference
   assert.equal((await api('DELETE', `/api/v1/applications/${id.appRecord}`)).status, 200);
@@ -330,23 +568,23 @@ test('propagation: a named feature stops when its dependency path is hard and de
   await link('pStoreDns', { fromId: id.pStore, toId: id.pDns, type: 'HARD' });
   await link('pCdnApp', { fromId: id.pCdn, toId: id.pApp, type: 'HARD', notes: 'cycle' });
 
-  // Bucket down: uploads stop, the portal degrades
+  // Bucket down: uploads stop. The portal is not degraded, so the CDN behind the portal is not reached.
   let i = await impactOf(id.pStore);
-  assert.deepEqual(by(i), { [id.pApp]: 'SOFT', [id.pFeat]: 'HARD', [id.pCdn]: 'SOFT' });
+  assert.deepEqual(by(i), { [id.pFeat]: 'HARD' });
   assert.equal(i.largestUserCountStopped, 50);
-  assert.equal(i.largestUserCountAffected, 500);
-  // DNS down: hard path to the bucket, so the bucket and uploads stop; the cycle back through the CDN ends
+  assert.equal(i.largestUserCountAffected, 50);
+  // DNS down: hard path to the bucket, so the bucket and uploads stop. The portal stays up.
   i = await impactOf(id.pDns);
-  assert.deepEqual(by(i), { [id.pStore]: 'HARD', [id.pApp]: 'SOFT', [id.pFeat]: 'HARD', [id.pCdn]: 'SOFT' });
+  assert.deepEqual(by(i), { [id.pStore]: 'HARD', [id.pFeat]: 'HARD' });
   assert.ok(!(id.pDns in by(i)), 'the failed component is not listed as affected by itself');
   // CDN down: only a soft path reaches the bucket, so uploads degrade rather than stop
   i = await impactOf(id.pCdn);
-  assert.deepEqual(by(i), { [id.pStore]: 'SOFT', [id.pApp]: 'SOFT', [id.pFeat]: 'SOFT' });
+  assert.deepEqual(by(i), { [id.pStore]: 'SOFT', [id.pFeat]: 'SOFT' });
   assert.equal(i.largestUserCountStopped, null);
   // …until that link is hard
   assert.equal((await api('PATCH', `/api/v1/dependency-links/${id.pStoreCdn}`, { type: 'HARD' })).status, 200);
   i = await impactOf(id.pCdn);
-  assert.deepEqual(by(i), { [id.pStore]: 'HARD', [id.pApp]: 'SOFT', [id.pFeat]: 'HARD' });
+  assert.deepEqual(by(i), { [id.pStore]: 'HARD', [id.pFeat]: 'HARD' });
 });
 
 test('names: the same name in another case or Unicode form is a duplicate; different letters are not; the database stores the same key', async () => {

@@ -1,15 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
-import { api } from '../../services/api';
-import { Application, ImpactPreview, Monitor, VpsServer } from '../../types';
-import { ArrowDown, RefreshCw } from 'lucide-react';
+import { Application, Monitor, VpsServer } from '../../types';
+import { ArrowDown } from 'lucide-react';
 import { DependencyRegisterSection } from '../setup/DependencyRegister';
 import { DependencyGraph, directNeighborhood } from './DependencyGraph';
-import { DemoBanner, DemoScenarios, DemoToggle } from './DemoModeControls';
+import { DependencyMatrix } from './DependencyMatrix';
 import { dnsPointsAt, routeState, servingLabel } from '../ui/routing';
-import { useDependencyDemo } from '../../context/DependencyDemoContext';
-import { demoComponents, demoDependencyLinks, simulateDemoFailure } from '../../mocks/dependencyDemoData';
+import { dependencyMethodLabel } from '../../lib/serviceDependencies';
 
 type NodeRef = { kind: 'app' | 'server' | 'monitor'; id: string } | null;
 
@@ -30,19 +28,18 @@ const statusDot = (s: string) =>
           : 'bg-slate-500';
 
 export const DependencyMapView: React.FC = () => {
-  const { theme, applications, servers, monitors, cloudflareZones, loadBalancer, registry, dependencyLinks, incidents, isLoading, refreshAll, systemSummary } = useOps();
+  const { theme, applications, servers, monitors, cloudflareZones, loadBalancer, registry, dependencyLinks, incidents, isLoading, systemSummary } = useOps();
   const navigate = useNavigate();
-  const demo = useDependencyDemo();
   const isDark = theme === 'dark';
   const muted = isDark ? 'text-slate-400' : 'text-slate-500';
   const [selected, setSelected] = useState<NodeRef>(null);
   const [graphId, setGraphId] = useState<string | null>(null);
   const [focusId, setFocusId] = useState('');
-  const [refreshing, setRefreshing] = useState(false);
-  const [simId, setSimId] = useState('');
-  const [simPreview, setSimPreview] = useState<ImpactPreview | null>(null);
-  const [simError, setSimError] = useState('');
-  const [simLoading, setSimLoading] = useState(false);
+
+  useEffect(() => {
+    if (window.location.hash !== '#dependency-matrix') return;
+    document.getElementById('dependency-matrix')?.scrollIntoView({ block: 'start' });
+  }, []);
 
   /** The server a monitor checks: its explicit serverId, otherwise the app's server for that environment. */
   const serverOfMonitor = (m: Monitor): VpsServer | undefined => {
@@ -57,37 +54,8 @@ export const DependencyMapView: React.FC = () => {
 
   const orphanServers = servers.filter(s => !applications.some(a => a.prdServerId === s.id || a.drServerId === s.id));
 
-  useEffect(() => {
-    if (demo.enabled || !simId) {
-      setSimPreview(null);
-      setSimError('');
-      setSimLoading(false);
-      return;
-    }
-    let cancel = false;
-    setSimLoading(true);
-    setSimError('');
-    api.getImpactPreview({ registryId: simId }).then(preview => {
-      if (!cancel) {
-        setSimPreview(preview);
-        setSimError('');
-      }
-    }).catch(err => {
-      if (!cancel) {
-        setSimPreview(null);
-        setSimError(err instanceof Error ? err.message : 'Simulation preview failed');
-      }
-    }).finally(() => {
-      if (!cancel) setSimLoading(false);
-    });
-    return () => { cancel = true; };
-  }, [simId, demo.enabled]);
-
-  const demoPicture = demo.enabled ? demoComponents() : null;
-  const demoLinks = demo.enabled ? demoDependencyLinks() : null;
-  const demoSim = demo.enabled && demo.scenario ? simulateDemoFailure(demo.scenario.rootName) : null;
-  const graphRegistry = demoPicture ?? registry;
-  const graphLinks = demoLinks ?? dependencyLinks;
+  const graphRegistry = registry;
+  const graphLinks = dependencyLinks;
   const applicationChoices = graphRegistry
     .filter(component => component.kind === 'APPLICATION')
     .slice()
@@ -100,9 +68,7 @@ export const DependencyMapView: React.FC = () => {
   const activeFocusId = applicationChoices.some(component => component.id === focusId) ? focusId : preferredId;
   const focused = applicationChoices.find(component => component.id === activeFocusId) ?? null;
   const neighborhood = focused ? directNeighborhood(graphRegistry, graphLinks, focused.id) : null;
-  const openIncidents = demo.enabled
-    ? (demo.scenario ? 1 : 0)
-    : incidents.filter(incident => incident.status !== 'RESOLVED' && incident.status !== 'CLOSED').length;
+  const openIncidents = incidents.filter(incident => incident.status !== 'RESOLVED' && incident.status !== 'CLOSED').length;
   const refreshedLabel = systemSummary.generatedAt && !Number.isNaN(Date.parse(systemSummary.generatedAt))
     ? new Date(systemSummary.generatedAt).toLocaleString()
     : 'not loaded yet';
@@ -213,16 +179,20 @@ export const DependencyMapView: React.FC = () => {
                 const outgoing = comp ? dependencyLinks.filter(l => l.fromId === comp.id) : [];
                 const incoming = comp ? dependencyLinks.filter(l => l.toId === comp.id) : [];
                 const regName = (id: string) => registry.find(c => c.id === id)?.name ?? 'Unknown';
-                const line = (l: typeof dependencyLinks[number], consumer: string, provider: string) => (
+                const line = (l: typeof dependencyLinks[number], consumer: string, provider: string) => {
+                  const feature = l.featureId ? registry.find(c => c.id === l.featureId) : undefined;
+                  return (
                   <div key={l.id} className={`p-2 rounded border ${isDark ? 'border-[#1A2436]' : 'border-slate-200'}`}>
                     <span className="font-semibold">{consumer}</span>
                     <span className={muted}> → </span>
                     <span className="font-semibold">{provider}</span>
                     <span className={`ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold ${l.type === 'HARD' ? 'bg-rose-500/15 text-rose-500' : 'bg-amber-500/15 text-amber-500'}`}>{l.type}</span>
-                    <span className={muted}> · {l.method ?? 'method not recorded'}</span>
-                    {l.notes ? <div className={muted}>{l.notes}</div> : null}
+                    <span className={muted}> · {dependencyMethodLabel(l.method)}</span>
+                    {feature?.kind === 'BUSINESS_FEATURE' ? <span className={muted}> · feature {feature.name}</span> : null}
+                    <div className={muted}>{l.notes || 'rationale not recorded'}</div>
                   </div>
-                );
+                  );
+                };
                 if (!comp || (outgoing.length === 0 && incoming.length === 0)) {
                   return <div className={`italic ${muted}`}>Nothing recorded. This does not mean the application has no dependencies.</div>;
                 }
@@ -333,44 +303,16 @@ export const DependencyMapView: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b ${
-        isDark ? 'border-[#1E293B]' : 'border-slate-200'
-      }`}>
-        <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">
-            Dependency Impact Center
-          </h1>
-          <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Service dependencies from the register. Failure propagation is provider → consumer. A stored link still means the consumer depends on the provider. Hosting is a separate map below.
-          </p>
-          <p className={`text-[11px] font-mono mt-1 ${muted}`}>Last refreshed {refreshedLabel}</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <DemoToggle isDark={isDark} />
-          <button
-            type="button"
-            disabled={refreshing}
-            onClick={() => {
-              setRefreshing(true);
-              void refreshAll().finally(() => setRefreshing(false));
-            }}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono rounded border cursor-pointer disabled:opacity-50 ${isDark ? 'border-[#1E293B] text-slate-200' : 'border-slate-300 text-slate-700'}`}
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
-            Refresh
-          </button>
-        </div>
+      <div className={`pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+        <h1 className="text-lg font-bold tracking-tight">Dependencies</h1>
+        <p className={`text-xs mt-0.5 ${muted}`}>What each application uses, and which server it runs on.</p>
+        <p className={`text-[11px] mt-1 ${muted}`}>Updated {refreshedLabel}</p>
       </div>
-
-      {demo.enabled && <DemoBanner />}
 
       <div className={`rounded-lg border p-4 space-y-3 ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200'}`}>
         <div>
-          <h2 className="text-xl font-semibold font-sans tracking-tight">Dependency graph</h2>
-          <p className={`text-sm font-sans mt-1 ${muted}`}>
-            Every application, service and its dependencies. Impact flows left to right. Select a box to see its register entry.
-            {demo.enabled ? ' Illustrative picture. Not verified dependencies.' : ''}
-          </p>
+          <h2 className="text-base font-semibold">Graph</h2>
+          <p className={`text-sm mt-1 ${muted}`}>Pick an application. Arrows run from what it depends on, toward the application.</p>
         </div>
         <label className={`block text-sm font-sans max-w-md ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
           Application
@@ -389,13 +331,13 @@ export const DependencyMapView: React.FC = () => {
             ))}
           </select>
         </label>
-        {isLoading && !demo.enabled && registry.length === 0 ? (
-          <p className={`text-xs font-mono animate-pulse ${muted}`}>Loading the register…</p>
+        {isLoading && registry.length === 0 ? (
+          <p className={`text-xs animate-pulse ${muted}`}>Loading…</p>
         ) : !focused || !neighborhood ? (
-          <p className={`text-xs font-mono ${muted}`}>
+          <p className={`text-xs ${muted}`}>
             {applicationChoices.length === 0
-              ? 'No application is in this picture yet.'
-              : 'Select an application above. The other applications stay off this graph.'}
+              ? 'No applications yet.'
+              : 'Select an application above.'}
           </p>
         ) : (
           <DependencyGraph
@@ -406,73 +348,19 @@ export const DependencyMapView: React.FC = () => {
             isDark={isDark}
             selectedId={graphId}
             onSelect={setGraphId}
-            simulatedRootId={demo.enabled ? null : (simId || null)}
-            simulatedAffectedIds={demo.enabled ? undefined : new Set((simPreview?.impact?.affected ?? []).map(row => row.id))}
-            visualStatus={demoSim?.visual}
-            remotePaths={!demo.enabled}
             anchorId={focused.id}
             incidentCount={openIncidents}
           />
         )}
-        {demoSim && (
-          <p className={`text-[11px] font-mono ${muted}`}>
-            Hypothetical only. {demoSim.affectedApplications} demo application{demoSim.affectedApplications === 1 ? '' : 's'} affected.
-            Direct {demoSim.direct.length}. Indirect {demoSim.indirect.length}. An all-HARD path is SIMULATED CRITICAL. A path that includes SOFT is SIMULATED WARNING. Unaffected nodes stay UNKNOWN.
-          </p>
-        )}
       </div>
 
-      <div className={`rounded-lg p-3 space-y-2 ${isDark ? 'bg-slate-950 text-slate-100' : 'bg-slate-900 text-slate-100'}`}>
-        {demo.enabled ? <DemoScenarios /> : (
-          <>
-        <div className="flex flex-wrap items-end justify-between gap-2">
-          <div>
-            <h2 className="text-sm font-bold">DEMO / SIMULATION</h2>
-            <p className="text-[11px] text-slate-300 max-w-3xl">
-              Paints a local picture of the existing impact preview. It does not change monitor status, open an incident, send an alert, or write to the database.
-            </p>
-          </div>
-          <button type="button" onClick={() => setSimId('')} className="px-3 py-1.5 text-xs font-semibold rounded bg-white text-slate-900 cursor-pointer">
-            Restore simulated view
-          </button>
-        </div>
-        <label className="block text-[11px] max-w-md w-full">
-          Provider to pretend has failed
-          <select
-            aria-label="Simulated failed provider"
-            disabled={registry.length === 0}
-            className="mt-1 w-full rounded border border-slate-500 bg-slate-800 px-2 py-1 text-slate-100 disabled:opacity-50"
-            value={simId}
-            onChange={e => setSimId(e.target.value)}
-          >
-            <option value="">No simulation</option>
-            {registry.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </label>
-        {registry.length === 0 && <p className="text-[11px] text-slate-300">Nothing to simulate. The register has no components, so no relationship is invented.</p>}
-        {simLoading && <p className="text-[11px] text-slate-300">Loading the existing impact preview…</p>}
-        {simError && <p className="text-[11px] text-rose-300">{simError}</p>}
-        {simId && simPreview && (
-          <p className="text-[11px] text-violet-200">
-            Simulated only. Existing calculation would reach {simPreview.impact?.affected.length ?? 0} component{(simPreview.impact?.affected.length ?? 0) === 1 ? '' : 's'}.
-            Real statuses on the graph are unchanged. Nodes in the picture are marked SIMULATED.
-          </p>
-        )}
-          </>
-        )}
-      </div>
+      <DependencyMatrix applications={applications} registry={registry} links={dependencyLinks} isDark={isDark} />
 
-      {demo.enabled ? (
-        <p className={`text-xs font-mono ${muted}`}>
-          The dependency register editor is hidden while DEMO mode is on, so these illustrative rows cannot be saved. Turn DEMO off to edit the live register. Hosting below stays the live application record and is not a service dependency.
-        </p>
-      ) : <DependencyRegisterSection />}
+      <DependencyRegisterSection />
 
       {(applications.length > 0 || servers.length > 0) && <div className={`pb-1 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
-        <h2 className="text-sm font-bold font-mono tracking-tight">WHERE EACH PROJECT RUNS</h2>
-        <p className={`text-xs font-mono ${muted}`}>
-          The production server, the recovery server, and the monitors that check them. This is live status, not the dependency list above.
-        </p>
+        <h2 className="text-sm font-semibold">Where each application runs</h2>
+        <p className={`text-xs ${muted}`}>Production server, recovery server, and the checks on each.</p>
       </div>}
 
       {(applications.length > 0 || servers.length > 0) && <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 font-mono text-xs">

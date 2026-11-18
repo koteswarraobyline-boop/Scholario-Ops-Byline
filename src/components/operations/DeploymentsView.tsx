@@ -2,6 +2,7 @@ import React from 'react';
 import { useOps } from '../../context/OpsContext';
 import { Deployment } from '../../types';
 import { GitBranch, CheckCircle2, XCircle, Loader2, Circle, RotateCcw } from 'lucide-react';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 
 const STAGES: { key: Deployment['status']; label: string }[] = [
   { key: 'BUILDING', label: 'Build' },
@@ -44,6 +45,7 @@ export const DeploymentsView: React.FC = () => {
   const { deployments, applications, theme } = useOps();
   const isDark = theme === 'dark';
   const muted = isDark ? 'text-slate-400' : 'text-slate-600';
+  const deployPaging = useClientPagination(deployments, 10);
 
   const reportingHelp = (
     <div className={`rounded-lg border p-4 sm:p-5 space-y-3 font-mono text-xs ${
@@ -78,12 +80,7 @@ export const DeploymentsView: React.FC = () => {
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
       }`}>
         <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">
-            DEPLOYMENTS
-          </h1>
-          <p className={`text-xs font-mono ${muted}`}>
-            Releases reported by your CI/CD pipeline: Build → Deploy → Health check → Smoke test → Result
-          </p>
+          <h1 className="text-lg font-bold tracking-tight">Deployments</h1>
         </div>
       </div>
 
@@ -105,7 +102,7 @@ export const DeploymentsView: React.FC = () => {
       ) : (
         <>
           <div className="space-y-3 font-mono text-xs">
-            {deployments.map(dep => {
+            {deployPaging.slice.map(dep => {
               const app = applications.find(a => a.id === dep.applicationId);
               const finished = dep.status === 'SUCCESS' || dep.status === 'FAILED' || dep.status === 'ROLLED_BACK';
               const currentIdx = STAGE_ORDER.indexOf(dep.status);
@@ -180,6 +177,7 @@ export const DeploymentsView: React.FC = () => {
               );
             })}
           </div>
+          <Pagination page={deployPaging.page} totalPages={deployPaging.totalPages} total={deployPaging.total} pageSize={deployPaging.pageSize} onPage={deployPaging.setPage} />
           <details className="font-mono text-xs">
             <summary className={`cursor-pointer select-none ${muted}`}>How to report deployments from CI</summary>
             <div className="mt-3">{reportingHelp}</div>

@@ -76,7 +76,7 @@ before(async () => {
   );
 
   const first = await migrate();
-  assert.deepEqual(first, ['017_dependency_mvp.sql']);
+  assert.deepEqual(first, ['017_dependency_mvp.sql', '018_dependency_layer1.sql']);
   const again = await migrate();
   assert.deepEqual(again, []);
 
@@ -114,6 +114,11 @@ test('a pre-017 link reloads with a null method and updated_at copied from creat
   const link = db.dependencyLinks.find(l => l.id === oldLinkId);
   assert.ok(link);
   assert.equal(link.method, null);
+  assert.equal(link.criticality, null);
+  assert.equal(link.healthCheck, '');
+  assert.equal(link.failureBehaviour, '');
+  assert.equal(link.owner, '');
+  assert.equal(link.recoveryExpectation, '');
   assert.equal(link.notes, 'pre-017');
   assert.equal(link.type, 'HARD');
   assert.equal(Date.parse(link.createdAt), Date.parse(createdAt));
@@ -125,7 +130,7 @@ test('each approved method and null is accepted, an unknown method is rejected, 
     const id = crypto.randomUUID();
     db.registry.push({
       id, kind, name, owner: 'Owner', tier: 'TIER_2', description: '', applicationId: null, serverId: null,
-      userCount: null, served: [], createdAt, updatedAt: createdAt,
+      userCount: null, served: [], endpoint: '', createdAt, updatedAt: createdAt,
     });
     return id;
   };
@@ -165,6 +170,27 @@ test('each approved method and null is accepted, an unknown method is rejected, 
   assert.equal(Date.parse(old?.createdAt ?? ''), Date.parse(createdAt));
 });
 
+test('an application id, a server id, or a dangling application reference is rejected', () => {
+  assert.throws(
+    () => buildLink({ body: { fromId: appId, toId: providerId, type: 'HARD' } }),
+    (err: Error) => err instanceof ValidationError && /application's register entry/.test(err.message),
+  );
+  assert.throws(
+    () => buildLink({ body: { fromId: consumerId, toId: prdId, type: 'HARD' } }),
+    (err: Error) => err instanceof ValidationError && /server's register entry/.test(err.message),
+  );
+  const from = db.registry.find(c => c.id === consumerId)!;
+  from.applicationId = crypto.randomUUID();
+  try {
+    assert.throws(
+      () => buildLink({ body: { fromId: consumerId, toId: providerId, type: 'SOFT', method: 'DATABASE' } }),
+      (err: Error) => err instanceof ValidationError && /consumer application is no longer registered/.test(err.message),
+    );
+  } finally {
+    from.applicationId = null;
+  }
+});
+
 test('duplicate prevention, self-links, and feature checks are unchanged', () => {
   const from = db.registry.find(c => c.id === consumerId)!;
   const to = db.registry.find(c => c.id === providerId)!;
@@ -186,16 +212,64 @@ test('duplicate prevention, self-links, and feature checks are unchanged', () =>
   );
 });
 
+test('criticality, failure text, owner, recovery, and a config address round-trip, and a password is rejected', async () => {
+  const toId = crypto.randomUUID();
+  db.registry.push({
+    id: toId, kind: 'DATABASE', name: 'Layer1 DB', owner: 'Owner', tier: 'TIER_2', description: '',
+    applicationId: null, serverId: null, userCount: null, served: [], endpoint: 'db.internal', createdAt, updatedAt: createdAt,
+  });
+  const link = buildLink({
+    body: {
+      fromId: consumerId, toId, type: 'HARD', criticality: 'HIGH', healthCheck: 'GET /health',
+      failureBehaviour: 'Sign-in shows an error', owner: 'Academic IT', recoveryExpectation: 'Restore within 30 minutes',
+    },
+  });
+  assert.equal(link.criticality, 'HIGH');
+  assert.equal(link.healthCheck, 'GET /health');
+  assert.equal(link.failureBehaviour, 'Sign-in shows an error');
+  assert.equal(link.owner, 'Academic IT');
+  assert.equal(link.recoveryExpectation, 'Restore within 30 minutes');
+  db.dependencyLinks.push(link);
+  assert.equal(await save(), true);
+  await initStore();
+  const reloaded = db.dependencyLinks.find(l => l.id === link.id);
+  assert.equal(reloaded?.criticality, 'HIGH');
+  assert.equal(reloaded?.failureBehaviour, 'Sign-in shows an error');
+  assert.equal(db.registry.find(c => c.id === toId)?.endpoint, 'db.internal');
+  assert.throws(
+    () => buildLink({ body: { healthCheck: 'password=secret' } }, reloaded),
+    (err: Error) => err instanceof ValidationError && /password or token/.test(err.message),
+  );
+  assert.throws(
+    () => buildLink({ body: { notes: 'token=abc' } }, reloaded),
+    (err: Error) => err instanceof ValidationError && /password or token/.test(err.message),
+  );
+  assert.throws(
+    () => buildLink({ body: ['not', 'an', 'object'] }),
+    (err: Error) => err instanceof ValidationError && /JSON object/.test(err.message),
+  );
+  assert.throws(
+    () => buildLink({ body: { applicationId: appId } }, reloaded),
+    (err: Error) => err instanceof ValidationError && /does not take an application id/.test(err.message),
+  );
+  const trimmed = buildLink({ body: { criticality: ' HIGH ' } }, reloaded);
+  assert.equal(trimmed.criticality, 'HIGH');
+  assert.throws(
+    () => buildLink({ body: { criticality: 'URGENT' } }, reloaded),
+    (err: Error) => err instanceof ValidationError && /Criticality must be one of/.test(err.message),
+  );
+});
+
 test('HARD, SOFT, and a named feature still use the existing impact walk', () => {
   const featureId = crypto.randomUUID();
   db.registry.push({
     id: featureId, kind: 'BUSINESS_FEATURE', name: 'Playback', owner: 'Owner', tier: 'TIER_1', description: '',
-    applicationId: null, serverId: null, userCount: null, served: [], createdAt, updatedAt: createdAt,
+    applicationId: null, serverId: null, userCount: null, served: [], endpoint: '', createdAt, updatedAt: createdAt,
   });
   const apiId = crypto.randomUUID();
   db.registry.push({
     id: apiId, kind: 'THIRD_PARTY_API', name: 'Storage API', owner: 'Owner', tier: 'TIER_2', description: '',
-    applicationId: null, serverId: null, userCount: null, served: [], createdAt, updatedAt: createdAt,
+    applicationId: null, serverId: null, userCount: null, served: [], endpoint: '', createdAt, updatedAt: createdAt,
   });
   const soft = buildLink({ body: { fromId: consumerId, toId: apiId, type: 'SOFT', method: 'API', featureId } });
   db.dependencyLinks.push(soft);
@@ -204,7 +278,7 @@ test('HARD, SOFT, and a named feature still use the existing impact walk', () =>
   assert.equal(hardHit?.affected.find(a => a.id === consumerId)?.via, 'HARD');
 
   const softHit = registryImpact(apiId);
-  assert.equal(softHit?.affected.find(a => a.id === consumerId)?.via, 'SOFT');
+  assert.equal(softHit?.affected.find(a => a.id === consumerId), undefined);
   assert.equal(softHit?.affected.find(a => a.id === featureId)?.via, 'HARD');
 });
 

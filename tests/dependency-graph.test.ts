@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToString } from 'react-dom/server';
 import { DependencyGraph, directNeighborhood, graphColumns, liveRegistryStatus } from '../src/components/resilience/DependencyGraph.tsx';
+import { DependencyMatrix } from '../src/components/resilience/DependencyMatrix.tsx';
 import type { Application, DependencyLink, RegistryComponent } from '../src/types/index.ts';
 
 const now = '2026-01-01T00:00:00.000Z';
@@ -18,6 +19,7 @@ const component = (partial: Pick<RegistryComponent, 'id' | 'kind' | 'name'> & Pa
   serverId: null,
   userCount: null,
   served: [],
+  endpoint: '',
   createdAt: now,
   updatedAt: now,
   ...partial,
@@ -27,8 +29,8 @@ test('graph places the provider to the left of the consumer and keeps UNKNOWN', 
   const provider = component({ id: 'db', kind: 'DATABASE', name: 'QR Database' });
   const consumer = component({ id: 'app', kind: 'APPLICATION', name: 'Portal', applicationId: 'app-1' });
   const links: DependencyLink[] = [
-    { id: 'hard', fromId: 'app', toId: 'db', type: 'HARD', featureId: null, method: 'DATABASE', notes: 'lookup', createdAt: now, updatedAt: now },
-    { id: 'soft', fromId: 'app', toId: 'db', type: 'SOFT', featureId: null, method: null, notes: '', createdAt: now, updatedAt: now },
+    { id: 'hard', fromId: 'app', toId: 'db', type: 'HARD', featureId: null, method: 'DATABASE', criticality: null, healthCheck: '', failureBehaviour: '', owner: '', recoveryExpectation: '', notes: 'lookup', createdAt: now, updatedAt: now },
+    { id: 'soft', fromId: 'app', toId: 'db', type: 'SOFT', featureId: null, method: null, criticality: null, healthCheck: '', failureBehaviour: '', owner: '', recoveryExpectation: '', notes: '', createdAt: now, updatedAt: now },
   ];
   const columns = graphColumns([provider, consumer], links);
   assert.equal(columns.get('db'), 0);
@@ -65,9 +67,9 @@ test('a chosen application keeps only its own relationships', () => {
   const social = component({ id: 'social', kind: 'APPLICATION', name: 'Scholario Social LMS' });
   const pay = component({ id: 'pay', kind: 'THIRD_PARTY_API', name: 'External Payment API' });
   const links: DependencyLink[] = [
-    { id: 'lxp-db', fromId: 'lxp', toId: 'db', type: 'HARD', featureId: null, method: 'DATABASE', notes: '', createdAt: now, updatedAt: now },
-    { id: 'social-lxp', fromId: 'social', toId: 'lxp', type: 'HARD', featureId: null, method: 'API', notes: '', createdAt: now, updatedAt: now },
-    { id: 'web-pay', fromId: 'web', toId: 'pay', type: 'SOFT', featureId: null, method: 'API', notes: '', createdAt: now, updatedAt: now },
+    { id: 'lxp-db', fromId: 'lxp', toId: 'db', type: 'HARD', featureId: null, method: 'DATABASE', criticality: null, healthCheck: '', failureBehaviour: '', owner: '', recoveryExpectation: '', notes: '', createdAt: now, updatedAt: now },
+    { id: 'social-lxp', fromId: 'social', toId: 'lxp', type: 'HARD', featureId: null, method: 'API', criticality: null, healthCheck: '', failureBehaviour: '', owner: '', recoveryExpectation: '', notes: '', createdAt: now, updatedAt: now },
+    { id: 'web-pay', fromId: 'web', toId: 'pay', type: 'SOFT', featureId: null, method: 'API', criticality: null, healthCheck: '', failureBehaviour: '', owner: '', recoveryExpectation: '', notes: '', createdAt: now, updatedAt: now },
   ];
   const picture = directNeighborhood([lxp, db, social, pay], links, 'lxp');
   assert.deepEqual(picture.components.map(item => item.id).sort(), ['db', 'lxp', 'social']);
@@ -87,4 +89,22 @@ test('an empty register does not invent dependencies', () => {
   assert.match(html, /have not been documented/);
   assert.match(html, /does not mean/);
   assert.doesNotMatch(html, /QR Videos/);
+});
+
+test('a hard link and a feature link to the same provider both stay visible', () => {
+  const html = renderToString(React.createElement(DependencyMatrix, {
+    applications: [{ id: 'app-1', name: 'Portal' } as Application],
+    registry: [
+      component({ id: 'portal', kind: 'APPLICATION', name: 'Portal', applicationId: 'app-1' }),
+      component({ id: 'db', kind: 'DATABASE', name: 'Portal DB' }),
+      component({ id: 'tutor', kind: 'BUSINESS_FEATURE', name: 'AI Tutor', applicationId: 'app-1' }),
+    ],
+    links: [
+      { id: 'hard', fromId: 'portal', toId: 'db', type: 'HARD', featureId: null, method: 'DATABASE', criticality: null, healthCheck: '', failureBehaviour: '', owner: '', recoveryExpectation: '', notes: '', createdAt: now, updatedAt: now },
+      { id: 'feat', fromId: 'portal', toId: 'db', type: 'SOFT', featureId: 'tutor', method: 'API', criticality: null, healthCheck: '', failureBehaviour: '', owner: '', recoveryExpectation: '', notes: 'tutor only', createdAt: now, updatedAt: now },
+    ],
+    isDark: false,
+  }));
+  assert.match(html, />H\+F</);
+  assert.match(html, /AI Tutor/);
 });
