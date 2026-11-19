@@ -107,4 +107,22 @@ test('a hard link and a feature link to the same provider both stay visible', ()
   }));
   assert.match(html, />H\+F</);
   assert.match(html, /AI Tutor/);
+  assert.match(html, /keeps running, but worse/);
+});
+
+test('a soft dependency recorded on a feature is marked F', () => {
+  const html = renderToString(React.createElement(DependencyMatrix, {
+    applications: [{ id: 'app-1', name: 'Portal' } as Application],
+    registry: [
+      component({ id: 'portal', kind: 'APPLICATION', name: 'Portal', applicationId: 'app-1' }),
+      component({ id: 'db', kind: 'DATABASE', name: 'Portal DB' }),
+      component({ id: 'tutor', kind: 'BUSINESS_FEATURE', name: 'AI Tutor', applicationId: 'app-1' }),
+    ],
+    links: [
+      { id: 'from-feature', fromId: 'tutor', toId: 'db', type: 'SOFT', featureId: null, method: 'API', criticality: null, healthCheck: '', failureBehaviour: '', owner: '', recoveryExpectation: '', notes: '', createdAt: now, updatedAt: now },
+    ],
+    isDark: false,
+  }));
+  assert.match(html, />F</);
+  assert.doesNotMatch(html, />S</);
 });

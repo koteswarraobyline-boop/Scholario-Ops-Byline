@@ -48,7 +48,7 @@ export const DependencyMatrix: React.FC<{
       <div>
         <h2 className="text-xl font-semibold font-sans tracking-tight">Dependency matrix</h2>
         <p className={`text-sm font-sans mt-1 ${muted}`}>
-          Recorded relationships only. H means the project stops. S means the project is degraded. F means only that feature stops.
+          Recorded relationships only. H means the project stops. S means the project keeps running, but worse. F means only that feature stops.
         </p>
       </div>
       {appLinks.length === 0 || providers.length === 0 ? (
@@ -70,9 +70,10 @@ export const DependencyMatrix: React.FC<{
                   <th className="px-3 py-2 text-left font-semibold">{row.app.name}</th>
                   {providers.map(provider => {
                     const hits = marks(row.app.id, provider.id);
+                    const fromFeature = (link: DependencyLink) => row.featureIds.has(link.fromId);
                     const hard = hits.some(link => link.type === 'HARD');
-                    const soft = hits.some(link => link.type === 'SOFT' && !link.featureId);
-                    const featureOnly = hits.some(link => link.type === 'SOFT' && link.featureId);
+                    const soft = hits.some(link => link.type === 'SOFT' && !link.featureId && !fromFeature(link));
+                    const featureOnly = hits.some(link => link.type === 'SOFT' && (Boolean(link.featureId) || fromFeature(link)));
                     const label = [hard ? 'H' : '', soft ? 'S' : '', featureOnly ? 'F' : ''].filter(Boolean).join('+');
                     const title = hits.map(link => {
                       const feature = link.featureId ? byId.get(link.featureId)?.name : null;

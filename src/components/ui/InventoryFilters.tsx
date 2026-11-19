@@ -23,11 +23,15 @@ export const InventoryFilters: React.FC<{
   onChip: (id: string) => void;
   shown: number;
   total: number;
+  /** Replaces the default clear (search + chip) when a page has extra filters. */
+  onClear?: () => void;
+  /** Another filter is on, so Clear and the matching count stay visible. */
+  extraActive?: boolean;
   /** When set, show Expand all / Collapse all */
   expand?: { allOpen: boolean; onExpandAll: () => void; onCollapseAll: () => void };
   ariaLabel?: string;
-}> = ({ st, search, onSearch, searchPlaceholder = 'Search…', chips, chip, onChip, shown, total, expand, ariaLabel }) => {
-  const active = Boolean(search.trim()) || (chip && chip !== 'ALL');
+}> = ({ st, search, onSearch, searchPlaceholder = 'Search…', chips, chip, onChip, shown, total, expand, ariaLabel, onClear, extraActive }) => {
+  const active = Boolean(search.trim()) || (chip && chip !== 'ALL') || Boolean(extraActive);
   return (
     <div className="space-y-2" role="search" aria-label={ariaLabel ?? 'Filter list'}>
       <div className="flex flex-wrap items-center gap-2">
@@ -81,7 +85,7 @@ export const InventoryFilters: React.FC<{
         {active && (
           <button
             type="button"
-            onClick={() => { onSearch(''); onChip('ALL'); }}
+            onClick={() => { if (onClear) onClear(); else { onSearch(''); onChip('ALL'); } }}
             className={`px-2 py-1 ${st.isDark ? 'text-blue-400' : 'text-blue-600'} hover:underline cursor-pointer`}
           >
             Clear

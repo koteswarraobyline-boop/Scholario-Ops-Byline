@@ -369,7 +369,7 @@ ${(await bodyText()).slice(0, 3000)}`);
 };
 
 /** Every page of the app (routes in src/App.tsx) — no page overflow, nothing outside its card, no overlaps */
-const ALL_ROUTES = ['/applications', '/incidents', '/resilience', '/backups', '/dependencies', '/hostinger', '/cloudflare',
+const ALL_ROUTES = ['/applications', '/incidents', '/resilience', '/backups', '/dependencies', '/dependency-register', '/hostinger', '/cloudflare',
   '/deployments', '/runbooks', '/maintenance', '/communications', '/reliability', '/resources', '/impact', '/reports', '/audit', '/users'];
 for (const width of [1366, 1024]) {
   test(`all other pages render cleanly at ${width}px`, { skip: SKIP }, async () => {

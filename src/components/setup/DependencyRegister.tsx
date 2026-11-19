@@ -225,7 +225,7 @@ const LinkEditor: React.FC<{ initial?: DependencyLink; fromId?: string; onDone: 
             {providers.map(option)}
           </select>
         </Field>
-        <Field text="Type" hint={type === 'HARD' ? 'A stops working without B' : 'A works, degraded, without B'}>
+        <Field text="Type" hint={type === 'HARD' ? 'The consumer stops when the provider fails.' : (features.some(f => f.id === featureId) || consumer?.kind === 'BUSINESS_FEATURE') ? 'That feature stops. The rest of the consumer keeps running.' : 'The consumer keeps running, but worse.'}>
           <select value={type} onChange={e => setType(e.target.value as DependencyLink['type'])} className={st.input}>
             <option value="HARD">Hard</option>
             <option value="SOFT">Soft</option>
@@ -626,6 +626,7 @@ export const DependencyRegisterSection: React.FC = () => {
           <Network className="w-4 h-4 text-blue-500" /> DEPENDENCY REGISTER ({registry.length})
         </h2>
         <div className="flex gap-2">
+          <button type="button" onClick={() => navigate('/dependency-register')} className={`${st.btn} ${st.ghost}`}>Full list</button>
           <button type="button" onClick={() => navigate('/dependencies#dependency-matrix')} className={`${st.btn} ${st.ghost}`}>Matrix</button>
           {isAdmin && editing === null && editingLink === null && (
             <>
@@ -874,7 +875,7 @@ export const DependencyRegisterSection: React.FC = () => {
                       <Field text="If it fails" hint={recording.featureId ? (recording.type === 'HARD' ? 'This project stops, including this feature' : 'Only this feature stops. The rest of the project keeps running.') : (recording.type === 'HARD' ? 'This project stops' : 'This project still runs, but worse')}>
                         <select value={recording.type} onChange={e => setRecording({ ...recording, type: e.target.value as DependencyLink['type'] })} className={st.input}>
                           <option value="HARD">Hard — project stops</option>
-                          <option value="SOFT">Soft — project degraded</option>
+                          <option value="SOFT">Soft</option>
                         </select>
                       </Field>
                       <Field text="Feature" hint="Whole project means every part of it needs this">

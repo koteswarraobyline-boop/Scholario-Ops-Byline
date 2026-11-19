@@ -35,7 +35,8 @@ import {
   Settings,
   Users,
   Gauge,
-  Waypoints
+  Waypoints,
+  Network,
 } from 'lucide-react';
 import { CommandPalette } from './CommandPalette';
 import { CriticalAlerts } from './CriticalAlerts';
@@ -140,7 +141,8 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
         { id: 'infrastructure', label: 'Infrastructure', icon: Server, count: `${systemSummary.healthyServers}/${systemSummary.totalServers}` },
         { id: 'resources', label: 'Capacity', icon: Gauge, },
         { id: 'impact', label: 'Impact', icon: Waypoints },
-        { id: 'dependencies', label: 'Dependencies', icon: Cpu }
+        { id: 'dependencies', label: 'Dependencies', icon: Cpu },
+        { id: 'dependency-register', label: 'Dependency register', icon: Network },
       ]
     },
     {
@@ -325,6 +327,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                 resources: 'Capacity',
                 impact: 'Impact',
                 dependencies: 'Dependencies',
+                'dependency-register': 'Dependency register',
                 resilience: 'Readiness',
                 backups: 'Backups',
                 hostinger: 'Provider VPS',

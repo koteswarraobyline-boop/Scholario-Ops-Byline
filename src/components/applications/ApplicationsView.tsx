@@ -18,12 +18,14 @@ import { FailoverImpactPreview } from '../ui/FailoverImpactPreview';
 import { dependencyMethodLabel, projectServiceDependencies } from '../../lib/serviceDependencies';
 
 /** The same recorded facts on every dependency row, so a read-only tab matches the register. */
-function dependencyFacts(link: ApplicationServiceDependency, includeFeature = false): string {
+function dependencyFacts(link: ApplicationServiceDependency, options: { includeFeature?: boolean; onFeature?: boolean } = {}): string {
+  const limited = Boolean(link.featureId) || Boolean(options.onFeature);
+  const effect = link.type === 'HARD' ? 'Hard · stops' : limited ? 'Soft · feature stops' : 'Soft · keeps running';
   return [
-    link.type,
+    effect,
     dependencyMethodLabel(link.method),
     link.criticality ?? '',
-    includeFeature && link.featureName ? `feature ${link.featureName}` : '',
+    options.includeFeature && link.featureName ? `feature ${link.featureName}` : '',
     link.otherEndpoint ?? '',
     link.failureBehaviour ? `users see ${link.failureBehaviour}` : '',
     link.owner ? `owner ${link.owner}` : '',
@@ -311,7 +313,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
 
               <div className={`p-4 rounded border space-y-2 ${isDark ? 'bg-[#0A0F1A] border-[#1E293B]' : 'bg-slate-50 border-slate-200'}`}>
                 <div className={`text-xs font-bold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Whole application ({applicationLevel.length})</div>
-                <p className={`text-[11px] font-sans ${muted}`}>Hard stops this application. Soft degrades it. A Soft link limited to one feature does not change the application.</p>
+                <p className={`text-[11px] font-sans ${muted}`}>Hard stops this application. Soft with a feature means that feature stops. Soft on its own means the application keeps running, but worse.</p>
                 {applicationLevel.length === 0 ? (
                   <div className={emptyText}>Nothing recorded for the whole application. This does not mean the application has no dependencies.</div>
                 ) : applicationLevel.map(l => {
@@ -513,13 +515,22 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
           {/* TAB: DEPENDENCIES — stored register links, not the monitor list */}
           {activeTab === 'deps' && (
             <div className="space-y-3 font-mono">
-              <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>What this application uses</div>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>What this application uses</div>
+                <button
+                  type="button"
+                  onClick={() => navigate(`/dependency-register?application=${encodeURIComponent(application.id)}`)}
+                  className="text-[11px] font-mono text-blue-500 hover:underline cursor-pointer"
+                >
+                  Open in the register
+                </button>
+              </div>
               {serviceDeps.features.length === 0 && serviceDeps.outgoing.length === 0 && serviceDeps.incoming.length === 0 ? (
                 <div className={emptyText}>Nothing recorded. This does not mean the application has no dependencies.</div>
               ) : (
                 <div className="space-y-3">
                   <div className={`text-[10px] uppercase font-bold ${muted}`}>Whole application ({applicationLevel.length})</div>
-                  <div className={`text-[11px] ${muted}`}>Hard stops this application. Soft degrades it. A Soft link limited to one feature is listed under that feature and does not change the application.</div>
+                  <div className={`text-[11px] ${muted}`}>Hard stops this application. Soft with a feature means that feature stops. Soft on its own means the application keeps running, but worse.</div>
                   {applicationLevel.length === 0 ? (
                     <div className={emptyText}>Nothing recorded for the whole application. This does not mean the application has no dependencies.</div>
                   ) : applicationLevel.map(l => {
@@ -531,7 +542,12 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                       <div className={`font-semibold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
                         {fromFeature?.name ?? application.name} <span className={muted}>→</span> {l.otherName}
                       </div>
-                      <div className={`text-[11px] break-words ${muted}`}>{dependencyFacts(l, !fromFeature)}</div>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className={`text-[11px] break-words ${muted}`}>{dependencyFacts(l, { includeFeature: !fromFeature, onFeature: Boolean(fromFeature) })}</div>
+                        {canRecordDependency && (
+                          <button type="button" onClick={() => navigate(`/dependency-register?application=${encodeURIComponent(application.id)}&edit=${encodeURIComponent(l.id)}`)} className="text-[11px] font-mono text-blue-500 hover:underline cursor-pointer shrink-0">Edit</button>
+                        )}
+                      </div>
                     </div>
                     );
                   })}
@@ -548,7 +564,12 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                           <div className={`font-semibold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
                             {feature.name} <span className={muted}>→</span> {l.otherName}
                           </div>
-                          <div className={`text-[11px] break-words ${muted}`}>{dependencyFacts(l)}</div>
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className={`text-[11px] break-words ${muted}`}>{dependencyFacts(l, { onFeature: true })}</div>
+                            {canRecordDependency && (
+                              <button type="button" onClick={() => navigate(`/dependency-register?application=${encodeURIComponent(application.id)}&edit=${encodeURIComponent(l.id)}`)} className="text-[11px] font-mono text-blue-500 hover:underline cursor-pointer shrink-0">Edit</button>
+                            )}
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -559,7 +580,12 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
                       <div className={`font-semibold font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
                         {l.otherName} <span className={muted}>→</span> {application.name}
                       </div>
-                      <div className={`text-[11px] break-words ${muted}`}>{dependencyFacts(l, true)}</div>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className={`text-[11px] break-words ${muted}`}>{dependencyFacts(l, { includeFeature: true })}</div>
+                        {canRecordDependency && (
+                          <button type="button" onClick={() => navigate(`/dependency-register?application=${encodeURIComponent(application.id)}&edit=${encodeURIComponent(l.id)}`)} className="text-[11px] font-mono text-blue-500 hover:underline cursor-pointer shrink-0">Edit</button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -581,7 +607,7 @@ export const ApplicationDetailModal: React.FC<ApplicationDetailModalProps> = ({ 
               {canRecordDependency && (
                 <button
                   type="button"
-                  onClick={() => navigate(`/setup?record=${encodeURIComponent(application.id)}#dependency-register-title`)}
+                  onClick={() => navigate(`/dependency-register?application=${encodeURIComponent(application.id)}&add=1`)}
                   className="px-2.5 py-1 rounded text-xs font-mono font-bold bg-blue-600 hover:bg-blue-500 text-white cursor-pointer"
                 >
                   Record a dependency

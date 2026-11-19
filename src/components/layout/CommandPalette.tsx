@@ -79,6 +79,7 @@ const ROUTES: Array<{ tab: string; title: string; subtitle: string; icon: Comman
   { tab: 'resilience', title: 'Readiness', subtitle: 'Whether failover is safe', icon: ShieldCheck, keywords: 'resilience dr disaster recovery readiness failover' },
   { tab: 'backups', title: 'Backups', subtitle: 'Recovery points and reported runs', icon: Database, keywords: 'backups restore snapshots' },
   { tab: 'dependencies', title: 'Dependencies', subtitle: 'What each application uses', icon: Network, keywords: 'dependencies map topology projects' },
+  { tab: 'dependency-register', title: 'Dependency register', subtitle: 'Consumer, provider, type, and feature', icon: Network, keywords: 'dependency register links hard soft feature module consumer provider search' },
   { tab: 'hostinger', title: 'Provider VPS', subtitle: 'Servers from each provider account', icon: Cpu, keywords: 'hostinger provider vps vms account connection' },
   { tab: 'cloudflare', title: 'Cloudflare', subtitle: 'DNS, load balancing, and failover', icon: Cloud, keywords: 'cloudflare dns zones ssl edge' },
   { tab: 'deployments', title: 'Deployments', subtitle: 'Releases from CI', icon: GitBranch, keywords: 'deployments releases versions' },
