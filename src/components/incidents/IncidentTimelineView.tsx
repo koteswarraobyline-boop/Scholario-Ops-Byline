@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { IncidentMinutes, incidentMinutes } from '../ui/IncidentMinutes';
 import { useOps } from '../../context/OpsContext';
 import { Incident } from '../../types';
 import { Clock, Eye, Check, ChevronRight } from 'lucide-react';
@@ -270,10 +271,10 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
                                   ? 'bg-amber-700/80 text-amber-100 border border-amber-500'
                                   : 'bg-blue-700/80 text-blue-100 border border-blue-500'
                           }`}
-                          title={`${inc.id}: started ${fmtDateTime(inc.startedAt)} · ${inc.durationMinutes ?? 0} min`}
+                          title={`${inc.id}: started ${fmtDateTime(inc.startedAt)} · ${incidentMinutes(inc)} min`}
                         >
                           <span className="truncate pr-1">
-                            {active ? `OPEN: ${inc.durationMinutes ?? 0}m` : `${inc.durationMinutes ?? 0}m`}
+                            {active ? <>OPEN: <IncidentMinutes incident={inc} />m</> : `${inc.durationMinutes ?? 0}m`}
                           </span>
                           {active ? (
                             <span className="w-1.5 h-1.5 rounded-full bg-white shrink-0" />
@@ -363,7 +364,7 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
             <div className={`p-2.5 rounded border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200'}`}>
               <div className={`text-[10px] uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Duration</div>
               <div className={`font-bold mt-0.5 tabular-nums ${isClosed(currentIncident) ? 'text-emerald-500' : 'text-rose-500'}`}>
-                {currentIncident.durationMinutes ?? 0} min {isClosed(currentIncident) ? '' : '(ongoing)'}
+                <IncidentMinutes incident={currentIncident} /> min {isClosed(currentIncident) ? '' : '(ongoing)'}
               </div>
               <div className={`text-[10px] font-sans ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
                 {currentIncident.resolvedAt ? `Resolved ${fmtDateTime(currentIncident.resolvedAt)}` : 'Not resolved'}
@@ -386,7 +387,7 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
             <span className={`text-[10px] font-mono font-semibold uppercase tracking-wider ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
               Lifecycle
             </span>
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(8rem,1fr))] gap-2">
               {getLifecycleStages(currentIncident).map(st => {
                 const isDone = st.status === 'COMPLETED';
                 const isCurrent = st.status === 'IN_PROGRESS';
@@ -394,7 +395,7 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
                 return (
                   <div
                     key={st.stage}
-                    className={`p-2.5 rounded border text-left flex flex-col justify-between min-h-[90px] font-mono transition-colors ${
+                    className={`p-2.5 rounded border text-left flex flex-col justify-between min-h-[90px] min-w-0 font-mono transition-colors ${
                       isCurrent
                         ? (isDark ? 'bg-[#1C170E] border-amber-500/80 ring-1 ring-amber-500' : 'bg-amber-50 border-amber-400 ring-1 ring-amber-400')
                         : isDone
@@ -403,7 +404,7 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
                     }`}
                   >
                     <div>
-                      <div className="flex items-center justify-between text-[10px] mb-1">
+                      <div className="flex flex-wrap items-center justify-between gap-x-1 text-[10px] mb-1">
                         <span className={`font-bold ${isCurrent ? 'text-amber-500' : isDone ? 'text-emerald-500' : 'text-slate-500'}`}>
                           0{st.stage}
                         </span>
@@ -413,13 +414,13 @@ export const IncidentTimelineView: React.FC<IncidentTimelineViewProps> = ({ onSe
                           {st.badge}
                         </span>
                       </div>
-                      <div className={`font-semibold text-xs leading-snug font-sans ${
+                      <div className={`font-semibold text-xs leading-snug font-sans break-words ${
                         isCurrent ? (isDark ? 'text-amber-200' : 'text-amber-900') : isDone ? (isDark ? 'text-slate-200' : 'text-slate-800') : 'text-slate-500'
                       }`}>
                         {st.title}
                       </div>
                     </div>
-                    <p className={`text-[10px] font-sans mt-1.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                    <p className={`text-[10px] font-sans mt-1.5 break-words ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                       {st.subtitle}
                     </p>
                   </div>

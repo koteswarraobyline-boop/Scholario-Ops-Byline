@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useOps } from '../../context/OpsContext';
 import { Shield, RefreshCw, Filter, Search, X } from 'lucide-react';
 import { api } from '../../services/api';
@@ -10,7 +10,7 @@ import { Pagination } from '../ui/Pagination';
 
 const CATEGORIES: Array<AuditLog['category'] | ''> = [
   '', 'INCIDENT', 'FAILOVER', 'MAINTENANCE', 'MONITOR', 'CLOUDFLARE', 'INFRASTRUCTURE', 'RUNBOOK',
-  'APPLICATION', 'AUTH', 'USER', 'NOTIFICATION', 'DEPLOYMENT', 'BACKUP',
+  'APPLICATION', 'AUTH', 'USER', 'NOTIFICATION', 'DEPLOYMENT', 'BACKUP', 'REGISTRY', 'CAPACITY', 'CREDENTIAL',
 ];
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -18,7 +18,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   MAINTENANCE: 'text-purple-400', MONITOR: 'text-cyan-400', CLOUDFLARE: 'text-orange-400',
   INFRASTRUCTURE: 'text-emerald-400', RUNBOOK: 'text-yellow-400', USER: 'text-sky-400',
   NOTIFICATION: 'text-pink-400', APPLICATION: 'text-indigo-400', DEPLOYMENT: 'text-teal-400',
-  BACKUP: 'text-lime-400',
+  BACKUP: 'text-lime-400', REGISTRY: 'text-violet-400', CAPACITY: 'text-cyan-400', CREDENTIAL: 'text-rose-300',
 };
 
 const fmtDateTime = (iso: string) => {
@@ -27,7 +27,7 @@ const fmtDateTime = (iso: string) => {
 };
 
 export const AuditLogsView: React.FC = () => {
-  const { theme } = useOps();
+  const { theme, auditLogs: liveHead } = useOps();
   const isDark = theme === 'dark';
 
   const [logs, setLogs] = useState<AuditLog[]>([]);
@@ -51,22 +51,43 @@ export const AuditLogsView: React.FC = () => {
     return () => clearTimeout(t);
   }, [searchInput]);
 
+  // Typing or paging fast fires several requests: only the latest one may update the list
+  const requestId = useRef(0);
   const load = useCallback(async () => {
+    const id = ++requestId.current;
     setLoading(true);
     setError(null);
     try {
       const res = await api.getAuditLogs({ page, pageSize, category: category || undefined, q: q || undefined });
+      if (id !== requestId.current) return;
       setLogs(res.data ?? []);
       setTotal(res.pagination?.total ?? 0);
       setTotalPages(Math.max(1, res.pagination?.totalPages ?? 1));
     } catch (e) {
-      setError(e);
+      if (id === requestId.current) setError(e);
     } finally {
-      setLoading(false);
+      if (id === requestId.current) setLoading(false);
     }
   }, [page, category, q]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // Rows already loaded from the API are not treated as new. A later live event is prepended on page 1.
+  const seenLive = useRef(new Set<string>());
+  useEffect(() => {
+    for (const row of logs) seenLive.current.add(row.id);
+  }, [logs]);
+  useEffect(() => {
+    const newest = liveHead[0];
+    if (!newest || seenLive.current.has(newest.id)) return;
+    seenLive.current.add(newest.id);
+    const hay = `${newest.operator} ${newest.action} ${newest.targetId} ${newest.details} ${newest.category}`.toLowerCase();
+    if (category && newest.category !== category) return;
+    if (q && !hay.includes(q.toLowerCase())) return;
+    setTotal(t => t + 1);
+    if (page !== 1) return;
+    setLogs(prev => (prev.some(row => row.id === newest.id) ? prev : [newest, ...prev].slice(0, pageSize)));
+  }, [liveHead, page, category, q]);
 
   const handleCategory = (c: string) => { setCategory(c); setPage(1); };
   const filtersActive = Boolean(category || q);
@@ -76,10 +97,9 @@ export const AuditLogsView: React.FC = () => {
       {/* Header */}
       <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
         <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">AUDIT LOGS</h1>
-          <p className={`text-xs font-mono mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Record of operator actions: incidents, failovers, monitors, configuration and account changes
-            {!loading && !error && <> · {total} entr{total === 1 ? 'y' : 'ies'}{filtersActive ? ' matching' : ''}</>}
+          <h1 className="text-lg font-bold tracking-tight">Audit logs</h1>
+          <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            {!loading && !error && <>{total} entr{total === 1 ? 'y' : 'ies'}{filtersActive ? ' matching' : ''}</>}
           </p>
         </div>
         <button

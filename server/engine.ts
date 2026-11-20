@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import {
-  Application, Monitor, Incident, OperationalStatus, DeadManControlPlane, AppDependency, ServerMetricPoint,
+  Application, Monitor, Incident, OperationalStatus, DeadManControlPlane, ExternalHeartbeat, AppDependency, ServerMetricPoint,
   VpsProcess, VpsService, VpsLogEntry, ProbeStatus, IncidentContext, LoadBalancerState, DatabaseReport,
 } from '../src/types/index.ts';
 import { recordCheck } from './history.ts';
@@ -8,10 +8,23 @@ import { poolFor, onLoadBalancerUpdate, originHealthy, lbState } from './loadbal
 import { config, isCloudflareConfigured } from './config.ts';
 import { db, persist, liveMetrics, minuteMetrics, queueMetric, ServerRecord, MonitorBucket } from './store.ts';
 import { broadcast, audit } from './events.ts';
-import { httpProbe, tcpProbe, dnsProbe, sslProbe, parseHostPort } from './probes.ts';
-import { notifyIncident, notifyAll } from './notify.ts';
+import { httpProbe, tcpProbe, dnsProbe, sslProbe, parseHostPort, classifySocketError } from './probes.ts';
+import { notifyIncident, notifyAll, escalateStep, policySteps, stopEscalation, NEVER_QUIET } from './notify.ts';
+import { isQuietTime } from '../src/lib/quietHours.ts';
+import { isNotificationWorker } from './leader.ts';
 import { switchDnsRecord } from './cloudflare.ts';
 import { log } from './logger.ts';
+import { applyExtendedReport, ExtendedAgentReport } from './telemetry.ts';
+import { infraHeartbeat } from './heartbeat.ts';
+import { DeadManHeartbeat } from './deadman.ts';
+import { agentHealth, serverHealth } from './telemetryHealth.ts';
+import { effectiveRoutingMethod, explainVps, vpsOperationalStatus } from '../src/lib/trafficHealth.ts';
+import { detectFlapping } from '../src/lib/insights.ts';
+import { isMockIncident } from '../src/lib/mockIncident.ts';
+import { enrichNewIncident, refreshIncidentAdvice } from './incidentImpact.ts';
+import { credentialFailureFromResponse } from '../src/lib/credentialFailure.ts';
+import { buildOutageSnapshot, outageTitle } from '../src/lib/outageFlow.ts';
+import { readiness } from './readiness.ts';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Monitor classification
@@ -30,7 +43,7 @@ const worst = (statuses: OperationalStatus[], fallback: OperationalStatus = 'UNK
 // ─────────────────────────────────────────────────────────────────────────────
 // Check execution
 // ─────────────────────────────────────────────────────────────────────────────
-interface CheckOutcome { ok: boolean; degraded: boolean; latencyMs: number; statusCode?: number; detail: string; pending?: boolean; probeStatus?: ProbeStatus }
+interface CheckOutcome { ok: boolean; degraded: boolean; latencyMs: number; statusCode?: number; detail: string; pending?: boolean; probeStatus?: ProbeStatus; daysLeft?: number | null; validTo?: string | null }
 
 const pct = (v: number, fallback: number) => (v > 0 && v <= 100 ? v : fallback);
 
@@ -38,14 +51,22 @@ async function executeCheck(m: Monitor): Promise<CheckOutcome> {
   const timeoutMs = Math.max(1, m.timeoutSec) * 1000;
 
   if (HTTP_TYPES.includes(m.type)) {
-    const r = await httpProbe(m.target, { timeoutMs });
+    const r = await httpProbe(m.target, { timeoutMs, scheme: m.type === 'HTTPS' ? 'https' : 'http' });
     if (!r.reachable) {
       const kind = r.probeStatus ?? 'UNKNOWN';
       return { ok: false, degraded: false, latencyMs: r.latencyMs, probeStatus: kind, detail: `${kind.replace('_', ' ')}: ${r.error || 'Unreachable'}` };
     }
     const statusOk = m.expectedStatusCode ? r.statusCode === m.expectedStatusCode : (r.statusCode ?? 0) < 400;
     if (!statusOk) {
+      const credential = credentialFailureFromResponse(r.statusCode, r.body);
+      if (credential) {
+        return { ok: false, degraded: false, latencyMs: r.latencyMs, statusCode: r.statusCode ?? undefined, probeStatus: 'AUTH_ERROR', detail: credential.detail };
+      }
       return { ok: false, degraded: false, latencyMs: r.latencyMs, statusCode: r.statusCode ?? undefined, probeStatus: 'DOWN', detail: `Unexpected HTTP ${r.statusCode}${m.expectedStatusCode ? ` (expected ${m.expectedStatusCode})` : ''}` };
+    }
+    const credentialOnSuccess = credentialFailureFromResponse(r.statusCode, r.body);
+    if (credentialOnSuccess) {
+      return { ok: false, degraded: false, latencyMs: r.latencyMs, statusCode: r.statusCode ?? undefined, probeStatus: 'AUTH_ERROR', detail: credentialOnSuccess.detail };
     }
     if (m.expectedBodyContains && !r.body.includes(m.expectedBodyContains)) {
       return { ok: false, degraded: false, latencyMs: r.latencyMs, statusCode: r.statusCode ?? undefined, probeStatus: 'DOWN', detail: `Response body does not contain "${m.expectedBodyContains}"` };
@@ -59,27 +80,38 @@ async function executeCheck(m: Monitor): Promise<CheckOutcome> {
 
   if (TCP_TYPES.includes(m.type)) {
     const hp = parseHostPort(m.target);
-    if (!hp) return { ok: false, degraded: false, latencyMs: 0, detail: `Invalid target "${m.target}" — use host:port` };
+    if (!hp) return { ok: false, degraded: false, latencyMs: 0, probeStatus: 'CONNECTION_ERROR', detail: `Invalid target "${m.target}" — use host:port` };
     const r = await tcpProbe(hp.host, hp.port, timeoutMs);
-    if (!r.open) return { ok: false, degraded: false, latencyMs: r.latencyMs, probeStatus: /timed out/i.test(r.error ?? '') ? 'TIMEOUT' : /ENOTFOUND|EAI_AGAIN/.test(r.error ?? '') ? 'DNS_ERROR' : 'CONNECTION_ERROR', detail: `TCP ${hp.host}:${hp.port} closed — ${r.error}` };
+    if (!r.open) {
+      const kind = classifySocketError(r.error ?? '');
+      const why = kind === 'TIMEOUT' ? 'timed out' : kind === 'DNS_ERROR' ? 'name not resolved' : 'connection failed';
+      return { ok: false, degraded: false, latencyMs: r.latencyMs, probeStatus: kind, detail: `TCP ${hp.host}:${hp.port} ${why} — ${r.error}` };
+    }
+    if (m.criticalThresholdMs > 0 && r.latencyMs > m.criticalThresholdMs) {
+      return { ok: false, degraded: false, latencyMs: r.latencyMs, probeStatus: 'DEGRADED', detail: `TCP ${hp.host}:${hp.port} open but too slow: ${r.latencyMs}ms > ${m.criticalThresholdMs}ms critical threshold` };
+    }
     const slow = m.warningThresholdMs > 0 && r.latencyMs > m.warningThresholdMs;
     return { ok: true, degraded: slow, latencyMs: r.latencyMs, probeStatus: slow ? 'DEGRADED' : 'UP', detail: `TCP ${hp.host}:${hp.port} open in ${r.latencyMs}ms` };
   }
 
   if (m.type === 'DNS') {
     const r = await dnsProbe(m.target, timeoutMs);
-    return { ok: r.ok, degraded: false, latencyMs: r.latencyMs, probeStatus: r.ok ? 'UP' : 'DNS_ERROR', detail: r.detail };
+    return { ok: r.ok, degraded: false, latencyMs: r.latencyMs, probeStatus: r.probeStatus, detail: r.detail };
   }
 
   if (m.type === 'SSL') {
     const r = await sslProbe(m.target, timeoutMs);
     if (!r.ok) {
-      const kind: ProbeStatus = /timed out/i.test(r.detail) ? 'TIMEOUT' : /ENOTFOUND|EAI_AGAIN/.test(r.detail) ? 'DNS_ERROR' : /ECONNREFUSED|ECONNRESET|EHOSTUNREACH/.test(r.detail) ? 'CONNECTION_ERROR' : 'TLS_ERROR';
-      return { ok: false, degraded: false, latencyMs: r.latencyMs, probeStatus: kind, detail: r.detail };
+      const socket = classifySocketError(r.detail);
+      const kind: ProbeStatus = socket === 'TIMEOUT' || socket === 'DNS_ERROR'
+        ? socket
+        : /ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH/.test(r.detail) || r.detail === 'Invalid target'
+          ? 'CONNECTION_ERROR'
+          : 'TLS_ERROR';
+      return { ok: false, degraded: false, latencyMs: r.latencyMs, probeStatus: kind, detail: r.detail, daysLeft: r.daysLeft, validTo: r.validTo };
     }
-    if (r.daysLeft !== null && r.daysLeft < 7) return { ok: false, degraded: false, latencyMs: r.latencyMs, probeStatus: 'TLS_ERROR', detail: `Certificate expires in ${r.daysLeft} days` };
     const expiring = r.daysLeft !== null && r.daysLeft < config.sslExpiryWarnDays;
-    return { ok: true, degraded: expiring, latencyMs: r.latencyMs, probeStatus: expiring ? 'DEGRADED' : 'UP', detail: r.detail };
+    return { ok: true, degraded: expiring, latencyMs: r.latencyMs, probeStatus: expiring ? 'DEGRADED' : 'UP', detail: r.detail, daysLeft: r.daysLeft, validTo: r.validTo };
   }
 
   if (INFRA_TYPES.includes(m.type)) {
@@ -101,16 +133,20 @@ async function executeCheck(m: Monitor): Promise<CheckOutcome> {
     if (last === null) {
       const createdAt = monitorCreatedAt.get(m.id) ?? Date.now();
       if (Date.now() - createdAt < graceMs) return { ok: true, degraded: false, latencyMs: 0, detail: 'Waiting for first ping', pending: true };
-      return { ok: false, degraded: false, latencyMs: 0, detail: `No ping received (expected every ${m.intervalSec}s)` };
+      return { ok: false, degraded: false, latencyMs: 0, probeStatus: 'DOWN', detail: `No ping received (expected every ${m.intervalSec}s)` };
     }
-    const ageSec = Math.round((Date.now() - last) / 1000);
-    if (Date.now() - last > graceMs) return { ok: false, degraded: false, latencyMs: 0, detail: `Last ping ${ageSec}s ago (expected every ${m.intervalSec}s)` };
+    const ageMs = Date.now() - last;
+    const ageSec = Math.round(ageMs / 1000);
+    if (ageMs > graceMs) return { ok: false, degraded: false, latencyMs: ageMs, probeStatus: 'DOWN', detail: `Last ping ${ageSec}s ago (expected every ${m.intervalSec}s)` };
     if (m.type === 'DB_REPLICATION' && typeof m.lastValue === 'number') {
       const lagMs = m.lastValue * 1000;
-      if (m.criticalThresholdMs > 0 && lagMs > m.criticalThresholdMs) return { ok: false, degraded: false, latencyMs: lagMs, detail: `Replication lag ${m.lastValue}s exceeds ${m.criticalThresholdMs / 1000}s` };
-      return { ok: true, degraded: m.warningThresholdMs > 0 && lagMs > m.warningThresholdMs, latencyMs: lagMs, detail: `Replication lag ${m.lastValue}s` };
+      const late = m.warningThresholdMs > 0 && lagMs > m.warningThresholdMs;
+      if (m.criticalThresholdMs > 0 && lagMs > m.criticalThresholdMs) return { ok: false, degraded: false, latencyMs: lagMs, probeStatus: 'DOWN', detail: `Replication lag ${m.lastValue}s exceeds ${m.criticalThresholdMs / 1000}s` };
+      return { ok: true, degraded: late, latencyMs: lagMs, probeStatus: late ? 'DEGRADED' : 'UP', detail: `Replication lag ${m.lastValue}s` };
     }
-    return { ok: true, degraded: false, latencyMs: 0, detail: `Last ping ${ageSec}s ago${typeof m.lastValue === 'number' ? ` (value ${m.lastValue})` : ''}` };
+    // Past the expected interval, but still inside the grace window: late, not failed.
+    const late = ageSec > m.intervalSec;
+    return { ok: true, degraded: late, latencyMs: ageMs, probeStatus: late ? 'DEGRADED' : 'UP', detail: `Last ping ${ageSec}s ago${typeof m.lastValue === 'number' ? ` (value ${m.lastValue})` : ''}${late ? ` (late, expected every ${m.intervalSec}s)` : ''}` };
   }
 
   return { ok: false, degraded: false, latencyMs: 0, detail: `Unsupported monitor type ${m.type}` };
@@ -134,6 +170,8 @@ const latencySamples = new Map<string, number[]>();
 const monitorCreatedAt = new Map<string, number>();
 const lastRunAt = new Map<string, number>();
 const inFlight = new Set<string>();
+/** The check currently running per monitor — a second caller (e.g. "Probe now") waits for its real result */
+const inFlightRuns = new Map<string, Promise<Monitor>>();
 
 export function registerNewMonitor(m: Monitor) {
   monitorCreatedAt.set(m.id, Date.now());
@@ -229,6 +267,51 @@ function monitorContext(m: Monitor, detail: string, outcome?: CheckOutcome): Inc
   };
 }
 
+function drFacts(app: Application | undefined): { overallStatus: 'READY' | 'DEGRADED' | 'NOT_READY' | 'UNKNOWN' | null; detail: string } {
+  if (!app) return { overallStatus: null, detail: 'No application linked' };
+  const result = readiness(app);
+  const failing = result.checks.filter(c => c.group !== 'capacity' && (c.status === 'FAIL' || c.status === 'WARNING')).slice(0, 5);
+  const detail = failing.length
+    ? `${result.overall.replaceAll('_', ' ')} — ${failing.map(c => `${c.label}: ${c.detail}`).join('; ')}`
+    : `${result.overall.replaceAll('_', ' ')} (${result.passed}/${result.total} core checks passing)`;
+  return { overallStatus: result.overall, detail };
+}
+
+/** Records probe cadence, confirmation, Cloudflare origin health, DR readiness, and whether escalation is armed. */
+function stampOutage(incident: Incident, app: Application | undefined, probe: {
+  intervalSec: number | null;
+  confirmedFailures: number | null;
+  confirmationThreshold: number | null;
+  cloudflareChecked: boolean;
+  originHealthy: boolean | null;
+  originDetail?: string;
+}): void {
+  const dr = drFacts(app);
+  incident.outage = buildOutageSnapshot({
+    probeIntervalSec: probe.intervalSec,
+    confirmedFailures: probe.confirmedFailures,
+    confirmationThreshold: probe.confirmationThreshold,
+    cloudflareChecked: probe.cloudflareChecked,
+    originHealthy: probe.originHealthy,
+    originDetail: probe.originDetail,
+    drOverall: dr.overallStatus,
+    drDetail: dr.detail,
+  });
+  const policy = db.escalationPolicies.find(p => p.severity === incident.severity);
+  incident.outage.escalationReady = Boolean(policy && policySteps(policy).length > 0 && !incident.acknowledged);
+  if (dr.overallStatus) {
+    incident.timeline.push(timelineEvent('DR Readiness', dr.overallStatus === 'NOT_READY' ? 'WARN' : 'INFO', dr.detail));
+  }
+}
+
+function publishOpenedIncident(incident: Incident): void {
+  db.incidents.unshift(incident);
+  const sent = notifyIncident(incident, 'FIRING');
+  if (incident.outage) incident.outage.notified = sent || Boolean(incident.notificationDeferred);
+  lastNotifiedAt.set(incident.id, Date.now());
+  broadcast('incident_created', incident);
+}
+
 function openIncidentForMonitor(m: Monitor, detail: string, outcome?: CheckOutcome) {
   const fingerprint = `monitor:${m.id}`;
   const existing = findOpenIncident(fingerprint);
@@ -246,13 +329,15 @@ function openIncidentForMonitor(m: Monitor, detail: string, outcome?: CheckOutco
   const context = monitorContext(m, detail, outcome);
   // Correlate with Cloudflare: application DOWN + origin unhealthy is a confirmed outage
   const cfc = context.cloudflare;
+  const credential = outcome?.probeStatus === 'AUTH_ERROR';
+  const originUnhealthy = cfc?.originHealthy === false;
   const correlation = !cfc ? null
-    : cfc.originHealthy === false ? `Cloudflare also reports origin ${cfc.originAddress} UNHEALTHY in pool ${cfc.poolName}${cfc.originFailureReason ? ` (${cfc.originFailureReason})` : ''}`
+    : originUnhealthy ? `Cloudflare also reports origin ${cfc.originAddress} UNHEALTHY in pool ${cfc.poolName}${cfc.originFailureReason ? ` (${cfc.originFailureReason})` : ''}`
       : cfc.originHealthy === true ? `Cloudflare reports origin ${cfc.originAddress} healthy in pool ${cfc.poolName} — failure may be application-level or between this monitor and the edge`
         : 'Cloudflare origin health is not available';
-  const incident: Incident = {
+  const incident = enrichNewIncident({
     id: nextIncidentId(),
-    title: cfc?.originHealthy === false ? `${m.name} is DOWN — Cloudflare origin unhealthy` : `${m.name} is DOWN`,
+    title: outageTitle(m.name, { credential, originUnhealthy }),
     context,
     severity: m.environment === 'PRD' ? 'CRITICAL' : 'HIGH',
     status: 'OPEN',
@@ -268,17 +353,24 @@ function openIncidentForMonitor(m: Monitor, detail: string, outcome?: CheckOutco
     affectedMonitors: [m.id],
     dependentFailures: [],
     timeline: [timelineEvent('Monitor Engine', 'CRITICAL',
-      `${m.name} (${m.type} ${m.target}) confirmed DOWN after ${m.consecutiveFailures} consecutive failures: ${detail}`),
-      ...(correlation ? [timelineEvent('Cloudflare', cfc?.originHealthy === false ? 'CRITICAL' : 'INFO', correlation)] : [])],
+      `${m.name} (${m.type} ${m.target}) confirmed DOWN after ${m.consecutiveFailures} consecutive failures (interval ${m.intervalSec}s): ${detail}`),
+      ...(correlation ? [timelineEvent('Cloudflare', originUnhealthy ? 'CRITICAL' : 'INFO', correlation)] : [])],
     recoveryStatus: 'Awaiting recovery',
     runbookId: m.runbookId,
     notes: [],
-  };
-  db.incidents.unshift(incident);
-  lastNotifiedAt.set(incident.id, Date.now());
-  broadcast('incident_created', incident);
+    fixSteps: [],
+  }, { source: 'Monitor Engine', applySuggestion: true });
+  if (credential) incident.rootCauseCategory = 'EXPIRED_CREDENTIAL';
+  stampOutage(incident, app, {
+    intervalSec: m.intervalSec,
+    confirmedFailures: m.consecutiveFailures,
+    confirmationThreshold: m.failureConfirmationThreshold,
+    cloudflareChecked: Boolean(cfc),
+    originHealthy: cfc ? cfc.originHealthy : null,
+    originDetail: correlation ?? undefined,
+  });
+  publishOpenedIncident(incident);
   audit('Monitor Engine', 'INCIDENT_OPENED', 'INCIDENT', incident.id, `${incident.title}: ${detail}`);
-  notifyIncident(incident, 'FIRING');
 }
 
 /** Keeps "latest detected" facts on an open incident current while the failure continues. */
@@ -290,6 +382,35 @@ function refreshIncidentContext(m: Monitor, outcome: CheckOutcome) {
 }
 
 /** Closes the open incident of a monitor that was reconfigured, paused or deleted (no recovery was observed). */
+/**
+ * Closes every open incident whose fingerprint references one of these ids (a deleted server,
+ * application or monitor) — nothing would ever resolve them otherwise, and reminders would page forever.
+ */
+export function closeIncidentsReferencing(ids: string[], operator: string, reason: string): number {
+  const set = new Set(ids.filter(Boolean));
+  let n = 0;
+  for (const inc of db.incidents) {
+    if (inc.status === 'RESOLVED' || inc.status === 'CLOSED' || !inc.fingerprint) continue;
+    if (!inc.fingerprint.split(':').some(part => set.has(part))) continue;
+    const now = new Date();
+    inc.status = 'CLOSED';
+    inc.resolvedAt = now.toISOString();
+    inc.durationMinutes = Math.max(0, Math.round((now.getTime() - Date.parse(inc.startedAt)) / 60000));
+    inc.recoveryStatus = `Closed without observed recovery: ${reason}`;
+    inc.timeline.push(timelineEvent(operator, 'INFO', inc.recoveryStatus));
+    lastNotifiedAt.delete(inc.id);
+    broadcast('incident_update', inc);
+    audit(operator, 'INCIDENT_CLOSED', 'INCIDENT', inc.id, `${inc.title}: ${reason}`);
+    n++;
+  }
+  if (n) persist();
+  return n;
+}
+
+/** Drops the in-memory state of a deleted monitor / server (latency samples, schedule, rollup accumulator) */
+export function forgetMonitor(id: string) { latencySamples.delete(id); monitorCreatedAt.delete(id); lastRunAt.delete(id); }
+export function forgetServer(id: string) { minuteAcc.delete(id); }
+
 export function closeMonitorIncident(m: Monitor, operator: string, reason: string) {
   const incident = findOpenIncident(`monitor:${m.id}`);
   if (!incident) return;
@@ -343,7 +464,7 @@ function evaluateOriginHealth(state: LoadBalancerState) {
       const now = new Date().toISOString();
       if (healthy === false && !open) {
         const appMonitorDown = db.monitors.some(m => m.enabled && m.applicationId === app.id && m.environment === pool.role && HTTP_TYPES.includes(m.type) && m.status === 'CRITICAL');
-        const incident: Incident = {
+        const incident = enrichNewIncident({
           id: nextIncidentId(),
           title: `${app.name} ${pool.role === 'PRD' ? 'Production' : 'DR'} origin ${o.address} unhealthy in Cloudflare pool ${pool.name || pool.id}`,
           severity: pool.role === 'PRD' ? (appMonitorDown ? 'CRITICAL' : 'HIGH') : 'WARNING',
@@ -362,6 +483,7 @@ function evaluateOriginHealth(state: LoadBalancerState) {
           timeline: [timelineEvent('Cloudflare', 'CRITICAL', `Origin ${o.address} unhealthy${failure ? ` at PoP ${failure.pop}` : ''}: ${reason}${failure?.responseCode ? ` (HTTP ${failure.responseCode})` : ''}`)],
           recoveryStatus: 'Awaiting recovery',
           notes: [],
+          fixSteps: [],
           context: {
             application: app.name,
             environment: pool.role,
@@ -380,12 +502,17 @@ function evaluateOriginHealth(state: LoadBalancerState) {
               originAddress: o.address, originHealthy: false, originFailureReason: reason, checkedAt: pool.healthFetchedAt ?? pool.listFetchedAt,
             },
           },
-        };
-        db.incidents.unshift(incident);
-        lastNotifiedAt.set(incident.id, Date.now());
-        broadcast('incident_created', incident);
+        }, { source: 'Cloudflare', applySuggestion: true });
+        stampOutage(incident, app, {
+          intervalSec: null,
+          confirmedFailures: null,
+          confirmationThreshold: null,
+          cloudflareChecked: true,
+          originHealthy: false,
+          originDetail: `Origin ${o.address} unhealthy in pool ${pool.name || pool.id}: ${reason}`,
+        });
+        publishOpenedIncident(incident);
         audit('Cloudflare Monitor', 'INCIDENT_OPENED', 'INCIDENT', incident.id, `${incident.title}: ${reason}`);
-        notifyIncident(incident, 'FIRING');
         changed = true;
       } else if (healthy === false && open?.context) {
         open.context.latestDetectedAt = now;
@@ -405,11 +532,30 @@ function evaluateOriginHealth(state: LoadBalancerState) {
         changed = true;
       }
     }
+    // An origin that was disabled or removed from the pool will never report healthy again:
+    // close its incident instead of paging forever
+    const prefix = `cf-origin:${pool.id}:`;
+    for (const inc of db.incidents) {
+      if (inc.status === 'RESOLVED' || inc.status === 'CLOSED' || !inc.fingerprint?.startsWith(prefix)) continue;
+      const address = inc.fingerprint.slice(prefix.length);
+      const origin = pool.origins.find(x => x.address === address);
+      if (origin && origin.enabled !== false) continue;
+      const now = new Date();
+      inc.status = 'CLOSED';
+      inc.resolvedAt = now.toISOString();
+      inc.durationMinutes = Math.max(0, Math.round((now.getTime() - Date.parse(inc.startedAt)) / 60000));
+      inc.recoveryStatus = `Closed: origin ${address} was ${origin ? 'disabled' : 'removed'} in Cloudflare pool ${pool.name || pool.id}`;
+      inc.timeline.push(timelineEvent('Cloudflare', 'INFO', inc.recoveryStatus));
+      lastNotifiedAt.delete(inc.id);
+      broadcast('incident_update', inc);
+      audit('Cloudflare Monitor', 'INCIDENT_CLOSED', 'INCIDENT', inc.id, inc.recoveryStatus);
+      changed = true;
+    }
   }
   if (changed) persist();
 }
 
-function applyOutcome(m: Monitor, outcome: CheckOutcome) {
+export function applyOutcome(m: Monitor, outcome: CheckOutcome) {
   const now = new Date().toISOString();
   const prev = m.status;
   const maintenance = isInMaintenance(m);
@@ -424,6 +570,10 @@ function applyOutcome(m: Monitor, outcome: CheckOutcome) {
   const probeStatus: ProbeStatus = outcome.probeStatus ?? (outcome.ok ? (outcome.degraded ? 'DEGRADED' : 'UP') : 'DOWN');
   m.lastProbeStatus = probeStatus;
   m.lastStatusCode = outcome.statusCode ?? null;
+  if (m.type === 'SSL') {
+    m.certificateDaysLeft = outcome.daysLeft ?? null;
+    m.certificateValidTo = outcome.validTo ?? null;
+  }
   recordCheck({
     t: now, monitorId: m.id, applicationId: m.applicationId, environment: m.environment, target: m.target,
     ok: outcome.ok, probeStatus, statusCode: outcome.statusCode ?? null, latencyMs: outcome.latencyMs, reason: outcome.detail,
@@ -449,10 +599,12 @@ function applyOutcome(m: Monitor, outcome: CheckOutcome) {
     m.lastFailure = now;
     m.responseTimeMs = outcome.latencyMs;
     const confirmed = m.consecutiveFailures >= m.failureConfirmationThreshold;
-    m.status = maintenance ? 'MAINTENANCE' : confirmed ? 'CRITICAL' : prev === 'UNKNOWN' ? 'UNKNOWN' : 'WARNING';
+    // A failure while recovering keeps the outage open (no resolve → re-open flapping)
+    m.status = maintenance ? 'MAINTENANCE' : confirmed || prev === 'CRITICAL' ? 'CRITICAL' : prev === 'UNKNOWN' ? 'UNKNOWN' : 'WARNING';
   }
 
-  recordBucket(m.id, outcome.ok, outcome.latencyMs);
+  // Planned maintenance does not count against uptime / SLA
+  if (!maintenance) recordBucket(m.id, outcome.ok, outcome.latencyMs);
   m.uptimePercent = uptimeFor([m.id], 24 * 30) ?? 100;
   m.history = [{
     timestamp: now,
@@ -463,22 +615,42 @@ function applyOutcome(m: Monitor, outcome: CheckOutcome) {
     probeStatus,
   } as Monitor['history'][number], ...m.history].slice(0, 60);
 
+  // Flapping: alternating pass/fail never reaches the confirmation threshold, so it would stay
+  // HEALTHY/WARNING forever. Flag it (WARNING at least); evaluateAlerts raises a flapping alert.
+  const flap = detectFlapping(m.history.filter(x => x.status !== 'UNKNOWN').map(x => x.status !== 'CRITICAL'), m.flapping === true);
+  if (flap.flapping !== (m.flapping === true)) {
+    log.warn('engine', `monitor ${m.name} ${flap.flapping ? 'started' : 'stopped'} flapping (${flap.transitions} changes in ${flap.window} checks)`);
+  }
+  m.flapping = flap.flapping;
+  m.flapTransitions = flap.transitions;
+  if (m.flapping && m.status === 'HEALTHY') m.status = 'WARNING';
+
   if (!maintenance) {
     if (m.status === 'CRITICAL' && prev !== 'CRITICAL') openIncidentForMonitor(m, outcome.detail, outcome);
     else if (m.status === 'CRITICAL' && !outcome.ok) refreshIncidentContext(m, outcome);
-    if (prev === 'CRITICAL' && m.status !== 'CRITICAL') resolveIncidentForMonitor(m);
+    // Confirmed recovery — also after a maintenance window that started while the incident was open
+    if (m.status !== 'CRITICAL' && outcome.ok && (prev === 'CRITICAL' || findOpenIncident(`monitor:${m.id}`))) resolveIncidentForMonitor(m);
   }
 }
 
-export async function runMonitorNow(m: Monitor): Promise<Monitor> {
-  if (inFlight.has(m.id)) return m;
+export function runMonitorNow(m: Monitor): Promise<Monitor> {
+  const running = inFlightRuns.get(m.id);
+  if (running) return running;
+  const run = runMonitorOnce(m).finally(() => inFlightRuns.delete(m.id));
+  inFlightRuns.set(m.id, run);
+  return run;
+}
+
+async function runMonitorOnce(m: Monitor): Promise<Monitor> {
   inFlight.add(m.id);
   lastRunAt.set(m.id, Date.now());
   try {
     const outcome = await checkWithRetries(m);
-    // The monitor may have been deleted or replaced while the check was running
+    // The monitor may have been deleted, paused or re-targeted while the check was running:
+    // a result for the old configuration must not change it (no incident on a paused monitor)
     const current = db.monitors.find(x => x.id === m.id);
     if (!current) return m;
+    if (!current.enabled || current.target !== m.target || current.type !== m.type) return current;
     applyOutcome(current, outcome);
     persist();
     broadcast('monitor_update', current);
@@ -493,7 +665,19 @@ export async function runMonitorNow(m: Monitor): Promise<Monitor> {
   }
 }
 
+/** Liveness of the engine loops, reported by /api/health/ready (a stalled scheduler means monitoring stopped) */
+let lastSchedulerTickAt = 0;
+let lastRecomputeAt = 0;
+export function engineLiveness(now = Date.now()) {
+  return {
+    started: engineStarted,
+    schedulerAgeMs: lastSchedulerTickAt ? now - lastSchedulerTickAt : null,
+    recomputeAgeMs: lastRecomputeAt ? now - lastRecomputeAt : null,
+  };
+}
+
 function schedulerTick() {
+  lastSchedulerTickAt = Date.now();
   const now = Date.now();
   for (const m of db.monitors) {
     if (inFlight.size >= config.monitorConcurrency) break;
@@ -507,7 +691,7 @@ function schedulerTick() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Agent telemetry
 // ─────────────────────────────────────────────────────────────────────────────
-export interface AgentReport {
+export interface AgentReport extends ExtendedAgentReport {
   agentVersion?: string;
   hostname?: string;
   os?: string;
@@ -529,7 +713,8 @@ export interface AgentReport {
   diskUsedGb?: number;
   diskFreeGb?: number;
   processes?: Array<{ pid: number; name: string; user?: string; cpu?: number; memMb?: number; status?: string }>;
-  services?: Array<{ name: string; status: string; pid?: number; memoryMb?: number; cpuPercent?: number; since?: string; version?: string }>;
+  services?: Array<{ name: string; status: string; pid?: number; memoryMb?: number; cpuPercent?: number; since?: string; version?: string;
+    /** Agent >= 3.3 */ activeState?: string; subState?: string | null; failed?: boolean; restartCount?: number | null; result?: string | null }>;
   logs?: Array<{ ts?: string; level?: string; service?: string; message: string }>;
   /** Agent >= 3.2 */
   agentStartedAt?: string;
@@ -544,7 +729,12 @@ const num = (v: unknown, min: number, max: number): number => {
 };
 const text = (v: unknown, max: number): string => (typeof v === 'string' ? v.slice(0, max) : '');
 
-const minuteAcc = new Map<string, { minute: number; n: number; sum: ServerMetricPoint }>();
+const OPT_KEYS = ['swap', 'iowait', 'steal', 'diskRead', 'diskWrite', 'diskUtil'] as const;
+type OptKey = typeof OPT_KEYS[number];
+const addOpt = (opt: Record<OptKey, { sum: number; n: number }>, p: ServerMetricPoint) => {
+  for (const k of OPT_KEYS) { const v = p[k]; if (typeof v === 'number' && Number.isFinite(v)) { opt[k].sum += v; opt[k].n += 1; } }
+};
+const minuteAcc = new Map<string, { minute: number; n: number; sum: ServerMetricPoint; opt: Record<OptKey, { sum: number; n: number }> }>();
 
 function recordMetric(serverId: string, p: ServerMetricPoint) {
   const live = (liveMetrics[serverId] ??= []);
@@ -557,17 +747,24 @@ function recordMetric(serverId: string, p: ServerMetricPoint) {
     if (acc && acc.n > 0) {
       const series = (minuteMetrics[serverId] ??= []);
       const r = (x: number) => Math.round((x / acc.n) * 10) / 10;
-      const point = { t: new Date(acc.minute * 60000).toISOString(), cpu: r(acc.sum.cpu), ram: r(acc.sum.ram), disk: r(acc.sum.disk), load1: r(acc.sum.load1), netIn: r(acc.sum.netIn), netOut: r(acc.sum.netOut) };
+      const ro = (k: OptKey) => (acc.opt[k].n ? Math.round((acc.opt[k].sum / acc.opt[k].n) * 10) / 10 : null);
+      const point: ServerMetricPoint = {
+        t: new Date(acc.minute * 60000).toISOString(), cpu: r(acc.sum.cpu), ram: r(acc.sum.ram), disk: r(acc.sum.disk), load1: r(acc.sum.load1), netIn: r(acc.sum.netIn), netOut: r(acc.sum.netOut),
+        swap: ro('swap'), iowait: ro('iowait'), steal: ro('steal'), diskRead: ro('diskRead'), diskWrite: ro('diskWrite'), diskUtil: ro('diskUtil'),
+      };
       series.push(point);
       queueMetric(serverId, point);
       const cutoff = Date.now() - config.metricsRetentionHours * 3600 * 1000;
       while (series.length && Date.parse(series[0].t) < cutoff) series.shift();
     }
-    minuteAcc.set(serverId, { minute, n: 1, sum: { ...p } });
+    const opt = Object.fromEntries(OPT_KEYS.map(k => [k, { sum: 0, n: 0 }])) as Record<OptKey, { sum: number; n: number }>;
+    addOpt(opt, p);
+    minuteAcc.set(serverId, { minute, n: 1, sum: { ...p }, opt });
   } else {
     acc.n += 1;
     acc.sum.cpu += p.cpu; acc.sum.ram += p.ram; acc.sum.disk += p.disk;
     acc.sum.load1 += p.load1; acc.sum.netIn += p.netIn; acc.sum.netOut += p.netOut;
+    addOpt(acc.opt, p);
   }
 }
 
@@ -591,6 +788,10 @@ function parseDatabaseReport(raw: Record<string, unknown>, observedAt: string): 
     connections: n(raw.connections, 1e6),
     maxConnections: n(raw.maxConnections, 1e6),
     longRunningQueries: n(raw.longRunningQueries, 1e6),
+    connectionUsagePercent: (() => {
+      const c = n(raw.connections, 1e6), m = n(raw.maxConnections, 1e6);
+      return c !== null && m ? Math.round((c / m) * 1000) / 10 : null;
+    })(),
     replication: rep0 && typeof rep0 === 'object' ? {
       role, state, lagSec: n(rep0.lagSec, 1e9),
       lastSuccessAt: typeof rep0.lastSuccessAt === 'string' && !Number.isNaN(Date.parse(rep0.lastSuccessAt)) ? new Date(rep0.lastSuccessAt).toISOString() : null,
@@ -636,13 +837,28 @@ export function ingestAgentReport(srv: ServerRecord, r: AgentReport, meta: { sou
     srv.agentStartedAt = started;
   }
   if (Array.isArray(r.errors)) srv.agentErrors = r.errors.slice(0, 20).map(e => text(e, 300)).filter(Boolean);
-  if (Array.isArray(r.databases)) srv.databases = r.databases.slice(0, 5).map(d => parseDatabaseReport(d, observedAt)).filter((d): d is DatabaseReport => d !== null);
+  if (Array.isArray(r.databases)) {
+    const previous = srv.databases ?? [];
+    srv.databases = r.databases.slice(0, 5).map(d => parseDatabaseReport(d, observedAt)).filter((d): d is DatabaseReport => d !== null).map(d => {
+      const prev = previous.find(p => p.engine === d.engine && p.name === d.name);
+      return {
+        ...d,
+        lastSuccessAt: d.available ? d.observedAt : (prev?.lastSuccessAt ?? null),
+        consecutiveFailures: d.available ? 0 : (prev?.consecutiveFailures ?? 0) + 1,
+      };
+    });
+  }
   if (meta.sourceIp) {
     const ip = meta.sourceIp.replace(/^::ffff:/, '');
     if (srv.agentSourceIp !== ip && ip !== srv.ip) {
       audit('Telemetry Agent', 'AGENT_SOURCE_IP_MISMATCH', 'INFRASTRUCTURE', srv.id, `Agent for ${srv.hostname} (${srv.ip}) reported from ${ip}`);
     }
     srv.agentSourceIp = ip;
+  }
+  // Real heartbeat interval: gap since the previous accepted report (ignored after an outage / restart)
+  if (srv.lastSeen) {
+    const gap = (Date.parse(now) - Date.parse(srv.lastSeen)) / 1000;
+    if (gap > 0 && gap <= config.telemetryStaleSec * 10) srv.reportIntervalSec = Math.round(gap * 10) / 10;
   }
   srv.lastSeen = now;
   if (r.agentVersion) srv.agentVersion = text(r.agentVersion, 32);
@@ -651,6 +867,7 @@ export function ingestAgentReport(srv: ServerRecord, r: AgentReport, meta: { sou
   if (r.ramTotalMb) srv.ramGb = Math.round(num(r.ramTotalMb, 0, 1e7) / 102.4) / 10;
   if (r.diskTotalGb) srv.diskGb = Math.round(num(r.diskTotalGb, 0, 1e7));
   if (r.uptimeSec !== undefined) srv.uptimeDays = Math.floor(num(r.uptimeSec, 0, 1e10) / 86400);
+  applyExtendedReport(srv, r, observedAt, Date.parse(now));
 
   if (Array.isArray(r.processes)) {
     srv.processes = r.processes.slice(0, 25).map((p): VpsProcess => ({
@@ -663,6 +880,7 @@ export function ingestAgentReport(srv: ServerRecord, r: AgentReport, meta: { sou
     }));
   }
   if (Array.isArray(r.services)) {
+    srv.servicesObservedAt = observedAt;
     srv.services = r.services.slice(0, 50).map((s): VpsService => ({
       name: text(s.name, 100),
       status: (['active', 'inactive', 'failed', 'restarting'] as const).includes(s.status as VpsService['status']) ? s.status as VpsService['status'] : 'inactive',
@@ -671,6 +889,11 @@ export function ingestAgentReport(srv: ServerRecord, r: AgentReport, meta: { sou
       memoryMb: Math.round(num(s.memoryMb, 0, 1e7)),
       cpuPercent: Math.round(num(s.cpuPercent, 0, 10000) * 10) / 10,
       lastRestart: text(s.since, 64),
+      activeState: s.activeState === undefined ? undefined : text(s.activeState, 32) || null,
+      subState: s.subState === undefined ? undefined : text(s.subState, 32) || null,
+      failed: typeof s.failed === 'boolean' ? s.failed : s.status === 'failed',
+      restartCount: typeof s.restartCount === 'number' && Number.isInteger(s.restartCount) && s.restartCount >= 0 ? s.restartCount : null,
+      result: s.result === undefined ? undefined : text(s.result, 32) || null,
     }));
   }
   if (Array.isArray(r.logs) && r.logs.length) {
@@ -692,18 +915,39 @@ export function ingestAgentReport(srv: ServerRecord, r: AgentReport, meta: { sou
     load1: srv.telemetry.loadAvg[0],
     netIn: srv.telemetry.networkInKbps,
     netOut: srv.telemetry.networkOutKbps,
+    swap: srv.telemetry.swapPercent ?? null,
+    iowait: srv.telemetry.cpuIowaitPercent ?? null,
+    steal: srv.telemetry.cpuStealPercent ?? null,
+    diskRead: srv.telemetry.diskReadBytesPerSec ?? null,
+    diskWrite: srv.telemetry.diskWriteBytesPerSec ?? null,
+    diskUtil: srv.telemetry.diskUtilPercent ?? null,
   });
 
   const wasDisconnected = srv.agentStatus !== 'CONNECTED';
+  srv.lastIngestError = null;
   recomputeServer(srv);
   if (wasDisconnected) audit('Telemetry Agent', 'AGENT_CONNECTED', 'INFRASTRUCTURE', srv.id, `Agent on ${srv.hostname} (${srv.ip}) is reporting`);
   persist();
   broadcast('server_update', publicServer(srv));
 }
 
+/** Server as returned by the API: never the agent token; plus agent health, health summary and warnings computed now. */
 export function publicServer(s: ServerRecord) {
   const { agentToken: _t, ...rest } = s;
-  return rest;
+  const { health, warnings } = serverHealth(s);
+  const usedBy = db.applications
+    .filter(a => a.prdServerId === s.id || a.drServerId === s.id)
+    .map(a => ({ id: a.id, name: a.name, codeName: a.codeName }));
+  return { ...rest, agent: agentHealth(s), health, warnings, vps: explainVps(s), usedBy };
+}
+
+/** A report reached this server and was refused. Does not update lastSeen or telemetry. */
+export function noteIngestRejection(srv: ServerRecord, reason: string): void {
+  const at = new Date().toISOString();
+  if (srv.lastIngestError?.reason === reason && Date.now() - Date.parse(srv.lastIngestError.at) < 60_000) return;
+  srv.lastIngestError = { at, reason };
+  persist();
+  broadcast('server_update', publicServer(srv));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -714,19 +958,8 @@ function recomputeServer(srv: ServerRecord): boolean {
   const age = srv.lastSeen ? (Date.now() - Date.parse(srv.lastSeen)) / 1000 : Infinity;
   srv.agentStatus = age <= config.telemetryStaleSec ? 'CONNECTED' : age <= config.telemetryStaleSec * 10 ? 'STALE' : 'DISCONNECTED';
 
-  const monitorStatuses = db.monitors.filter(m => m.enabled && m.serverId === srv.id).map(m => m.status);
-  let status = worst(monitorStatuses.filter(s => s !== 'UNKNOWN'), 'UNKNOWN');
-
-  if (srv.agentStatus === 'CONNECTED') {
-    const t = srv.telemetry;
-    const hot = Math.max(t.cpuPercent, t.ramPercent, t.diskPercent);
-    const resourceStatus: OperationalStatus = hot >= 95 ? 'CRITICAL' : hot >= 85 ? 'WARNING' : 'HEALTHY';
-    status = status === 'UNKNOWN' ? resourceStatus : worst([status, resourceStatus === 'CRITICAL' ? 'WARNING' : resourceStatus]);
-  } else if (srv.lastSeen) {
-    // The agent used to report and stopped: treat as degraded visibility
-    status = status === 'UNKNOWN' || status === 'HEALTHY' ? 'STALE' : status;
-  }
-  srv.status = status;
+  // VPS status follows the agent only. HTTP monitors and Cloudflare routing do not change it.
+  srv.status = vpsOperationalStatus(srv);
   return before !== `${srv.status}|${srv.agentStatus}`;
 }
 
@@ -740,6 +973,54 @@ const DEP_TYPE: Partial<Record<Monitor['type'], AppDependency['type']>> = {
   DB_CONN: 'DATABASE', DB_REPLICATION: 'DATABASE', WORKER_HEARTBEAT: 'WORKER', CRON_HEARTBEAT: 'WORKER', BACKUP_FRESHNESS: 'STORAGE',
 };
 
+/** Status of a register component that has its own evidence. null means there is no check to use. */
+function evidenceFor(componentId: string, selfAppId: string): { status: OperationalStatus; lastChecked: string } | null {
+  const component = db.registry.find(c => c.id === componentId);
+  if (!component) return null;
+  if (component.kind === 'SERVER' && component.serverId) {
+    const srv = db.servers.find(s => s.id === component.serverId);
+    if (!srv?.lastSeen) return null;
+    const status = vpsOperationalStatus(srv);
+    return status === 'UNKNOWN' ? null : { status, lastChecked: srv.lastSeen };
+  }
+  const otherApp = component.applicationId && component.applicationId !== selfAppId ? component.applicationId : null;
+  if (!otherApp) return null;
+  const checked = db.monitors.filter(m => m.enabled && m.applicationId === otherApp && m.lastCheck);
+  if (checked.length === 0) return null;
+  const known = checked.map(m => m.status).filter(s => s !== 'UNKNOWN');
+  if (known.length === 0) return null;
+  const lastChecked = checked.map(m => m.lastCheck).sort().at(-1) ?? '';
+  return { status: worst(known), lastChecked };
+}
+
+function registrySignals(app: Application): Array<{ id: string; name: string; hard: boolean; status: OperationalStatus; type: AppDependency['type']; lastChecked: string; target: string }> {
+  const roots = db.registry.filter(c => c.applicationId === app.id && (c.kind === 'APPLICATION' || c.kind === 'BUSINESS_FEATURE'));
+  if (roots.length === 0) return [];
+  const rootIds = new Set(roots.map(c => c.id));
+  const out: Array<{ id: string; name: string; hard: boolean; status: OperationalStatus; type: AppDependency['type']; lastChecked: string; target: string }> = [];
+  for (const link of db.dependencyLinks) {
+    if (!rootIds.has(link.fromId)) continue;
+    // A soft link that names a feature stops that feature only. It does not change the application status.
+    if (link.type === 'SOFT' && (link.featureId || db.registry.find(c => c.id === link.fromId)?.kind === 'BUSINESS_FEATURE')) continue;
+    const target = db.registry.find(c => c.id === link.toId);
+    // The application's own PRD or DR server is hosting. It must not change application status.
+    if (target?.kind === 'SERVER' && target.serverId && (target.serverId === app.prdServerId || target.serverId === app.drServerId)) continue;
+    const found = evidenceFor(link.toId, app.id);
+    if (!found) continue;
+    const type: AppDependency['type'] = target?.kind === 'DATABASE' ? 'DATABASE' : target?.kind === 'STORAGE' ? 'STORAGE' : 'EXTERNAL_API';
+    out.push({
+      id: link.id,
+      name: `${target?.name ?? 'Dependency'} (${link.type})`,
+      hard: link.type === 'HARD',
+      status: found.status,
+      type,
+      lastChecked: found.lastChecked,
+      target: target?.kind ?? 'dependency',
+    });
+  }
+  return out;
+}
+
 function recomputeApplication(app: Application): boolean {
   const before = JSON.stringify([app.status, app.uptime24h, app.p95Ms, app.dependencies.length, app.currentReplicationLagSec, app.recentDeploymentVersion]);
   const activeEnv = app.failoverState === 'DR_ACTIVE' ? 'DR' : 'PRD';
@@ -747,12 +1028,16 @@ function recomputeApplication(app: Application): boolean {
   const active = appMonitors.filter(m => m.environment === activeEnv);
   const activeIds = active.map(m => m.id);
 
-  if (active.length > 0) {
-    app.status = worst(active.map(m => m.status).filter(s => s !== 'UNKNOWN'), 'UNKNOWN');
-  } else {
-    const srv = db.servers.find(s => s.id === (activeEnv === 'DR' ? app.drServerId : app.prdServerId));
-    app.status = srv?.status ?? 'UNKNOWN';
-  }
+  const monitorStatus = active.length > 0
+    ? worst(active.map(m => m.status).filter(s => s !== 'UNKNOWN'), 'UNKNOWN')
+    : 'UNKNOWN';
+  const linked = registrySignals(app);
+  // A HARD dependency with a real check can take the application down. A SOFT one can only degrade it.
+  // A dependency with no check is omitted, so a register row alone never looks healthy or failed.
+  const hard = linked.filter(s => s.hard && s.status !== 'HEALTHY' && s.status !== 'UNKNOWN').map(s => s.status);
+  const soft = linked.filter(s => !s.hard && (s.status === 'CRITICAL' || s.status === 'WARNING' || s.status === 'STALE')).map(() => 'WARNING' as const);
+  // A healthy dependency does not make an unmonitored application look up. It can only worsen a status.
+  app.status = worst([monitorStatus, ...hard, ...soft].filter(s => s !== 'UNKNOWN'), 'UNKNOWN');
   if (app.failoverState === 'FAILING_OVER') app.status = worst([app.status, 'WARNING']);
 
   app.uptime24h = uptimeFor(activeIds, 24);
@@ -769,15 +1054,26 @@ function recomputeApplication(app: Application): boolean {
   const repl = appMonitors.find(m => m.type === 'DB_REPLICATION' && typeof m.lastValue === 'number');
   app.currentReplicationLagSec = repl ? (repl.lastValue as number) : null;
 
-  app.dependencies = appMonitors.map(m => ({
-    id: m.id,
-    name: `${m.name} [${m.environment}]`,
-    type: DEP_TYPE[m.type] ?? 'EXTERNAL_API',
-    status: m.status,
-    latencyMs: m.responseTimeMs,
-    lastChecked: m.lastCheck,
-    target: m.target,
-  }));
+  app.dependencies = [
+    ...appMonitors.map(m => ({
+      id: m.id,
+      name: `${m.name} [${m.environment}]`,
+      type: DEP_TYPE[m.type] ?? 'EXTERNAL_API' as AppDependency['type'],
+      status: m.status,
+      latencyMs: m.responseTimeMs,
+      lastChecked: m.lastCheck,
+      target: m.target,
+    })),
+    ...linked.map(s => ({
+      id: s.id,
+      name: s.name,
+      type: s.type,
+      status: s.status,
+      latencyMs: 0,
+      lastChecked: s.lastChecked,
+      target: s.target,
+    })),
+  ];
   const checks = appMonitors.map(m => m.lastCheck).filter(Boolean).sort();
   if (checks.length) app.lastChecked = checks[checks.length - 1];
 
@@ -810,26 +1106,85 @@ export function recomputeDerived() {
   for (const srv of db.servers) if (recomputeServer(srv)) serversChanged = true;
   let appsChanged = false;
   for (const app of db.applications) if (recomputeApplication(app)) appsChanged = true;
-  if (updateMaintenanceStatuses()) persist();
+  const maintenanceChanged = updateMaintenanceStatuses();
+  if (maintenanceChanged || serversChanged || appsChanged) persist();
   if (serversChanged) broadcast('servers_changed', null);
   if (appsChanged) broadcast('applications_changed', null);
 }
 
-function updateIncidentDurations() {
+const engineProcessStart = Date.now();
+/** Runs every 5 s: live durations, deferred first notifications, escalation, reminders (exported for tests) */
+export function updateIncidentDurations() {
   const now = Date.now();
+  const open = new Set<string>();
+  // Sending (delayed first pages, escalation steps, reminders) only on the process holding the lock
+  const worker = isNotificationWorker();
+  let adviceDirty = false;
   for (const inc of db.incidents) {
-    if (inc.status === 'RESOLVED' || inc.status === 'CLOSED') continue;
+    const stillOpen = inc.status !== 'RESOLVED' && inc.status !== 'CLOSED';
+    if (refreshIncidentAdvice(inc, { refreshCause: stillOpen })) {
+      adviceDirty = true;
+      broadcast('incident_update', inc);
+    }
+    // A notification held by quiet hours goes out once they are over (also for incidents resolved meanwhile)
+    if (inc.quietHeld && worker) {
+      const qp = db.escalationPolicies.find(p => p.severity === inc.severity)?.quietHours;
+      if (!isQuietTime(new Date(now), qp)) {
+        const held = inc.quietHeld;
+        inc.quietHeld = undefined;
+        persist();
+        const since = new Date(held.since).toISOString().slice(11, 16);
+        notifyIncident(inc, held.status, [held.extra, `Held during quiet hours (since ${since} UTC)`].filter(Boolean).join('\n'), { quietRelease: true });
+      }
+    }
+    if (inc.status === 'RESOLVED' || inc.status === 'CLOSED') {
+      if (inc.escalation?.nextAt) stopEscalation(inc, 'resolved');
+      continue;
+    }
+    open.add(inc.id);
     inc.durationMinutes = Math.max(0, Math.round((now - Date.parse(inc.startedAt)) / 60000));
-    // Repeat notification for unacknowledged incidents according to the escalation policy
+    // No reminders while the affected monitor is in a maintenance window
+    const monId = inc.fingerprint?.startsWith('monitor:') ? inc.fingerprint.split(':')[1] : null;
+    if (monId && db.monitors.find(x => x.id === monId)?.activeMaintenance) continue;
     const policy = db.escalationPolicies.find(p => p.severity === inc.severity);
-    if (policy && !inc.acknowledged && policy.repeatIntervalMin > 0) {
-      const last = lastNotifiedAt.get(inc.id) ?? Date.parse(inc.startedAt);
+    const ageMs = now - Date.parse(inc.startedAt);
+    // First notification held back by the policy's initial delay: send it once the delay is over.
+    // Acknowledged meanwhile → somebody is on it, nobody is paged. No reminders / escalation before it.
+    if (inc.notificationDeferred) {
+      if (inc.acknowledged) {
+        inc.notificationDeferred = false;
+        inc.timeline.push(timelineEvent('Escalation Policy', 'INFO', 'Acknowledged within the notification delay — nobody was paged'));
+        persist();
+      } else if (worker && (!policy || ageMs >= policy.initialDelayMin * 60000)) {
+        lastNotifiedAt.set(inc.id, now);
+        notifyIncident(inc, 'FIRING', undefined, { afterDelay: true });
+      }
+      continue;
+    }
+    // The automatic-alert test sends only its first notification. It is not escalated or reminded.
+    if (isMockIncident(inc)) continue;
+    if (inc.acknowledged) { if (inc.escalation?.nextAt) stopEscalation(inc, 'acknowledged'); continue; }
+    if (!policy || !worker) continue;
+    // Quiet hours (non-critical): escalation steps and reminders wait until they are over
+    if (policy.quietHours && !NEVER_QUIET.includes(inc.severity) && isQuietTime(new Date(now), policy.quietHours)) continue;
+    // Multi-step escalation: the next step runs once its time has come (the counter is durable, so a
+    // restart never repeats a step). Incidents escalated before steps existed count as one step done.
+    const steps = policySteps(policy);
+    const done = inc.escalation?.stepsDone ?? (inc.escalatedAt ? 1 : 0);
+    const next = steps[done];
+    if (next && ageMs >= next.afterMin * 60000) escalateStep(inc, steps, done);
+    // Repeat notification for unacknowledged incidents according to the escalation policy
+    if (policy.repeatIntervalMin > 0) {
+      // After a restart the first reminder waits a full interval (no re-page of every open incident on deploy)
+      const last = lastNotifiedAt.get(inc.id) ?? Math.max(Date.parse(inc.startedAt), engineProcessStart);
       if (now - last >= policy.repeatIntervalMin * 60000) {
         lastNotifiedAt.set(inc.id, now);
         notifyIncident(inc, 'FIRING', `Reminder: still unacknowledged after ${inc.durationMinutes} min`);
       }
     }
   }
+  for (const id of lastNotifiedAt.keys()) if (!open.has(id)) lastNotifiedAt.delete(id);
+  if (adviceDirty) persist();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -837,14 +1192,25 @@ function updateIncidentDurations() {
 // ─────────────────────────────────────────────────────────────────────────────
 const failoverLocks = new Set<string>();
 const FAILOVER_COOLDOWN_MS = 10 * 60 * 1000;
+/** Last automatic failover ATTEMPT per application (success or not) — a failing Cloudflare call is not retried on every check */
+const autoFailoverAttemptAt = new Map<string, number>();
+/** True while a DNS switch for this application is in flight (edits are refused meanwhile) */
+export const isFailoverInProgress = (appId: string) => failoverLocks.has(appId);
 
 export class FailoverError extends Error {
   constructor(message: string, public status = 400) { super(message); }
 }
 
 export async function performFailover(app: Application, target: 'DR' | 'PRIMARY', operator: string, reason: string) {
-  if (app.loadBalancer) {
-    throw new FailoverError(`${app.name} traffic is routed by the Cloudflare Load Balancer (${app.loadBalancer.hostname}). Scholario Ops has read-only access to it — change pool order / enablement in Cloudflare after reviewing the pre-flight checks.`, 409);
+  const routingMethod = effectiveRoutingMethod(app);
+  if (routingMethod === 'cloudflare_lb') {
+    throw new FailoverError(`${app.name} traffic is routed by the Cloudflare Load Balancer (${app.loadBalancer?.hostname || 'mapped hostname'}). Scholario Ops has read-only access to it — change pool order / enablement in Cloudflare after reviewing the pre-flight checks.`, 409);
+  }
+  if (routingMethod === 'cloudflare_worker' || routingMethod === 'cloudflare_worker_failover') {
+    throw new FailoverError(`${app.name} traffic is routed by a Cloudflare Worker. Scholario Ops does not change Worker routes or origins.`, 409);
+  }
+  if (routingMethod === 'custom') {
+    throw new FailoverError(`${app.name} uses custom routing. Scholario Ops will not change DNS records or origins.`, 409);
   }
   if (failoverLocks.has(app.id)) throw new FailoverError('A failover for this application is already in progress', 409);
   const targetServer = db.servers.find(s => s.id === (target === 'DR' ? app.drServerId : app.prdServerId));
@@ -860,8 +1226,10 @@ export async function performFailover(app: Application, target: 'DR' | 'PRIMARY'
   const previousState = app.failoverState;
   app.failoverState = 'FAILING_OVER';
   broadcast('application_update', app);
+  const live = () => db.applications.find(a => a.id === app.id) ?? app;
   try {
     const changed = await switchDnsRecord(app.cloudflareZone, app.dnsRecordName, targetServer.ip);
+    app = live();
     app.failoverState = desiredState;
     app.lastFailoverAt = new Date().toISOString();
     const summary = changed.length
@@ -874,7 +1242,8 @@ export async function performFailover(app: Application, target: 'DR' | 'PRIMARY'
     broadcast('application_update', app);
     return { app, changed };
   } catch (err) {
-    app.failoverState = previousState;
+    app = live();
+    app.failoverState = previousState === 'FAILING_OVER' ? (target === 'DR' ? 'PRIMARY_ACTIVE' : 'DR_ACTIVE') : previousState;
     audit(operator, `FAILOVER_TO_${target}_FAILED`, 'FAILOVER', app.id, `${app.name}: ${(err as Error).message}`);
     persist();
     broadcast('application_update', app);
@@ -884,21 +1253,36 @@ export async function performFailover(app: Application, target: 'DR' | 'PRIMARY'
   }
 }
 
-async function evaluateAutoFailover(m: Monitor) {
-  if (m.environment !== 'PRD' || m.status !== 'CRITICAL') return;
+export async function evaluateAutoFailover(m: Monitor) {
+  // Only a CONFIRMED outage of an availability check (HTTP / TCP) can move traffic. CPU, SSL, backup,
+  // heartbeat or agent-staleness monitors never trigger a DNS switch.
+  if (m.environment !== 'PRD' || m.status !== 'CRITICAL' || !AVAILABILITY_TYPES.includes(m.type)) return;
+  if (m.consecutiveFailures < Math.max(1, m.failureConfirmationThreshold)) return; // still CRITICAL from before, but the latest check passed
   const app = db.applications.find(a => a.id === m.applicationId);
   // Load-balancer-managed applications (ICT) are never failed over automatically
-  if (!app || app.loadBalancer || !app.autoFailover || app.failoverState !== 'PRIMARY_ACTIVE') return;
+  const routingMethod = app ? effectiveRoutingMethod(app) : 'unknown';
+  // Only Direct DNS (and a not-yet-classified app that has no Load Balancer) may move a DNS record.
+  if (!app || !app.autoFailover || app.failoverState !== 'PRIMARY_ACTIVE') return;
+  if (routingMethod !== 'direct_dns' && !(routingMethod === 'unknown' && !app.loadBalancer)) return;
   if (app.lastFailoverAt && Date.now() - Date.parse(app.lastFailoverAt) < FAILOVER_COOLDOWN_MS) return;
+  const lastAttempt = autoFailoverAttemptAt.get(app.id);
+  if (lastAttempt && Date.now() - lastAttempt < FAILOVER_COOLDOWN_MS) return;
+  // Every PRD availability check must be down — one failing endpoint is not a site outage
+  const prdAvailability = db.monitors.filter(x => x.enabled && x.applicationId === app.id && x.environment === 'PRD' && AVAILABILITY_TYPES.includes(x.type));
+  if (!prdAvailability.every(x => x.status === 'CRITICAL')) return;
   const drAvailability = db.monitors.filter(x => x.enabled && x.applicationId === app.id && x.environment === 'DR' && AVAILABILITY_TYPES.includes(x.type));
   if (drAvailability.length === 0) {
     audit('Auto-Failover', 'AUTO_FAILOVER_SKIPPED', 'FAILOVER', app.id, `${app.name} PRD is CRITICAL but no DR availability monitors exist to confirm DR is healthy`);
+    autoFailoverAttemptAt.set(app.id, Date.now());
     return;
   }
-  if (!drAvailability.every(x => x.status === 'HEALTHY' || x.status === 'WARNING')) {
+  // DR must be confirmed healthy NOW: passing its latest check, with a fresh result (not WARNING = first unconfirmed failure)
+  const fresh = (x: Monitor) => Boolean(x.lastCheck) && Date.now() - Date.parse(x.lastCheck) <= Math.max(60, x.intervalSec * 3) * 1000;
+  if (!drAvailability.every(x => x.status === 'HEALTHY' && x.consecutiveFailures === 0 && fresh(x))) {
     audit('Auto-Failover', 'AUTO_FAILOVER_SKIPPED', 'FAILOVER', app.id, `${app.name} PRD is CRITICAL but DR is not healthy — staying on PRD`);
     return;
   }
+  autoFailoverAttemptAt.set(app.id, Date.now());
   try {
     await performFailover(app, 'DR', 'Auto-Failover', `${m.name} confirmed CRITICAL: ${m.history[0]?.detail ?? ''}`);
   } catch (err) {
@@ -907,46 +1291,50 @@ async function evaluateAutoFailover(m: Monitor) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Dead-man switch: this server pings an EXTERNAL heartbeat service. If this
-// server dies, the external service stops receiving pings and alerts you.
+// Dead-man heartbeat of the monitored infrastructure (server/heartbeat.ts): derived from the agent
+// reports. Separate from the outbound external heartbeat below.
 // ─────────────────────────────────────────────────────────────────────────────
-export const deadMan: DeadManControlPlane = {
-  id: 'deadman-outbound',
-  name: 'External Dead-Man Heartbeat',
-  nodeLocation: config.deadManHeartbeatUrl ? new URL(config.deadManHeartbeatUrl).host : 'Not configured',
-  targetControlPlane: config.deadManHeartbeatUrl ? new URL(config.deadManHeartbeatUrl).origin : '',
-  lastHeartbeatReceivedAt: '',
-  intervalSec: config.deadManIntervalSec,
-  toleranceSec: config.deadManToleranceSec,
-  status: config.deadManHeartbeatUrl ? 'HEALTHY' : 'NOT_CONFIGURED',
-  consecutiveMisses: 0,
-};
-
-async function sendDeadManHeartbeat() {
-  if (!config.deadManHeartbeatUrl) return;
-  const prevStatus = deadMan.status;
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
-    const resp = await fetch(config.deadManHeartbeatUrl, { signal: controller.signal });
-    clearTimeout(timer);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    deadMan.lastHeartbeatReceivedAt = new Date().toISOString();
-    deadMan.consecutiveMisses = 0;
-    deadMan.status = 'HEALTHY';
-  } catch (err) {
-    deadMan.consecutiveMisses += 1;
-    if (deadMan.consecutiveMisses * deadMan.intervalSec >= deadMan.toleranceSec) deadMan.status = 'CRITICAL_SILENCE';
-    log.error('deadman', `heartbeat failed: ${(err as Error).message}`);
+let lastHeartbeatSignature = '';
+/** Broadcasts the infrastructure heartbeat when any state / timestamp changed. Returns the current value. */
+function publishHeartbeat(): DeadManControlPlane {
+  const hb = infraHeartbeat();
+  const sig = JSON.stringify({ ...hb, evaluatedAt: '' });
+  if (sig !== lastHeartbeatSignature) {
+    lastHeartbeatSignature = sig;
+    broadcast('deadman_update', hb);
   }
-  if (prevStatus !== deadMan.status) {
-    audit('Dead-Man Switch', `DEADMAN_${deadMan.status}`, 'MONITOR', deadMan.id, `Outbound heartbeat is now ${deadMan.status}`);
-  }
-  broadcast('deadman_update', deadMan);
+  return hb;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-export function startEngine() {
+// External dead-man switch: this server pings an EXTERNAL heartbeat service so someone is alerted
+// if Scholario Ops itself stops (server/deadman.ts). Default every 60 s, silence tolerance 180 s.
+// ─────────────────────────────────────────────────────────────────────────────
+const externalHeartbeatWorker = new DeadManHeartbeat({
+  url: config.deadManHeartbeatUrl,
+  intervalSec: config.deadManIntervalSec,
+  toleranceSec: config.deadManToleranceSec,
+  onChange: (state, previous) => {
+    if (previous !== state.status && state.status !== 'PENDING') {
+      audit('Dead-Man Switch', `EXTERNAL_HEARTBEAT_${state.status}`, 'MONITOR', state.id, `Outbound heartbeat is now ${state.status}${state.lastError ? ` (${state.lastError})` : ''}`);
+    }
+    broadcast('external_heartbeat_update', state);
+  },
+});
+/** Live outbound heartbeat state (never contains the heartbeat URL) */
+export const externalHeartbeat: ExternalHeartbeat = externalHeartbeatWorker.state;
+
+// ─────────────────────────────────────────────────────────────────────────────
+let engineStarted = false;
+const engineTimers: NodeJS.Timeout[] = [];
+
+/** Starts the monitor scheduler, infrastructure heartbeat recompute, and outbound external heartbeat. Idempotent. */
+export function startEngine(): boolean {
+  if (engineStarted) {
+    log.warn('engine', 'startEngine called again — ignored (workers already running)');
+    return false;
+  }
+  engineStarted = true;
   for (const m of db.monitors) {
     // Spread first runs across the interval so a restart does not fire every check at once
     const offset = (db.monitors.indexOf(m) * 997) % (Math.max(5, m.intervalSec) * 1000);
@@ -959,18 +1347,34 @@ export function startEngine() {
     try { const r = fn(); if (r instanceof Promise) r.catch(err => log.error('engine', `${name} failed`, { error: err as Error })); }
     catch (err) { log.error('engine', `${name} failed`, { error: err as Error }); }
   };
-  setInterval(guarded('scheduler', schedulerTick), 1000).unref();
-  setInterval(guarded('recompute', () => {
+  engineTimers.push(setInterval(guarded('scheduler', schedulerTick), 1000));
+  engineTimers.push(setInterval(guarded('recompute', () => {
+    lastRecomputeAt = Date.now();
     recomputeDerived();
+    // Heartbeats age without new reports (stale / disconnected): re-derive on every tick
+    const hb = publishHeartbeat();
+    // Outbound status also ages without new attempts (e.g. a hung request)
+    const beforeExt = externalHeartbeat.status;
+    if (externalHeartbeatWorker.evaluate() !== beforeExt) broadcast('external_heartbeat_update', externalHeartbeat);
     updateIncidentDurations();
     broadcast('telemetry_tick', {
       timestamp: new Date().toISOString(),
-      deadManStatus: deadMan.status,
+      deadManStatus: hb.status,
+      externalHeartbeatStatus: externalHeartbeat.status,
       servers: db.servers.map(s => ({ id: s.id, status: s.status, agentStatus: s.agentStatus, lastSeen: s.lastSeen, telemetry: s.telemetry })),
     });
-  }), 5000).unref();
-  if (config.deadManHeartbeatUrl) {
-    void sendDeadManHeartbeat();
-    setInterval(guarded('dead-man heartbeat', sendDeadManHeartbeat), config.deadManIntervalSec * 1000).unref();
-  }
+  }), 5000));
+  for (const t of engineTimers) t.unref();
+  externalHeartbeatWorker.start();
+  return true;
 }
+
+/** Stops the engine loops and the outbound external heartbeat (graceful shutdown). */
+export function stopEngine() {
+  for (const t of engineTimers.splice(0)) clearInterval(t);
+  externalHeartbeatWorker.stop();
+  engineStarted = false;
+}
+
+/** For tests / diagnostics: is the outbound external-heartbeat loop running in this process */
+export const externalHeartbeatWorkerRunning = () => externalHeartbeatWorker.running;

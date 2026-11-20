@@ -9,6 +9,7 @@ import { AuthService } from '../../services/auth';
 import { SkeletonTable } from '../ui/Skeleton';
 import { ErrorState } from '../ui/ErrorState';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 
 type RoleName = SafeUser['roleName'];
 const ROLES: RoleName[] = ['viewer', 'operator', 'it_administrator', 'super_admin'];
@@ -63,6 +64,7 @@ export const UsersView: React.FC = () => {
   const [pwForm, setPwForm] = useState({ current: '', next: '', confirm: '' });
   const [pwError, setPwError] = useState<string | null>(null);
   const [pwBusy, setPwBusy] = useState(false);
+  const userPaging = useClientPagination(users, 10);
 
   const load = useCallback(async () => {
     if (!isAdmin) return;
@@ -215,9 +217,9 @@ export const UsersView: React.FC = () => {
     return (
       <div className="space-y-5">
         <div className={`pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
-          <h1 className="text-lg font-bold font-mono tracking-tight">MY ACCOUNT</h1>
-          <p className={`text-xs font-mono mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            {me ? <>{me.fullName} · {roleLabel(me.roleName)}</> : 'Signed in'} · user management requires the IT administrator role
+          <h1 className="text-lg font-bold tracking-tight">Account</h1>
+          <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            {me ? <>{me.fullName} · {roleLabel(me.roleName)}</> : 'Signed in'}
           </p>
         </div>
         {changePasswordCard}
@@ -230,9 +232,9 @@ export const UsersView: React.FC = () => {
       {/* Header */}
       <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
         <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">USER MANAGEMENT</h1>
-          <p className={`text-xs font-mono mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Operator accounts, roles and access control{!loading && !error && <> — {users.length} user{users.length === 1 ? '' : 's'}</>}
+          <h1 className="text-lg font-bold tracking-tight">Users</h1>
+          <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            {!loading && !error && <>{users.length} user{users.length === 1 ? '' : 's'}</>}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -316,7 +318,7 @@ export const UsersView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className={`divide-y ${isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
-                {users.map(u => {
+                {userPaging.slice.map(u => {
                   const isSelf = me?.id === u.id;
                   // Only super admins may change super admin roles or grant super admin
                   const canEditRole = !isSelf && (isSuper || u.roleName !== 'super_admin');
@@ -444,6 +446,7 @@ export const UsersView: React.FC = () => {
               </tbody>
             </table>
           </div>
+          <Pagination page={userPaging.page} totalPages={userPaging.totalPages} total={userPaging.total} pageSize={userPaging.pageSize} onPage={userPaging.setPage} />
         </div>
       )}
 

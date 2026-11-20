@@ -1,9 +1,13 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
 import { Application, Monitor, VpsServer } from '../../types';
-import { ArrowDown, Network } from 'lucide-react';
-import { EmptyState } from '../ui/EmptyState';
+import { ArrowDown } from 'lucide-react';
+import { DependencyRegisterSection } from '../setup/DependencyRegister';
+import { DependencyGraph, directNeighborhood } from './DependencyGraph';
+import { DependencyMatrix } from './DependencyMatrix';
+import { dnsPointsAt, routeState, servingLabel } from '../ui/routing';
+import { dependencyMethodLabel } from '../../lib/serviceDependencies';
 
 type NodeRef = { kind: 'app' | 'server' | 'monitor'; id: string } | null;
 
@@ -24,11 +28,18 @@ const statusDot = (s: string) =>
           : 'bg-slate-500';
 
 export const DependencyMapView: React.FC = () => {
-  const { theme, applications, servers, monitors, isLoading } = useOps();
+  const { theme, applications, servers, monitors, cloudflareZones, loadBalancer, registry, dependencyLinks, incidents, isLoading, systemSummary } = useOps();
   const navigate = useNavigate();
   const isDark = theme === 'dark';
   const muted = isDark ? 'text-slate-400' : 'text-slate-500';
   const [selected, setSelected] = useState<NodeRef>(null);
+  const [graphId, setGraphId] = useState<string | null>(null);
+  const [focusId, setFocusId] = useState('');
+
+  useEffect(() => {
+    if (window.location.hash !== '#dependency-matrix') return;
+    document.getElementById('dependency-matrix')?.scrollIntoView({ block: 'start' });
+  }, []);
 
   /** The server a monitor checks: its explicit serverId, otherwise the app's server for that environment. */
   const serverOfMonitor = (m: Monitor): VpsServer | undefined => {
@@ -43,25 +54,24 @@ export const DependencyMapView: React.FC = () => {
 
   const orphanServers = servers.filter(s => !applications.some(a => a.prdServerId === s.id || a.drServerId === s.id));
 
-  if (applications.length === 0 && servers.length === 0) {
-    return (
-      <div className="space-y-6">
-        <div className={`pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
-          <h1 className="text-lg font-bold font-mono tracking-tight">DEPENDENCY MAP</h1>
-        </div>
-        {isLoading ? (
-          <div className={`text-xs font-mono animate-pulse ${muted}`}>Loading…</div>
-        ) : (
-          <EmptyState
-            icon={Network}
-            title="Nothing to map yet"
-            description="Register your servers and applications in Setup; the map is built from applications, their PRD/DR servers and their monitors."
-            action={{ label: 'Open Setup', onClick: () => navigate('/setup') }}
-          />
-        )}
-      </div>
-    );
-  }
+  const graphRegistry = registry;
+  const graphLinks = dependencyLinks;
+  const applicationChoices = graphRegistry
+    .filter(component => component.kind === 'APPLICATION')
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const preferredId = (() => {
+    if (applicationChoices.length === 0) return '';
+    const score = (id: string) => graphLinks.filter(link => link.fromId === id || link.toId === id).length;
+    return [...applicationChoices].sort((a, b) => score(b.id) - score(a.id) || a.name.localeCompare(b.name))[0].id;
+  })();
+  const activeFocusId = applicationChoices.some(component => component.id === focusId) ? focusId : preferredId;
+  const focused = applicationChoices.find(component => component.id === activeFocusId) ?? null;
+  const neighborhood = focused ? directNeighborhood(graphRegistry, graphLinks, focused.id) : null;
+  const openIncidents = incidents.filter(incident => incident.status !== 'RESOLVED' && incident.status !== 'CLOSED').length;
+  const refreshedLabel = systemSummary.generatedAt && !Number.isNaN(Date.parse(systemSummary.generatedAt))
+    ? new Date(systemSummary.generatedAt).toLocaleString()
+    : 'not loaded yet';
 
   const nodeClass = (isSelected: boolean, status: string) =>
     `p-2.5 rounded border text-left transition-all cursor-pointer min-w-0 w-full ${
@@ -81,7 +91,7 @@ export const DependencyMapView: React.FC = () => {
           <span className={`w-2 h-2 rounded-full shrink-0 ${statusDot(srv.status)}`} />
           <span className={`text-[9px] uppercase ${env === 'PRD' ? 'text-blue-500' : muted}`}>{env} server</span>
         </div>
-        <div className={`font-bold text-xs mt-1 truncate ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{srv.hostname}</div>
+        <div title={srv.hostname} className={`font-bold text-xs mt-1 truncate ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{srv.hostname}</div>
         <div className={`text-[10px] truncate ${muted}`}>{srv.ip || 'No IP'} · agent {srv.agentStatus}</div>
         <div className={`text-[10px] font-semibold ${statusText(srv.status)}`}>{srv.status}</div>
       </button>
@@ -99,7 +109,7 @@ export const DependencyMapView: React.FC = () => {
         {list.map(m => (
           <button key={m.id} onClick={() => setSelected({ kind: 'monitor', id: m.id })} className={`${nodeClass(isSel('monitor', m.id), m.status)} !p-1.5 flex items-center gap-2`}>
             <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDot(m.status)}`} />
-            <span className={`truncate flex-1 text-[11px] ${isDark ? 'text-slate-200' : 'text-slate-800'} ${!m.enabled ? 'opacity-50' : ''}`}>{m.name}</span>
+            <span title={m.name} className={`truncate flex-1 text-[11px] ${isDark ? 'text-slate-200' : 'text-slate-800'} ${!m.enabled ? 'opacity-50' : ''}`}>{m.name}</span>
             <span className={`text-[9px] shrink-0 ${muted}`}>{m.type}</span>
             <span className={`text-[9px] font-bold shrink-0 ${statusText(m.status)}`}>{m.status}</span>
           </button>
@@ -119,7 +129,7 @@ export const DependencyMapView: React.FC = () => {
           }`}
         >
           <span className={`${arrowColor} font-bold`}>{arrow}</span>
-          <span className="min-w-0 truncate">{it.label}</span>
+          <span title={typeof it.label === 'string' ? it.label : undefined} className="min-w-0 truncate">{it.label}</span>
         </button>
       )) : <div className={`italic ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>{empty}</div>}
     </div>
@@ -149,18 +159,50 @@ export const DependencyMapView: React.FC = () => {
               <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
               <span className={`text-xs font-bold ${statusText(app.status)}`}>{app.status}</span>
               <span className={isDark ? 'text-slate-600' : 'text-slate-300'}>·</span>
-              <span className={`text-xs ${muted}`}>{app.failoverState === 'DR_ACTIVE' ? 'Serving from DR' : app.failoverState === 'FAILING_OVER' ? 'Switching' : 'Serving from PRD'}</span>
+              <span className={`text-xs ${muted}`}>{servingLabel(routeState(app, loadBalancer, dnsPointsAt(app, servers, cloudflareZones))) === 'Unknown' ? 'Origin unknown' : `Serving from ${servingLabel(routeState(app, loadBalancer, dnsPointsAt(app, servers, cloudflareZones)))}`}</span>
             </div>
           </div>
           <div className="space-y-4 text-xs">
             <div>
-              {sectionLabel('Depends on (servers):')}
+              {sectionLabel('Runs on (hosting, not a service dependency):')}
               {listBox(
                 [prd && { key: prd.id, label: <>PRD · {prd.hostname} <span className={statusText(prd.status)}>{prd.status}</span></>, onClick: () => setSelected({ kind: 'server', id: prd.id }) },
                  dr && { key: dr.id, label: <>DR · {dr.hostname} <span className={statusText(dr.status)}>{dr.status}</span></>, onClick: () => setSelected({ kind: 'server', id: dr.id }) }]
                   .filter(Boolean) as { key: string; label: React.ReactNode; onClick: () => void }[],
                 'No servers linked', '←', 'text-blue-500',
               )}
+            </div>
+            <div>
+              {sectionLabel('Service dependencies · consumer → provider')}
+              {(() => {
+                const comp = registry.find(c => c.kind === 'APPLICATION' && c.applicationId === app.id);
+                const outgoing = comp ? dependencyLinks.filter(l => l.fromId === comp.id) : [];
+                const incoming = comp ? dependencyLinks.filter(l => l.toId === comp.id) : [];
+                const regName = (id: string) => registry.find(c => c.id === id)?.name ?? 'Unknown';
+                const line = (l: typeof dependencyLinks[number], consumer: string, provider: string) => {
+                  const feature = l.featureId ? registry.find(c => c.id === l.featureId) : undefined;
+                  return (
+                  <div key={l.id} className={`p-2 rounded border ${isDark ? 'border-[#1A2436]' : 'border-slate-200'}`}>
+                    <span className="font-semibold">{consumer}</span>
+                    <span className={muted}> → </span>
+                    <span className="font-semibold">{provider}</span>
+                    <span className={`ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold ${l.type === 'HARD' ? 'bg-rose-500/15 text-rose-500' : 'bg-amber-500/15 text-amber-500'}`}>{l.type}</span>
+                    <span className={muted}> · {dependencyMethodLabel(l.method)}</span>
+                    {feature?.kind === 'BUSINESS_FEATURE' ? <span className={muted}> · feature {feature.name}</span> : null}
+                    <div className={muted}>{l.notes || 'rationale not recorded'}</div>
+                  </div>
+                  );
+                };
+                if (!comp || (outgoing.length === 0 && incoming.length === 0)) {
+                  return <div className={`italic ${muted}`}>Nothing recorded. This does not mean the application has no dependencies.</div>;
+                }
+                return (
+                  <div className="space-y-1.5">
+                    {outgoing.map(l => line(l, app.name, regName(l.toId)))}
+                    {incoming.map(l => line(l, regName(l.fromId), app.name))}
+                  </div>
+                );
+              })()}
             </div>
             <div>
               {sectionLabel(`Checked by (${appMons.length} monitors):`)}
@@ -204,8 +246,10 @@ export const DependencyMapView: React.FC = () => {
               {listBox(
                 apps.map(a => {
                   const role = a.prdServerId === srv.id ? 'PRD' : a.drServerId === srv.id ? 'DR' : srv.environment;
-                  const live = (role === 'PRD' && a.failoverState !== 'DR_ACTIVE') || (role === 'DR' && a.failoverState === 'DR_ACTIVE');
-                  return { key: a.id, label: <>{a.name} · {role}{live ? ' · serving traffic' : ' · standby'}</>, onClick: () => setSelected({ kind: 'app', id: a.id }) };
+                  const route = routeState(a, loadBalancer, dnsPointsAt(a, servers, cloudflareZones));
+                  const live = route === 'SPLIT' || (role === 'PRD' && route === 'PRD') || (role === 'DR' && route === 'DR');
+                  const place = route === 'UNKNOWN' || route === 'MOVING' ? 'routing unknown' : live ? 'serving traffic' : 'standby';
+                  return { key: a.id, label: <>{a.name} · {role} · {place}</>, onClick: () => setSelected({ kind: 'app', id: a.id }) };
                 }),
                 'No applications use this server', '→', 'text-amber-500',
               )}
@@ -259,20 +303,67 @@ export const DependencyMapView: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b ${
-        isDark ? 'border-[#1E293B]' : 'border-slate-200'
-      }`}>
-        <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">
-            DEPENDENCY MAP &amp; BLAST RADIUS
-          </h1>
-          <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Applications → their PRD / DR servers → the monitors that check them (live status)
-          </p>
-        </div>
+      <div className={`pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+        <h1 className="text-lg font-bold tracking-tight">Dependencies</h1>
+        <p className={`text-xs mt-0.5 ${muted}`}>What each application uses, and which server it runs on.</p>
+        <p className={`text-[11px] mt-1 ${muted}`}>Updated {refreshedLabel}</p>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 font-mono text-xs">
+      <div className={`rounded-lg border p-4 space-y-3 ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200'}`}>
+        <div>
+          <h2 className="text-base font-semibold">Graph</h2>
+          <p className={`text-sm mt-1 ${muted}`}>Pick an application. Arrows run from what it depends on, toward the application.</p>
+        </div>
+        <label className={`block text-sm font-sans max-w-md ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
+          Application
+          <select
+            aria-label="Application"
+            value={activeFocusId}
+            onChange={event => {
+              setFocusId(event.target.value);
+              setGraphId(event.target.value || null);
+            }}
+            className={`mt-1 w-full rounded-md border px-2 py-1.5 text-sm font-sans ${isDark ? 'bg-[#0B0F17] border-[#2A3746] text-slate-100' : 'bg-white border-[#CDD5DF] text-[#162030]'}`}
+          >
+            {applicationChoices.length === 0 && <option value="">No application recorded</option>}
+            {applicationChoices.map(component => (
+              <option key={component.id} value={component.id}>{component.name}</option>
+            ))}
+          </select>
+        </label>
+        {isLoading && registry.length === 0 ? (
+          <p className={`text-xs animate-pulse ${muted}`}>Loading…</p>
+        ) : !focused || !neighborhood ? (
+          <p className={`text-xs ${muted}`}>
+            {applicationChoices.length === 0
+              ? 'No applications yet.'
+              : 'Select an application above.'}
+          </p>
+        ) : (
+          <DependencyGraph
+            registry={neighborhood.components}
+            dependencyLinks={neighborhood.links}
+            applications={applications}
+            servers={servers}
+            isDark={isDark}
+            selectedId={graphId}
+            onSelect={setGraphId}
+            anchorId={focused.id}
+            incidentCount={openIncidents}
+          />
+        )}
+      </div>
+
+      <DependencyMatrix applications={applications} registry={registry} links={dependencyLinks} isDark={isDark} />
+
+      <DependencyRegisterSection />
+
+      {(applications.length > 0 || servers.length > 0) && <div className={`pb-1 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+        <h2 className="text-sm font-semibold">Where each application runs</h2>
+        <p className={`text-xs ${muted}`}>Production server, recovery server, and the checks on each.</p>
+      </div>}
+
+      {(applications.length > 0 || servers.length > 0) && <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 font-mono text-xs">
 
         {/* Map */}
         <div className={`lg:col-span-2 rounded-lg border p-5 space-y-5 transition-colors ${
@@ -291,8 +382,8 @@ export const DependencyMapView: React.FC = () => {
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0">
                     <span className={`w-2 h-2 rounded-full shrink-0 ${statusDot(app.status)}`} />
-                    <span className={`font-bold text-sm truncate font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{app.name}</span>
-                    <span className={`text-[10px] truncate ${muted}`}>{app.dnsRecordName || app.codeName}</span>
+                    <span title={app.name} className={`font-bold text-sm truncate font-sans ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{app.name}</span>
+                    <span title={app.dnsRecordName || app.codeName} className={`text-[10px] truncate ${muted}`}>{app.dnsRecordName || app.codeName}</span>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <span className={`text-[10px] ${muted}`}>{app.failoverState === 'DR_ACTIVE' ? 'DR active' : app.failoverState === 'FAILING_OVER' ? 'switching' : 'PRD active'}</span>
@@ -340,7 +431,10 @@ export const DependencyMapView: React.FC = () => {
           {inspector}
         </div>
 
-      </div>
+      </div>}
+      {isLoading && applications.length === 0 && servers.length === 0 && (
+        <div className={`text-xs font-mono animate-pulse ${muted}`}>Loading…</div>
+      )}
     </div>
   );
 };

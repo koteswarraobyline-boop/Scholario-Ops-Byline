@@ -3,8 +3,9 @@
  *   admin enters config → API → PostgreSQL → monitoring uses it.
  *
  * Runs a real Scholario Ops server against a throw-away PostgreSQL schema (ops_test_<pid>)
- * in the database from DATABASE_URL, and drops the schema afterwards. Needs PostgreSQL.
- *   npm test
+ * in scholario_ops_ui_test only (tests/helpers/test-db-guard.ts refuses anything else, including a
+ * .env fallback) and drops the schema afterwards. Needs PostgreSQL.
+ *   npm run test:local -- tests/config-flow.test.ts
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,9 +15,10 @@ import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import pg from 'pg';
+import { pinTestDatabaseUrl, assertConnectedToTestDatabase, dropVerifiedTestSchema } from './helpers/test-db-guard.ts';
 
+const DATABASE_URL = pinTestDatabaseUrl();
 dotenv.config({ quiet: true });
-const DATABASE_URL = process.env.DATABASE_URL ?? '';
 const SCHEMA = `ops_test_${process.pid}`;
 const PORT = 3900 + (process.pid % 90);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -31,7 +33,7 @@ const pgc = new pg.Client({ connectionString: DATABASE_URL });
 async function startServer() {
   server = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
     env: {
-      ...process.env, PORT: String(PORT), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR, NODE_ENV: 'production',
+      ...process.env, DATABASE_URL, PORT: String(PORT), HOST: '127.0.0.1', DB_SCHEMA: SCHEMA, DATA_DIR, NODE_ENV: 'production',
       ADMIN_EMAIL: ADMIN.email, ADMIN_PASSWORD: ADMIN.password, CLOUDFLARE_API_TOKEN: FAKE_CF_TOKEN, HOSTINGER_API_TOKEN: '', DEADMAN_HEARTBEAT_URL: '',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -76,16 +78,18 @@ const waitFor = async <T>(fn: () => Promise<T | undefined | null | false>, ms = 
   }
 };
 
+let verified = false;
 before(async () => {
-  assert.ok(DATABASE_URL, 'DATABASE_URL must be set (in .env) to run the tests');
   await pgc.connect();
+  await assertConnectedToTestDatabase(pgc);
+  verified = true;
   await startServer();
   await login();
 });
 
 after(async () => {
   await stopServer();
-  await pgc.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+  await dropVerifiedTestSchema(verified, () => pgc.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {}));
   await pgc.end().catch(() => {});
   fs.rmSync(DATA_DIR, { recursive: true, force: true });
 });
@@ -115,11 +119,27 @@ test('server: create with capacity → stored in PostgreSQL columns', async () =
   ids.dr = dr.body.data.id;
 });
 
+test('role and environment lists: a valid value is stored, anything else is rejected', async () => {
+  const goodRole = await api('POST', '/api/v1/users', { email: 'good-role@example.com', password: 'GoodRolePassw0rd!', fullName: 'Good Role', roleName: 'operator' });
+  assert.equal(goodRole.status, 201, goodRole.raw);
+  assert.equal(goodRole.body.data.roleName, 'operator');
+  const badRole = await api('POST', '/api/v1/users', { email: 'bad-role@example.com', password: 'BadRolePassw0rd!', fullName: 'Bad Role', roleName: 'owner' });
+  assert.equal(badRole.status, 400, badRole.raw);
+  assert.match(badRole.body.message, /Role must be one of: viewer, operator, it_administrator, super_admin/);
+  const badEnv = await api('POST', '/api/v1/servers', { hostname: 'bad-env', ip: '192.0.2.77', environment: 'STAGING' });
+  assert.equal(badEnv.status, 400, badEnv.raw);
+  assert.match(badEnv.body.message, /Environment must be one of: PRD, DR/);
+  const goodEnv = await api('POST', '/api/v1/servers', { hostname: 'good-env', ip: '192.0.2.78', environment: 'DR' });
+  assert.equal(goodEnv.status, 201, goodEnv.raw);
+  assert.equal(goodEnv.body.data.environment, 'DR');
+});
+
 test('server: validation rejects bad input', async () => {
   const cases: Array<[Record<string, unknown>, RegExp]> = [
     [{ hostname: 'bad-ip', ip: '999.1.1.1', environment: 'PRD' }, /IP address/],
     [{ hostname: 'neg-cpu', ip: '192.0.2.30', environment: 'PRD', planCpuCores: -2, planRamGb: 8, planDiskGb: 10 }, /CPU cores/],
     [{ hostname: 'zero-ram', ip: '192.0.2.31', environment: 'PRD', planCpuCores: 2, planRamGb: 0, planDiskGb: 10 }, /RAM/],
+    [{ hostname: 'zero-disk', ip: '192.0.2.33', environment: 'PRD', planCpuCores: 2, planRamGb: 8, planDiskGb: 0 }, /Disk/],
     [{ hostname: 'partial', ip: '192.0.2.32', environment: 'PRD', planCpuCores: 2 }, /together/],
     [{ hostname: 'dup-ip', ip: '192.0.2.10', environment: 'PRD' }, /already registered/],
   ];

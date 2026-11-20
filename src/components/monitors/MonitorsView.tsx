@@ -21,6 +21,7 @@ import { HeartbeatPulseChart } from '../visuals/HeartbeatPulseChart';
 import { EndpointMetricsVisualizer, formatMonitorReading } from './EndpointMetricsVisualizer';
 import { MonitorFormModal, monitorTypeGroup, PUSH_MONITOR_TYPES } from './CreateMonitorModal';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 import { Monitor, OperationalStatus } from '../../types';
 
 const FILTERS = ['ALL', 'FAILING', 'HTTP', 'TCP', 'DNS', 'SSL', 'INFRA', 'PUSH'] as const;
@@ -154,6 +155,7 @@ export const MonitorsView: React.FC = () => {
         (app?.name ?? '').toLowerCase().includes(q)
       );
     });
+  const monitorPaging = useClientPagination(filteredMonitors, 10, `${filterType}|${search}`);
 
   const failingCount = monitors.filter(isFailing).length;
 
@@ -169,12 +171,7 @@ export const MonitorsView: React.FC = () => {
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
       }`}>
         <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">
-            MONITORS &amp; HEARTBEATS
-          </h1>
-          <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Scheduled HTTP(S), TCP, DNS, SSL and agent resource checks, plus push heartbeats
-          </p>
+          <h1 className="text-lg font-bold tracking-tight">Monitors</h1>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -346,7 +343,7 @@ export const MonitorsView: React.FC = () => {
                         No monitors match your filter.
                       </td>
                     </tr>
-                  ) : filteredMonitors.map(m => {
+                  ) : monitorPaging.slice.map(m => {
                     const app = applications.find(a => a.id === m.applicationId);
                     const failing = isFailing(m);
                     const isProbing = probingId === m.id;
@@ -429,8 +426,16 @@ export const MonitorsView: React.FC = () => {
                         <td className={`py-2.5 px-3.5 tabular-nums text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                           {lastCheckStr}
                           {m.lastProbeStatus && (
-                            <div className={m.lastProbeStatus === 'UP' ? 'text-emerald-500' : m.lastProbeStatus === 'DEGRADED' ? 'text-amber-500' : 'text-rose-500'}>
-                              {m.lastProbeStatus}{m.lastStatusCode ? ` · ${m.lastStatusCode}` : ''}
+                            <div className={m.lastProbeStatus === 'UP' ? 'text-emerald-500' : m.lastProbeStatus === 'DEGRADED' ? 'text-amber-500' : m.lastProbeStatus === 'UNKNOWN' ? (isDark ? 'text-slate-400' : 'text-slate-500') : 'text-rose-500'}>
+                              {m.lastProbeStatus}{m.lastStatusCode ? ` · HTTP ${m.lastStatusCode}` : ''}{m.responseTimeMs ? ` · ${m.responseTimeMs} ms` : ''}
+                            </div>
+                          )}
+                          <div>Last success: {m.lastSuccess && !Number.isNaN(Date.parse(m.lastSuccess)) ? new Date(m.lastSuccess).toLocaleString() : 'none'}</div>
+                          <div>Last failure: {m.lastFailure && !Number.isNaN(Date.parse(m.lastFailure)) ? new Date(m.lastFailure).toLocaleString() : 'none'}</div>
+                          {(m.type === 'SSL' || m.certificateDaysLeft != null || m.certificateValidTo) && (
+                            <div>
+                              Certificate: {m.certificateDaysLeft == null ? 'not read' : `${m.certificateDaysLeft} days left`}
+                              {m.certificateValidTo ? ` · expires ${m.certificateValidTo}` : ''}
                             </div>
                           )}
                         </td>
@@ -445,6 +450,14 @@ export const MonitorsView: React.FC = () => {
                           <span className={`font-semibold ${m.enabled ? statusText(m.status) : 'text-slate-500'}`}>
                             {!m.enabled ? 'PAUSED' : m.activeMaintenance ? 'MAINTENANCE' : m.status}
                           </span>
+                          {m.enabled && m.flapping && (
+                            <span
+                              className="ml-1.5 px-1 py-0.5 rounded text-[9px] font-bold whitespace-nowrap bg-amber-500/15 text-amber-500"
+                              title={`${m.flapTransitions ?? 0} pass/fail changes in the last 20 checks`}
+                            >
+                              FLAPPING
+                            </span>
+                          )}
                         </td>
 
                         <td className="py-2.5 px-3.5 text-right font-sans">
@@ -535,6 +548,7 @@ export const MonitorsView: React.FC = () => {
               </table>
             </div>
           </div>
+          <Pagination page={monitorPaging.page} totalPages={monitorPaging.totalPages} total={monitorPaging.total} pageSize={monitorPaging.pageSize} onPage={monitorPaging.setPage} />
         </>
       )}
     </div>

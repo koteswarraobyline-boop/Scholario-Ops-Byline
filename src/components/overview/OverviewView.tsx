@@ -1,21 +1,26 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { THRESHOLDS } from '../../lib/thresholds';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
-import { useAuth } from '../../context/AuthContext';
+import { SinceLastUpdate } from '../ui/SinceLastUpdate';
 import { api } from '../../services/api';
 import { OperationalStatus, ServerMetricPoint } from '../../types';
 import {
   Layers, Server, Radio, AlertTriangle, Cloud, Database,
-  ShieldCheck, Activity, ArrowRight, RefreshCw, CheckCircle2,
-  TrendingUp, Clock, Eye, BarChart2, Wifi, WifiOff, Circle, Zap, Loader2, Settings2,
+  ShieldCheck, Activity, ArrowRight, CheckCircle2,
+  TrendingUp, Clock, Zap, Loader2, Settings2,
 } from 'lucide-react';
 import { HeartbeatPulseChart } from '../visuals/HeartbeatPulseChart';
 import { TrafficFlowChart } from '../visuals/TrafficFlowChart';
 import { IncidentFlowChart } from '../visuals/IncidentFlowChart';
 import { TelemetryAreaGraph } from '../visuals/TelemetryAreaGraph';
 import { EmptyState } from '../ui/EmptyState';
-import { IctStatusPanel } from './IctStatusPanel';
-import { routeState } from '../ui/routing';
+import { Pagination, useClientPagination } from '../ui/Pagination';
+import { ApplicationStatusPanel } from './ApplicationStatusPanel';
+import { dnsPointsAt, originFlows, routeState, servingLabel } from '../ui/routing';
+import { statusCause } from '../../lib/statusCause';
+import { Ago } from '../ui/Freshness';
+import { deadManLabel, lastServerHeartbeat } from '../ui/deadman';
 
 // ── Formatting helpers (null-safe) ───────────────────────────────────────────
 const fmtPct = (v: number | null | undefined, digits = 2) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : `${v.toFixed(digits)}%`);
@@ -55,10 +60,12 @@ interface MetricCardProps {
   isDark: boolean;
   badge?: string;
   badgeColor?: string;
+  /** Extra label / value pairs, stacked under the value (each on its own line; values wrap, never overflow) */
+  details?: Array<[string, React.ReactNode]>;
 }
 
 const MetricCard: React.FC<MetricCardProps> = ({
-  label, value, sub, icon: Icon, status = 'ok', onClick, isDark, badge, badgeColor
+  label, value, sub, icon: Icon, status = 'ok', onClick, isDark, badge, badgeColor, details,
 }) => {
   const borderColor =
     status === 'crit'    ? (isDark ? 'border-rose-800/70 bg-[#180E13]'   : 'border-rose-300 bg-rose-50/80') :
@@ -75,25 +82,35 @@ const MetricCard: React.FC<MetricCardProps> = ({
   return (
     <button
       onClick={onClick}
-      className={`p-3 rounded-lg border text-left transition-all group cursor-pointer hover:scale-[1.02] hover:shadow-md ${borderColor}`}
+      className={`p-3 rounded-lg border text-left transition-all group cursor-pointer hover:shadow-md hover:border-blue-500/50 min-w-0 flex flex-col ${borderColor}`}
     >
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-[9px] font-mono font-semibold tracking-widest text-slate-400 uppercase">{label}</span>
-        <Icon className={`w-3.5 h-3.5 transition-colors ${
+      <div className="flex items-center justify-between gap-2 mb-2 min-w-0">
+        <span className="text-[9px] font-mono font-semibold tracking-widest text-slate-400 uppercase truncate" title={label}>{label}</span>
+        <Icon className={`w-3.5 h-3.5 shrink-0 transition-colors ${
           status === 'crit' ? 'text-rose-500' :
           status === 'warn' ? 'text-amber-500' :
           'text-slate-400 group-hover:text-blue-400'
         }`} />
       </div>
-      <div className={`text-xl font-bold font-mono tabular-nums leading-none ${valueColor}`}>{value}</div>
-      <div className="flex items-center justify-between mt-1.5 gap-1">
-        <span className="text-[10px] text-slate-500 font-mono truncate">{sub}</span>
+      <div className={`text-xl font-bold font-mono tabular-nums leading-tight break-words ${valueColor}`}>{value}</div>
+      <div className="flex items-start justify-between mt-1.5 gap-1 min-w-0">
+        <span className="text-[10px] text-slate-500 font-mono break-words min-w-0 line-clamp-2" title={sub}>{sub}</span>
         {badge && (
           <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded shrink-0 ${badgeColor ?? 'text-emerald-400 bg-emerald-950/60'}`}>
             {badge}
           </span>
         )}
       </div>
+      {details && details.length > 0 && (
+        <dl className={`mt-2 pt-2 border-t grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] font-mono ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+          {details.map(([k, v]) => (
+            <div key={k} className="min-w-0">
+              <dt className="text-slate-500 truncate" title={k}>{k}</dt>
+              <dd className={`min-w-0 break-words font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{v}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
     </button>
   );
 };
@@ -101,25 +118,19 @@ const MetricCard: React.FC<MetricCardProps> = ({
 // ── Main Component ────────────────────────────────────────────────────────────
 export const OverviewView: React.FC = () => {
   const {
-    applications, servers, monitors, runbooks, cloudflareZones, deadMan, integrations, systemSummary,
-    lastUpdatedSecondsAgo, setSelectedAppId, setSelectedIncidentId, incidents, runAllProbes, theme,
-    apiHealth, isLoading, loadError, refreshAll, realtimeStatus, loadBalancer,
+    applications, servers, monitors, cloudflareZones, deadMan, integrations, systemSummary,
+    setSelectedAppId, setSelectedIncidentId, incidents, theme,
+    isLoading, loadError, refreshAll, loadBalancer,
   } = useOps();
-  const { canDo } = useAuth();
   const navigate = useNavigate();
   const go = (tab: string) => navigate(`/${tab}`);
 
   const isDark = theme === 'dark';
   const openIncidents = incidents.filter(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED');
   const activeIncident = openIncidents[0];
-  const criticalOpen = openIncidents.filter(i => i.severity === 'CRITICAL' || i.severity === 'EMERGENCY');
 
-  const [probing, setProbing] = useState(false);
   const [retrying, setRetrying] = useState(false);
-  const handleProbeAll = async () => {
-    setProbing(true);
-    try { await runAllProbes(); } finally { setProbing(false); }
-  };
+  const appPaging = useClientPagination(applications, 10);
   const handleRetry = async () => {
     setRetrying(true);
     try { await refreshAll(); } finally { setRetrying(false); }
@@ -160,25 +171,30 @@ export const OverviewView: React.FC = () => {
   }, [reportingKey]);
 
   const fleetHistory = useMemo(() => {
-    const buckets = new Map<number, { cpu: number[]; ram: number[]; net: number }>();
-    Object.values(metricSeries).forEach(points => {
+    // Per minute, first average each server's samples (agents report every 5–10 s), then combine
+    // servers: CPU / RAM = mean of the server means, network = sum of the server means.
+    const buckets = new Map<number, Map<string, { cpu: number[]; ram: number[]; net: number[] }>>();
+    Object.entries(metricSeries).forEach(([serverId, points]) => {
       points.forEach(p => {
         const k = minuteKey(p.t);
         if (k === null) return;
-        const b = buckets.get(k) ?? { cpu: [], ram: [], net: 0 };
-        b.cpu.push(p.cpu);
-        b.ram.push(p.ram);
-        b.net += (p.netIn + p.netOut) / 1000; // kbps → Mbps
-        buckets.set(k, b);
+        const minute = buckets.get(k) ?? new Map();
+        const s = minute.get(serverId) ?? { cpu: [], ram: [], net: [] };
+        s.cpu.push(p.cpu);
+        s.ram.push(p.ram);
+        s.net.push((p.netIn + p.netOut) / 1000); // kbps → Mbps
+        minute.set(serverId, s);
+        buckets.set(k, minute);
       });
     });
     const keys = [...buckets.keys()].sort((a, b) => a - b);
-    const avg = (v: number[]) => +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(1);
+    const mean = (v: number[]) => (v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0);
+    const per = (k: number, f: 'cpu' | 'ram' | 'net') => [...buckets.get(k)!.values()].map(s => mean(s[f]));
     return {
       labels: keys.map(hhmm),
-      cpu: keys.map(k => avg(buckets.get(k)!.cpu)),
-      ram: keys.map(k => avg(buckets.get(k)!.ram)),
-      net: keys.map(k => +buckets.get(k)!.net.toFixed(2)),
+      cpu: keys.map(k => +mean(per(k, 'cpu')).toFixed(1)),
+      ram: keys.map(k => +mean(per(k, 'ram')).toFixed(1)),
+      net: keys.map(k => +per(k, 'net').reduce((a, b) => a + b, 0).toFixed(2)),
     };
   }, [metricSeries]);
 
@@ -218,107 +234,35 @@ export const OverviewView: React.FC = () => {
   const criticalMonitors = enabledMonitors.filter(m => m.status === 'CRITICAL').length;
   const criticalApps = applications.filter(a => a.status === 'CRITICAL').length;
   const cfConfigured = Boolean(integrations?.cloudflare.configured);
-  const deadManConfigured = deadMan.status !== 'NOT_CONFIGURED';
+  const backupApps = systemSummary.backupApps;
+  const hbServers = deadMan.servers;
+  const hbConnected = hbServers.filter(s => s.server.state === 'HEALTHY').length;
+  const hbGroup = (k: 'applications' | 'services' | 'databases') => {
+    const total = hbServers.reduce((a, s) => a + s[k].total, 0);
+    return total ? `${hbServers.reduce((a, s) => a + s[k].healthy, 0)}/${total}` : '—';
+  };
+  const hbLast = lastServerHeartbeat(deadMan);
 
   const isEmpty = !isLoading && servers.length === 0 && applications.length === 0;
 
   // ── Header ─────────────────────────────────────────────────────────────────
   const header = (
-    <div className={`flex flex-col md:flex-row md:items-center justify-between gap-3 pb-4 border-b ${
-      isDark ? 'border-[#1E293B]' : 'border-slate-200'
-    }`}>
-      <div>
-        <div className="flex items-center gap-2.5 flex-wrap">
-          <h1 className={`text-lg font-bold tracking-tight font-mono ${isDark ? 'text-white' : 'text-slate-900'}`}>
-            OPERATIONS COMMAND CENTER
-          </h1>
-          {!isEmpty && (
-            <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold flex items-center gap-1.5 ${
-              systemSummary.overallHealth === 'CRITICAL'
-                ? 'text-rose-400 bg-rose-950/60 border border-rose-800/60'
-                : systemSummary.overallHealth === 'WARNING'
-                  ? 'text-amber-400 bg-amber-950/60 border border-amber-800/60'
-                  : systemSummary.overallHealth === 'UNKNOWN'
-                    ? 'text-slate-400 bg-slate-900/60 border border-slate-700/60'
-                    : 'text-emerald-400 bg-emerald-950/60 border border-emerald-800/60'
-            }`}>
-              <StatusDot
-                status={systemSummary.overallHealth === 'CRITICAL' ? 'crit' : systemSummary.overallHealth === 'WARNING' ? 'warn' : systemSummary.overallHealth === 'UNKNOWN' ? 'unknown' : 'ok'}
-                pulse={systemSummary.overallHealth !== 'OPERATIONAL'}
-              />
-              {systemSummary.overallHealth}{systemSummary.overallHealth === 'OPERATIONAL' && systemSummary.visibilityGaps.length ? ' · PARTIAL DATA' : ''}
-            </span>
-          )}
-          {/* API backend badge (from the context's periodic /api/health check) */}
-          <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold flex items-center gap-1.5 ${
-            !apiHealth.lastChecked
-              ? (isDark ? 'text-slate-500 bg-slate-900 border border-slate-700' : 'text-slate-400 bg-slate-50 border border-slate-200')
-              : apiHealth.reachable
-                ? (isDark ? 'text-blue-400 bg-blue-950/50 border border-blue-800/50' : 'text-blue-700 bg-blue-50 border border-blue-200')
-                : (isDark ? 'text-rose-400 bg-rose-950/50 border border-rose-800/50' : 'text-rose-700 bg-rose-50 border border-rose-200')
-          }`}>
-            {!apiHealth.lastChecked
-              ? <><Circle className="w-2.5 h-2.5 animate-pulse" /> CHECKING</>
-              : apiHealth.reachable
-                ? <><Wifi className="w-3 h-3" /> API {apiHealth.latencyMs}ms</>
-                : <><WifiOff className="w-3 h-3" /> API UNREACHABLE</>
-            }
-          </span>
-          <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
-            realtimeStatus === 'LIVE'
-              ? 'text-emerald-400 bg-emerald-950/50 border border-emerald-800/50'
-              : realtimeStatus === 'RECONNECTING'
-                ? 'text-amber-400 bg-amber-950/50 border border-amber-800/50'
-                : 'text-rose-400 bg-rose-950/50 border border-rose-800/50'
-          }`}>
-            STREAM {realtimeStatus}
-          </span>
-        </div>
-        <p className={`text-[11px] mt-1 flex items-center gap-2 font-mono flex-wrap ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-          <Clock className="w-3 h-3" />
-          <span>Last update {lastUpdatedSecondsAgo}s ago</span>
-          {systemSummary.visibilityGaps.length > 0 && (
-            <>
-              <span className={isDark ? 'text-slate-700' : 'text-slate-300'}>·</span>
-              <span className="text-amber-500">Partial data: {systemSummary.visibilityGaps.join(' · ')}</span>
-            </>
-          )}
-          <span className={isDark ? 'text-slate-700' : 'text-slate-300'}>·</span>
-          <span className={overallUptime === null ? '' : overallUptime >= 99.9 ? 'text-emerald-500 font-semibold' : 'text-amber-500 font-semibold'}>
-            {overallUptime === null ? 'No uptime data yet' : `${overallUptime.toFixed(2)}% avg uptime (30d, ${uptimeVals.length} app${uptimeVals.length === 1 ? '' : 's'})`}
-          </span>
-        </p>
-      </div>
-
-      <div className="flex items-center gap-2 shrink-0">
-        {canDo('run_probe') && enabledMonitors.length > 0 && (
-          <button
-            onClick={handleProbeAll}
-            disabled={probing}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-medium rounded-lg transition-all border cursor-pointer hover:scale-105 disabled:opacity-60 disabled:cursor-wait disabled:hover:scale-100 ${
-              isDark
-                ? 'text-slate-200 bg-[#162033] hover:bg-[#1C2942] border-[#243552]'
-                : 'text-slate-700 bg-white hover:bg-slate-50 border-slate-300 shadow-xs'
-            }`}
-          >
-            {probing ? <Loader2 className="w-3.5 h-3.5 text-blue-400 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5 text-blue-400" />}
-            <span>{probing ? 'PROBING…' : 'PROBE ALL'}</span>
-          </button>
+    <div className={`pb-4 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+      <h1 className={`text-lg font-bold tracking-tight ${isDark ? 'text-white' : 'text-slate-900'}`}>Overview</h1>
+      <p className={`text-[11px] mt-1 flex items-center gap-2 flex-wrap ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+        <Clock className="w-3 h-3" />
+        <span>Updated <SinceLastUpdate /></span>
+        {systemSummary.visibilityGaps.length > 0 && (
+          <>
+            <span className={isDark ? 'text-slate-700' : 'text-slate-300'}>·</span>
+            <span className="text-amber-500">Partial data: {systemSummary.visibilityGaps.join(' · ')}</span>
+          </>
         )}
-        <button
-          onClick={() => go(criticalOpen.length > 0 ? 'incidents' : 'reports')}
-          className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-semibold rounded-lg transition-all shadow-xs cursor-pointer hover:scale-105 ${
-            criticalOpen.length > 0
-              ? 'text-white bg-rose-600 hover:bg-rose-700'
-              : 'text-white bg-blue-600 hover:bg-blue-700'
-          }`}
-        >
-          {criticalOpen.length > 0
-            ? <><AlertTriangle className="w-3.5 h-3.5" /> {criticalOpen.length} CRITICAL</>
-            : <><BarChart2 className="w-3.5 h-3.5" /> DAILY REPORT</>
-          }
-        </button>
-      </div>
+        <span className={isDark ? 'text-slate-700' : 'text-slate-300'}>·</span>
+        <span className={overallUptime === null ? '' : overallUptime >= THRESHOLDS.uptimePercent.good ? 'text-emerald-500 font-semibold' : 'text-amber-500 font-semibold'}>
+          {overallUptime === null ? 'No uptime data yet' : `${overallUptime.toFixed(2)}% average uptime, last 30 days`}
+        </span>
+      </p>
     </div>
   );
 
@@ -364,78 +308,6 @@ export const OverviewView: React.FC = () => {
     );
   }
 
-  // ── The 5 operational answers (derived from real state) ────────────────────
-  const healthyAppNames = applications.filter(a => a.status === 'HEALTHY').map(a => a.name);
-  const incidentApp = activeIncident ? applications.find(a => a.id === activeIncident.applicationId) : undefined;
-  const incidentRunbook = activeIncident?.runbookId ? runbooks.find(r => r.id === activeIncident.runbookId) : undefined;
-  const incidentMonitors = activeIncident ? monitors.filter(m => activeIncident.affectedMonitors.includes(m.id)) : [];
-  const recoveryLine = incidentMonitors.length
-    ? incidentMonitors.map(m => `${Math.min(m.consecutiveRecoveries, m.recoveryConfirmationThreshold)}/${m.recoveryConfirmationThreshold}`).join(', ')
-    : null;
-
-  const answers = [
-    {
-      n: '01',
-      q: 'What is healthy?',
-      color: 'text-emerald-500',
-      highlight: null as null | 'rose' | 'amber' | 'emerald',
-      answer: `${systemSummary.healthyApps}/${systemSummary.totalApps} apps, ${systemSummary.healthyServers}/${systemSummary.totalServers} servers`,
-      detail: healthyAppNames.length ? `${healthyAppNames.join(', ')} healthy.` : 'No application is currently reporting HEALTHY.',
-    },
-    {
-      n: '02',
-      q: 'What is failing?',
-      color: 'text-rose-400',
-      highlight: activeIncident ? 'rose' as const : null,
-      answer: activeIncident
-        ? `${incidentApp?.name ?? activeIncident.applicationId ?? 'Unknown app'} ${activeIncident.environment}`
-        : criticalMonitors > 0 ? `${criticalMonitors} monitor(s) critical` : 'No open incidents',
-      detail: activeIncident
-        ? (activeIncident.rootCause || activeIncident.title)
-        : unknownMonitors > 0 ? `${unknownMonitors} monitor(s) have not reported a result yet.` : 'All enabled monitors are passing.',
-    },
-    {
-      n: '03',
-      q: 'What is affected?',
-      color: 'text-amber-400',
-      highlight: activeIncident ? 'amber' as const : null,
-      answer: activeIncident
-        ? (activeIncident.affectedServices.length ? activeIncident.affectedServices.slice(0, 2).join(', ') : 'See incident')
-        : 'Nothing reported',
-      detail: activeIncident
-        ? `${activeIncident.affectedMonitors.length} monitor(s) affected.${incidentApp?.failoverState === 'DR_ACTIVE' ? ' Traffic is on the DR server.' : ''}`
-        : `${openIncidents.length} open incidents.`,
-    },
-    {
-      n: '04',
-      q: 'What should IT do?',
-      color: 'text-blue-400',
-      highlight: null,
-      answer: activeIncident
-        ? (incidentRunbook ? `Run: ${incidentRunbook.title}` : !activeIncident.acknowledged ? `Acknowledge ${activeIncident.id}` : `Work ${activeIncident.id}`)
-        : 'No action required',
-      detail: activeIncident
-        ? `Status ${activeIncident.status} · owner ${activeIncident.owner || 'Unassigned'}${openIncidents.length > 1 ? ` · ${openIncidents.length - 1} more open` : ''}`
-        : 'Keep monitoring.',
-    },
-    {
-      n: '05',
-      q: 'Has it recovered?',
-      color: activeIncident ? 'text-slate-400' : 'text-emerald-400',
-      highlight: activeIncident ? null : 'emerald' as const,
-      answer: activeIncident ? 'Not yet' : 'No open incidents',
-      detail: activeIncident
-        ? (recoveryLine ? `Recovery confirmations: ${recoveryLine}` : (activeIncident.recoveryStatus || 'Awaiting recovery'))
-        : 'Nothing awaiting recovery.',
-    },
-  ];
-
-  const highlightBg = (h: null | 'rose' | 'amber' | 'emerald') =>
-    h === 'rose' ? (isDark ? 'bg-[#180E13]' : 'bg-rose-50')
-      : h === 'amber' ? (isDark ? 'bg-[#18130E]' : 'bg-amber-50')
-        : h === 'emerald' ? (isDark ? 'bg-[#0E1713]' : 'bg-emerald-50')
-          : (isDark ? 'bg-[#0B0F17]' : 'bg-slate-50');
-
   const regions = [...new Set(servers.map(s => s.region).filter(Boolean))];
 
   return (
@@ -443,8 +315,8 @@ export const OverviewView: React.FC = () => {
       {header}
       {loadErrorBanner}
 
-      {/* ── Load-Balancer-managed applications (ICT): live PRD / DR answer ── */}
-      <IctStatusPanel />
+      {/* ── Every registered application: live Production (+ DR when set) ── */}
+      <ApplicationStatusPanel />
 
       {/* ── Active route per application ─────────────────────────────────── */}
       <div className={`p-3.5 sm:p-4 rounded-lg border flex flex-col sm:flex-row sm:items-start justify-between gap-3 ${
@@ -455,34 +327,38 @@ export const OverviewView: React.FC = () => {
             <Zap className="w-4 h-4 text-blue-400" />
           </div>
           <div className="min-w-0 space-y-1">
-            <span className="font-bold text-xs font-mono">ACTIVE ROUTES</span>
+            <span className="font-bold text-xs">Routes</span>
             {applications.length === 0 ? (
               <div className="text-[11px] font-mono text-slate-400">
-                No applications registered — servers exist but no PRD/DR routing is defined. Add an application in Setup.
+                No applications registered — add one in Setup. DR and routing are optional per application.
               </div>
             ) : applications.map(app => {
               const prd = servers.find(s => s.id === app.prdServerId);
               const dr = servers.find(s => s.id === app.drServerId);
-              const route = routeState(app, loadBalancer);
+              const route = routeState(app, loadBalancer, dnsPointsAt(app, servers, cloudflareZones));
               const onDr = route === 'DR';
               const moving = route === 'MOVING';
               const unknown = route === 'UNKNOWN';
+              const split = route === 'SPLIT';
+              const flows = split ? originFlows(app, loadBalancer) : null;
+              const splitLabel = flows?.prd.percent != null && flows.dr.percent != null ? `SPLIT ${flows.prd.percent}/${flows.dr.percent}` : 'SPLIT';
               return (
                 <div key={app.id} className="flex items-center gap-2 flex-wrap text-[11px] font-mono">
                   <span className="font-semibold">{app.name}</span>
                   <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                     unknown ? 'bg-slate-900 text-slate-300 border border-slate-700'
                       : moving ? 'bg-blue-950 text-blue-300 border border-blue-800'
+                      : split ? 'bg-violet-950 text-violet-200 border border-violet-800'
                       : onDr ? 'bg-amber-950 text-amber-300 border border-amber-800'
                         : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
                   }`}>
-                    {unknown ? 'ROUTING UNKNOWN' : moving ? 'FAILING OVER' : onDr ? 'ON DR' : 'ON PRD'}
+                    {unknown ? 'ROUTING UNKNOWN' : moving ? 'FAILING OVER' : split ? splitLabel : onDr ? 'ON DR' : 'ON PRD'}
                   </span>
-                  <span className={route === 'PRD' ? 'text-emerald-400 font-semibold' : 'text-slate-400'}>
+                  <span className={route === 'PRD' || split ? 'text-emerald-400 font-semibold' : 'text-slate-400'}>
                     PRD {prd ? (prd.ip || prd.hostname) : 'not linked'}
                   </span>
                   <span className="text-slate-500">/</span>
-                  <span className={onDr ? 'text-amber-400 font-semibold' : 'text-slate-400'}>
+                  <span className={onDr || split ? 'text-amber-400 font-semibold' : 'text-slate-400'}>
                     DR {dr ? (dr.ip || dr.hostname) : 'not linked'}
                   </span>
                   {(app.loadBalancer?.hostname || app.dnsRecordName) && <span className="text-slate-500">· {app.loadBalancer ? `Cloudflare LB ${app.loadBalancer.hostname}` : app.dnsRecordName}</span>}
@@ -495,13 +371,14 @@ export const OverviewView: React.FC = () => {
           onClick={() => go(applications.length === 0 ? 'setup' : 'resilience')}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-mono font-bold bg-blue-600 hover:bg-blue-500 text-white transition-all shadow-xs cursor-pointer shrink-0 self-start"
         >
-          <span>{applications.length === 0 ? 'OPEN SETUP' : 'PRD / DR READINESS'}</span>
+          <span>{applications.length === 0 ? 'Open Setup' : 'Open readiness'}</span>
           <ArrowRight className="w-3.5 h-3.5" />
         </button>
       </div>
 
       {/* ── 8-Column Metric Cards ────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+      {/* auto-fit: as many ≥ 10.5rem columns as fit, stretched to the full row — 8 across on wide screens, fewer (never cramped) on laptops */}
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(10.5rem,1fr))] items-start gap-2">
         <MetricCard
           label="Applications"
           value={`${systemSummary.healthyApps}/${systemSummary.totalApps}`}
@@ -541,9 +418,9 @@ export const OverviewView: React.FC = () => {
           badgeColor={systemSummary.openIncidents > 0 ? 'text-rose-400 bg-rose-950/60' : 'text-emerald-400 bg-emerald-950/60'}
         />
         <MetricCard
-          label="DR Ready"
+          label="Readiness"
           value={`${systemSummary.drReadinessCount}/${systemSummary.totalApps}`}
-          sub="Server-evaluated DR readiness = READY"
+          sub="Ready to switch to the recovery server"
           icon={Cloud}
           status={systemSummary.totalApps === 0 ? 'unknown' : systemSummary.drReadinessCount < systemSummary.totalApps ? 'warn' : 'ok'}
           onClick={() => go('resilience')}
@@ -551,10 +428,15 @@ export const OverviewView: React.FC = () => {
         />
         <MetricCard
           label="Backups"
-          value={systemSummary.backupsCurrentCount}
-          sub="Successful, last 26h"
+          value={backupApps && backupApps.total ? `${backupApps.healthy}/${backupApps.total}` : systemSummary.backupsCurrentCount}
+          sub={!backupApps ? 'Successful, last 26h'
+            : backupApps.total === 0 ? 'No applications'
+              : backupApps.failed ? `${backupApps.failed} app(s) FAILED`
+                : backupApps.stale ? `${backupApps.stale} app(s) stale`
+                  : backupApps.unknown ? `${backupApps.unknown} app(s) never reported` : 'All apps current'}
           icon={Database}
-          status={systemSummary.backupsCurrentCount === 0 ? 'unknown' : 'ok'}
+          status={!backupApps || backupApps.total === 0 ? (systemSummary.backupsCurrentCount === 0 ? 'unknown' : 'ok')
+            : backupApps.failed ? 'crit' : backupApps.stale ? 'warn' : backupApps.unknown ? 'unknown' : 'ok'}
           onClick={() => go('backups')}
           isDark={isDark}
         />
@@ -568,15 +450,20 @@ export const OverviewView: React.FC = () => {
           isDark={isDark}
         />
         <MetricCard
-          label="Dead-Man"
-          value={!deadManConfigured ? 'Not set' : deadMan.status === 'HEALTHY' ? 'Active' : 'SILENT'}
-          sub={deadManConfigured ? deadMan.nodeLocation : 'DEADMAN_HEARTBEAT_URL unset'}
+          label="Heartbeat"
+          value={deadManLabel(deadMan.status)}
+          sub={hbServers.length ? `${hbServers.map(s => `${s.environment} VPS`).join(' + ')} · apps · services · DB` : 'Register servers in Setup'}
           icon={Activity}
-          status={!deadManConfigured ? 'unknown' : deadMan.status === 'HEALTHY' ? 'ok' : 'crit'}
+          status={deadMan.status === 'HEALTHY' ? 'ok' : deadMan.status === 'DEGRADED' ? 'warn' : deadMan.status === 'FAILING' ? 'crit' : 'unknown'}
           onClick={() => go('monitors')}
           isDark={isDark}
-          badge={deadManConfigured ? (deadMan.status === 'HEALTHY' ? `${deadMan.intervalSec}s hb` : 'ALERT') : undefined}
-          badgeColor={deadMan.status === 'HEALTHY' ? 'text-emerald-400 bg-emerald-950/60' : 'text-rose-400 bg-rose-950/60'}
+          // Monitored infrastructure heartbeats (only when servers exist — no rows of dashes)
+          details={!hbServers.length ? undefined : [
+            ['Servers', `${hbConnected}/${hbServers.length} live`],
+            ['Last report', hbLast ? <Ago iso={hbLast} staleAfterSec={deadMan.staleAfterSec} /> : '—'],
+            ['Apps', hbGroup('applications')],
+            ['Services · DB', `${hbGroup('services')} · ${hbGroup('databases')}`],
+          ]}
         />
       </div>
 
@@ -659,32 +546,6 @@ export const OverviewView: React.FC = () => {
         )}
       </div>
 
-      {/* ── The 5 Operational Answers ────────────────────────────────────── */}
-      <div className={`rounded-lg border overflow-hidden ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
-        <div className={`px-4 py-2.5 border-b flex items-center justify-between ${isDark ? 'border-[#1A2332] bg-[#0D1220]' : 'border-slate-100 bg-slate-50'}`}>
-          <div className="flex items-center gap-2">
-            <Eye className="w-3.5 h-3.5 text-blue-400" />
-            <span className="text-[11px] font-bold uppercase tracking-wider font-mono">Operational Assessment — The 5 Answers</span>
-          </div>
-          <span className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-            Derived from live incidents &amp; monitors
-          </span>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-5">
-          {answers.map(item => (
-            <div key={item.n} className={`p-3.5 border-r last:border-r-0 ${highlightBg(item.highlight)} ${isDark ? 'border-[#1A2436]' : 'border-slate-100'}`}>
-              <div className="flex items-center gap-1.5 mb-2">
-                <span className={`text-[9px] font-mono font-bold ${item.color}`}>{item.n}</span>
-                <span className={`text-[9px] uppercase tracking-wider font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{item.q}</span>
-              </div>
-              <div className={`text-xs font-bold font-mono ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{item.answer}</div>
-              <div className={`text-[11px] font-sans mt-1 leading-snug break-words ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{item.detail}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-
       {/* ── Live Visual Charts ───────────────────────────────────────────── */}
       <div className="space-y-4">
         <HeartbeatPulseChart />
@@ -694,16 +555,9 @@ export const OverviewView: React.FC = () => {
 
       {/* ── Telemetry Time-Series Graphs ─────────────────────────────────── */}
       <div>
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <TrendingUp className="w-3.5 h-3.5 text-blue-400" />
-            <h3 className="text-[11px] font-bold uppercase tracking-wider font-mono">
-              Infrastructure Telemetry — Past 60 Minutes
-            </h3>
-          </div>
-          <span className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-            Per-minute agent samples · refreshed every 60s
-          </span>
+        <div className="flex items-center gap-2 mb-3">
+          <TrendingUp className="w-3.5 h-3.5 text-blue-400" />
+          <h3 className="text-sm font-semibold">Last 60 minutes</h3>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           <TelemetryAreaGraph
@@ -733,13 +587,10 @@ export const OverviewView: React.FC = () => {
       <div className={`rounded-lg border overflow-hidden ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
         <div className={`px-4 py-3 border-b flex items-center justify-between ${isDark ? 'border-[#1A2332] bg-[#0D1220]' : 'border-slate-100 bg-slate-50'}`}>
           <div>
-            <h2 className="text-[11px] font-bold font-mono uppercase tracking-wider">Application Systems &amp; Failover Matrix</h2>
-            <p className={`text-[10px] mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-              Live health · RTO/RPO targets · Replication lag · Active origin
-            </p>
+            <h2 className="text-sm font-semibold">Applications</h2>
           </div>
           <button onClick={() => go('applications')} className="text-xs text-blue-400 hover:text-blue-300 font-mono font-medium flex items-center gap-1 cursor-pointer">
-            <span>Full view</span><ArrowRight className="w-3 h-3" />
+            <span>Open</span><ArrowRight className="w-3 h-3" />
           </button>
         </div>
 
@@ -751,6 +602,7 @@ export const OverviewView: React.FC = () => {
             </button>
           </div>
         ) : (
+          <>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs font-mono">
               <thead className={`text-[10px] font-semibold uppercase border-b ${isDark ? 'bg-[#0B0F17] text-slate-500 border-[#1A2332]' : 'bg-slate-50 text-slate-500 border-slate-200'}`}>
@@ -768,11 +620,12 @@ export const OverviewView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className={`divide-y text-[11px] ${isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
-                {applications.map(app => {
+                {appPaging.slice.map(app => {
                   const prdServer = servers.find(s => s.id === app.prdServerId);
                   const drServer  = servers.find(s => s.id === app.drServerId);
                   const dot = dotFor(app.status);
-                  const isDr      = app.failoverState === 'DR_ACTIVE';
+                  const cause = statusCause(app.status, app.dependencies);
+                  const route = routeState(app, loadBalancer, dnsPointsAt(app, servers, cloudflareZones));
                   const lag       = app.currentReplicationLagSec;
                   const lagWarn   = lag !== null && lag > app.rpoTargetMin * 60;
                   const err       = app.errorRatePercent;
@@ -793,8 +646,9 @@ export const OverviewView: React.FC = () => {
                             {app.status}
                           </span>
                         </div>
-                        <div className={`text-[10px] mt-0.5 font-bold ${isDr ? 'text-amber-400' : isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-                          {app.failoverState === 'FAILING_OVER' ? 'FAILING OVER' : isDr ? 'DR ACTIVE' : 'PRD ACTIVE'}
+                        {cause && <div className={`text-[10px] mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{cause}</div>}
+                        <div className={`text-[10px] mt-0.5 font-bold ${route === 'DR' ? 'text-amber-400' : route === 'UNKNOWN' ? 'text-slate-400' : isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                          {route === 'UNKNOWN' ? 'ROUTING UNKNOWN' : servingLabel(route).toUpperCase()}
                         </div>
                       </td>
 
@@ -823,7 +677,7 @@ export const OverviewView: React.FC = () => {
                       </td>
 
                       <td className="py-2.5 px-3.5 text-right tabular-nums font-semibold">
-                        <span className={app.uptime30d === null ? 'text-slate-500' : app.uptime30d < 99.9 ? 'text-amber-400' : 'text-emerald-400'}>
+                        <span className={app.uptime30d === null ? 'text-slate-500' : app.uptime30d < THRESHOLDS.uptimePercent.good ? 'text-amber-400' : 'text-emerald-400'}>
                           {fmtPct(app.uptime30d)}
                         </span>
                       </td>
@@ -858,6 +712,8 @@ export const OverviewView: React.FC = () => {
               </tbody>
             </table>
           </div>
+          <Pagination page={appPaging.page} totalPages={appPaging.totalPages} total={appPaging.total} pageSize={appPaging.pageSize} onPage={appPaging.setPage} />
+          </>
         )}
       </div>
 
@@ -926,7 +782,7 @@ export const OverviewView: React.FC = () => {
                       </div>
                     </div>
                   ) : (
-                    <div className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>{srv.lastSeen ? `Agent ${srv.agentStatus}` : 'Not connected'}</div>
+                    <div className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`} title={srv.lastIngestError?.reason}>{srv.lastSeen ? `Agent ${srv.agentStatus}${srv.lastIngestError && srv.agentStatus !== 'CONNECTED' ? ' · report rejected' : ''}` : srv.lastIngestError ? 'Report rejected' : 'Not connected'}</div>
                   )}
                   <div className={`text-[9px] font-mono mt-1.5 truncate ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
                     {srv.region || 'Region n/a'} · {srv.environment}

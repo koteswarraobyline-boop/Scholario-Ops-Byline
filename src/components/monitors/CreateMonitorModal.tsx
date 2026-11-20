@@ -15,6 +15,7 @@ import {
   Info,
   Loader2,
 } from 'lucide-react';
+import { useDialog } from '../ui/useDialog';
 
 // ── Monitor type groups (mirror server/engine.ts) ────────────────────────────
 export const HTTP_MONITOR_TYPES: MonitorType[] = ['HTTP', 'HTTPS', 'APP_HEALTH', 'APP_READINESS', 'API_BUSINESS'];
@@ -94,6 +95,7 @@ export const MonitorFormModal: React.FC<MonitorFormModalProps> = ({ existing, in
   const { canDo } = useAuth();
   const isDark = theme === 'dark';
   const isEdit = Boolean(existing);
+  const dialog = useDialog(onClose);
 
   const [name, setName] = useState('');
   const [type, setType] = useState<MonitorType>('HTTPS');
@@ -382,7 +384,9 @@ export const MonitorFormModal: React.FC<MonitorFormModalProps> = ({ existing, in
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-3 sm:p-5 overflow-y-auto animate-in fade-in" onClick={onClose}>
       <div
-        className={`w-full max-w-4xl rounded-lg border overflow-hidden flex flex-col max-h-[92vh] shadow-2xl transition-colors ${
+        {...dialog}
+        aria-labelledby="monitor-form-title"
+        className={`w-full max-w-4xl rounded-lg border overflow-hidden flex flex-col max-h-[92vh] shadow-2xl transition-colors focus:outline-none ${
           isDark ? 'bg-[#0F1626] text-slate-100 border-[#223048]' : 'bg-white text-slate-900 border-slate-300'
         }`}
         onClick={e => e.stopPropagation()}
@@ -396,7 +400,7 @@ export const MonitorFormModal: React.FC<MonitorFormModalProps> = ({ existing, in
               {isEdit ? <Save className="w-4 h-4" /> : <Plus className="w-5 h-5" />}
             </div>
             <div className="min-w-0">
-              <h2 className="text-base font-bold font-mono tracking-tight">
+              <h2 id="monitor-form-title" className="text-base font-bold font-mono tracking-tight">
                 {isEdit ? 'EDIT MONITOR' : 'CREATE MONITOR'}
               </h2>
               <p className={`text-xs font-mono mt-0.5 truncate ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
@@ -410,9 +414,10 @@ export const MonitorFormModal: React.FC<MonitorFormModalProps> = ({ existing, in
             className={`p-1.5 rounded transition-colors cursor-pointer shrink-0 ml-2 ${
               isDark ? 'text-slate-400 hover:text-white hover:bg-slate-800' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200'
             }`}
-            title="Close"
+            title="Close (Esc)"
+            aria-label={isEdit ? 'Close edit monitor' : 'Close create monitor'}
           >
-            <X className="w-5 h-5" />
+            <X className="w-5 h-5" aria-hidden="true" />
           </button>
         </div>
 

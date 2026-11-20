@@ -11,3 +11,10 @@ data/
 backups/
 logs/
 .last-good-commit
+
+# Local UI-test signing key. It must not be committed.
+data-ui-test/.jwt-secret
+
+# Database dumps and file backups may contain production data (users, tokens): never commit them
+*.dump
+*.bak

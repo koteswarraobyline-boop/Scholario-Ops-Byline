@@ -6,23 +6,51 @@ import { OpsUser } from '../src/types/index.ts';
 import { config, DATA_DIR } from './config.ts';
 import { db, persist, UserRecord } from './store.ts';
 import { log } from './logger.ts';
+import { apiError } from './validate.ts';
+
+/**
+ * Compares two secrets in constant time. The byte compare always runs, including when the
+ * lengths differ, so a wrong token does not return early.
+ */
+export function safeEqual(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  const len = Math.max(x.length, y.length, 1);
+  const xb = Buffer.alloc(len);
+  const yb = Buffer.alloc(len);
+  x.copy(xb);
+  y.copy(yb);
+  return crypto.timingSafeEqual(xb, yb) && x.length === y.length;
+}
 
 export type Role = OpsUser['roleName'];
 export const ROLES: Role[] = ['viewer', 'operator', 'it_administrator', 'super_admin'];
-const ROLE_LEVEL: Record<Role, number> = { viewer: 1, operator: 2, it_administrator: 3, super_admin: 4 };
+export const ROLE_LEVEL: Record<Role, number> = { viewer: 1, operator: 2, it_administrator: 3, super_admin: 4 };
 
 // ── Password hashing (scrypt) ────────────────────────────────────────────────
+const SCRYPT = { N: 16384, r: 8, p: 1 } as const;
+const scryptAsync = (password: string, salt: Buffer, len: number) =>
+  new Promise<Buffer>((resolve, reject) => crypto.scrypt(password, salt, len, SCRYPT, (err, key) => (err ? reject(err) : resolve(key))));
+
+/** Synchronous: only for startup (admin bootstrap). Request handlers use hashPasswordAsync. */
 export function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16);
-  const hash = crypto.scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 });
+  const hash = crypto.scryptSync(password, salt, 64, SCRYPT);
   return `scrypt$${salt.toString('hex')}$${hash.toString('hex')}`;
 }
 
-export function verifyPassword(password: string, stored: string): boolean {
+/** Off the event loop (libuv thread pool): a burst of logins never stalls monitoring or other requests */
+export async function hashPasswordAsync(password: string): Promise<string> {
+  const salt = crypto.randomBytes(16);
+  const hash = await scryptAsync(password, salt, 64);
+  return `scrypt$${salt.toString('hex')}$${hash.toString('hex')}`;
+}
+
+export async function verifyPassword(password: string, stored: string): Promise<boolean> {
   const [scheme, saltHex, hashHex] = stored.split('$');
   if (scheme !== 'scrypt' || !saltHex || !hashHex) return false;
   const expected = Buffer.from(hashHex, 'hex');
-  const actual = crypto.scryptSync(password, Buffer.from(saltHex, 'hex'), expected.length, { N: 16384, r: 8, p: 1 });
+  const actual = await scryptAsync(password, Buffer.from(saltHex, 'hex'), expected.length);
   return crypto.timingSafeEqual(expected, actual);
 }
 
@@ -154,7 +182,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const isStream = req.path.endsWith('/realtime/stream');
   const user = isStream && !bearer ? consumeStreamTicket(req.query.ticket as string | undefined) : userFromAccessToken(bearer);
   if (!user) {
-    res.status(401).json({ success: false, message: 'Authentication required' });
+    res.status(401).json(apiError(401, 'Authentication required'));
     return;
   }
   req.user = user;
@@ -165,7 +193,7 @@ export function requireRole(minRole: Role) {
   return (req: Request, res: Response, next: NextFunction) => {
     const level = req.user ? ROLE_LEVEL[req.user.roleName] ?? 0 : 0;
     if (level < ROLE_LEVEL[minRole]) {
-      res.status(403).json({ success: false, message: `Requires ${minRole} role or higher` });
+      res.status(403).json(apiError(403, `Requires ${minRole} role or higher`));
       return;
     }
     next();
@@ -179,11 +207,18 @@ const attempts = new Map<string, { count: number; resetAt: number }>();
 const WINDOW_MS = 15 * 60 * 1000;
 const MAX_ATTEMPTS = 10;
 
-export function loginRateLimited(key: string): boolean {
+export function loginRateLimited(key: string, max = MAX_ATTEMPTS): boolean {
   const now = Date.now();
   const entry = attempts.get(key);
   if (!entry || entry.resetAt < now) return false;
-  return entry.count >= MAX_ATTEMPTS;
+  return entry.count >= max;
+}
+
+let dummyHash: string | null = null;
+/** Hash of a random password, used to spend the same time on unknown accounts as on real ones */
+export function dummyPasswordHash(): string {
+  dummyHash ??= hashPassword(crypto.randomBytes(16).toString('hex'));
+  return dummyHash;
 }
 
 export function recordLoginFailure(key: string) {

@@ -43,7 +43,7 @@ export const Ago: React.FC<{ iso: string | null | undefined; prefix?: string; st
 /** GREEN healthy · YELLOW degraded · RED failed · GRAY no reliable data (UNKNOWN / NOT_CONFIGURED are never green) */
 export const verdictColor = (s: string | null | undefined) =>
   s === 'PASS' || s === 'READY' || s === 'OK' || s === 'UP' || s === 'HEALTHY' || s === 'ONLINE' || s === 'CONNECTED' || s === 'CONFIGURED' ? 'text-emerald-500'
-    : s === 'WARNING' || s === 'DEGRADED' || s === 'STALE' || s === 'PARTIALLY_READY' || s === 'RATE_LIMITED' ? 'text-amber-500'
+    : s === 'WARNING' || s === 'DEGRADED' || s === 'STALE' || s === 'RATE_LIMITED' ? 'text-amber-500'
       : s === 'FAIL' || s === 'FAILED' || s === 'NOT_READY' || s === 'CRITICAL' || s === 'DOWN' || s === 'ERROR' || s === 'TIMEOUT' || s === 'DNS_ERROR' || s === 'TLS_ERROR' || s === 'CONNECTION_ERROR' || s === 'UNAVAILABLE' || s === 'OFFLINE' || s === 'AUTH_FAILED' || s === 'DISCONNECTED' ? 'text-rose-500'
         : 'text-slate-400';
 

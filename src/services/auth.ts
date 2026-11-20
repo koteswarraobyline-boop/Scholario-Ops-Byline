@@ -12,6 +12,12 @@ export const AuthService = {
     return res.data.user;
   },
 
+  async exchangeSso(ticket: string): Promise<SafeUser> {
+    const res = await api.post<ApiResponse<SessionResponse>>('/api/auth/oidc/exchange', { ticket });
+    tokenStore.setTokens(res.data.tokens.accessToken, res.data.tokens.refreshToken, res.data.user);
+    return res.data.user;
+  },
+
   async logout(): Promise<void> {
     const refreshToken = tokenStore.getRefresh();
     try {

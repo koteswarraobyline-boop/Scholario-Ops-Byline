@@ -1,6 +1,25 @@
 /** Small input validation helpers. Each throws ValidationError with a user-facing message. */
 export class ValidationError extends Error {}
 
+const STATUS_CODE: Record<number, string> = {
+  400: 'VALIDATION',
+  401: 'UNAUTHORIZED',
+  403: 'FORBIDDEN',
+  404: 'NOT_FOUND',
+  409: 'CONFLICT',
+  412: 'PRECONDITION_FAILED',
+  413: 'PAYLOAD_TOO_LARGE',
+  429: 'TOO_MANY_REQUESTS',
+  500: 'INTERNAL',
+  502: 'BAD_GATEWAY',
+  503: 'UNAVAILABLE',
+};
+
+/** Every API error uses this shape. The code is stable. The message is for a person. No stack. */
+export function apiError(status: number, message: string, code?: string) {
+  return { success: false as const, code: code ?? STATUS_CODE[status] ?? 'ERROR', message };
+}
+
 type Obj = Record<string, unknown>;
 
 export function body(req: { body?: unknown }): Obj {

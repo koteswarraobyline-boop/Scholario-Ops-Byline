@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Loader2, RefreshCw, ShieldAlert } from 'lucide-react';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
 import { api } from '../../services/api';
 import { Application, FailoverPreflight } from '../../types';
 import { Ago, verdictColor } from '../ui/Freshness';
+import { ImpactPreviewCard } from '../ui/ImpactPreviewCard';
 
 /**
  * Failover console for applications routed by a Cloudflare Load Balancer.
@@ -25,25 +26,33 @@ export const LbFailoverConsole: React.FC<{ app: Application }> = ({ app }) => {
   const [deciding, setDeciding] = useState(false);
   const [open, setOpen] = useState(false);
 
+  // Only the latest request may update the screen; the previous app's / direction's result is cleared
+  // at once so a decision can never be made against checks for something else
+  const requestId = useRef(0);
   const load = useCallback(async () => {
+    const id = ++requestId.current;
     setLoading(true);
+    setPf(null);
     try {
-      setPf(await api.getFailoverPreflight(app.id, target));
-      setError(null);
+      const result = await api.getFailoverPreflight(app.id, target);
+      if (id === requestId.current) { setPf(result); setError(null); }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Pre-flight failed');
+      if (id === requestId.current) setError(err instanceof Error ? err.message : 'Pre-flight failed');
     } finally {
-      setLoading(false);
+      if (id === requestId.current) setLoading(false);
     }
   }, [app.id, target]);
+  const pfCurrent = Boolean(pf && pf.appId === app.id && pf.target === target && !loading);
 
   useEffect(() => { if (open) void load(); }, [open, load]);
 
   const decide = async (decision: 'APPROVED' | 'REJECTED') => {
+    if (!pfCurrent) { notify('error', 'Wait for the pre-flight checks of this application and direction to finish'); return; }
     if (!reason.trim()) { notify('error', 'Enter a reason — it is recorded in the audit log'); return; }
     setDeciding(true);
     try {
-      await api.recordFailoverDecision(app.id, target, decision, reason.trim());
+      const recorded = await api.recordFailoverDecision(app.id, target, decision, reason.trim());
+      setPf(recorded.preflight);
       notify('success', `Failover ${decision.toLowerCase()} — recorded in the audit log${decision === 'APPROVED' ? '. Perform the switch in Cloudflare.' : ''}`);
       setReason('');
     } catch (err) {
@@ -100,6 +109,11 @@ export const LbFailoverConsole: React.FC<{ app: Application }> = ({ app }) => {
             <div><span className={muted}>Current DR pool</span><div className="font-semibold">{pf.currentDr}</div></div>
             <div><span className={muted}>{pf.target === 'DR' ? 'DR' : 'Production'} readiness</span><div className={`font-bold ${verdictColor(pf.drOverall)}`}>{pf.drOverall.replace('_', ' ')}</div></div>
           </div>
+          <ImpactPreviewCard
+            preview={pf.impactPreview}
+            isDark={isDark}
+            title={pf.target === 'DR' ? 'What will break if Production goes down' : 'What will break if DR goes down'}
+          />
           <div className="space-y-1">
             {pf.checks.map(c => (
               <div key={c.key} className={`grid grid-cols-[1fr_auto] gap-2 py-1 border-b ${isDark ? 'border-[#1A2332]' : 'border-slate-200'}`}>
@@ -120,17 +134,24 @@ export const LbFailoverConsole: React.FC<{ app: Application }> = ({ app }) => {
               {pf.plan.map((step, i) => <li key={i}>{step}</li>)}
             </ol>
           </div>
+          {pf.lastDecision && (
+            <div className={`p-2 rounded border font-sans ${pf.lastDecision.decision === 'APPROVED' ? (isDark ? 'border-amber-900 text-amber-200' : 'border-amber-300 text-amber-900') : (isDark ? 'border-[#1E293B] text-slate-300' : 'border-slate-300 text-slate-700')}`}>
+              Last decision for this direction: <strong>{pf.lastDecision.decision}</strong> by {pf.lastDecision.operator || '—'}
+              {' · '}<Ago iso={pf.lastDecision.at} />
+              {pf.lastDecision.reason ? <> · {pf.lastDecision.reason}</> : null}
+            </div>
+          )}
           {hasRole('super_admin') ? (
             <div className={`p-2 rounded border space-y-2 ${isDark ? 'bg-[#1F1710] border-amber-900' : 'bg-amber-50 border-amber-200'}`}>
               <div className="flex items-center gap-1.5 font-bold text-amber-500"><AlertTriangle className="w-4 h-4" /> Record decision</div>
               <input value={reason} onChange={e => setReason(e.target.value)} placeholder="Reason (required, recorded in the audit log)"
                 className={`w-full px-2 py-1 rounded border font-mono outline-none ${isDark ? 'bg-[#0B0F17] border-[#1E293B] text-slate-200' : 'bg-white border-slate-300'}`} />
               <div className="flex gap-2">
-                <button disabled={deciding} onClick={() => void decide('APPROVED')}
+                <button disabled={deciding || !pfCurrent} onClick={() => void decide('APPROVED')}
                   className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white font-semibold cursor-pointer disabled:opacity-60 flex items-center gap-1">
                   {deciding && <Loader2 className="w-3 h-3 animate-spin" />} Approve (switch in Cloudflare)
                 </button>
-                <button disabled={deciding} onClick={() => void decide('REJECTED')}
+                <button disabled={deciding || !pfCurrent} onClick={() => void decide('REJECTED')}
                   className={`px-2.5 py-1 rounded font-semibold cursor-pointer disabled:opacity-60 ${isDark ? 'bg-slate-800 text-slate-200' : 'bg-slate-200 text-slate-800'}`}>
                   Reject
                 </button>

@@ -4,6 +4,7 @@ import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
 import { LbPool, LbOrigin, LoadBalancerState } from '../../types';
 import { Ago, triText, triColor } from '../ui/Freshness';
+import { poolReceiving } from '../ui/routing';
 
 const STATUS_TEXT: Record<LoadBalancerState['status'], string> = {
   OK: 'Live',
@@ -153,7 +154,9 @@ export const LoadBalancerPanel: React.FC<{ appId?: string }> = ({ appId }) => {
               : routing.found ? (
                 <span className={muted}>
                   · steering {routing.steeringPolicy ?? 'default'} · pool order {routing.defaultPools.map(name).join(' → ') || '—'} · fallback {routing.fallbackPool ? name(routing.fallbackPool) : '—'} ·{' '}
-                  serving <span className={routing.activePoolId ? 'text-blue-400 font-semibold' : ''}>{routing.activePoolId ? name(routing.activePoolId) : 'unknown'}</span> · <Ago iso={routing.fetchedAt} />
+                  serving <span className={routing.traffic.length || routing.activePoolId ? 'text-blue-400 font-semibold' : ''}>{routing.traffic.length
+                    ? routing.traffic.map(t => `${name(t.poolId)}${t.percent == null ? '' : ` ${t.percent}%`}`).join(' · ')
+                    : routing.activePoolId ? name(routing.activePoolId) : 'unknown'}</span> · <Ago iso={routing.fetchedAt} />
                 </span>
               ) : <span className="text-amber-500">· routing: {routing.error ?? 'not found'}</span>}
           </div>
@@ -165,7 +168,7 @@ export const LoadBalancerPanel: React.FC<{ appId?: string }> = ({ appId }) => {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
           {pools.map(p => {
             const routing = loadBalancer?.routing.find(r => apps.find(a => a.id === p.applicationId)?.loadBalancer?.hostname === r.hostname);
-            const active = routing?.found ? (routing.activePoolId ? routing.activePoolId === p.id : null) : undefined;
+            const active = routing ? poolReceiving(routing, p.id) : undefined;
             return <LbPoolCard key={`${p.applicationId}-${p.id}`} pool={p} isDark={isDark} active={active} />;
           })}
         </div>

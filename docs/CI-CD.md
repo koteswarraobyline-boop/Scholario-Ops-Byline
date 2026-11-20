@@ -59,6 +59,11 @@ Create a GitHub **Environment** named `production` (Settings → Environments) a
 | `PRODUCTION_PORT` | SSH port (optional, default 22) |
 | `PRODUCTION_SSH_KEY` | private key of the deploy key pair (ed25519, no passphrase) |
 | `PRODUCTION_SSH_KNOWN_HOSTS` | the server's verified SSH host key line(s) — so the runner never trusts an unknown host |
+| `OPS_REPORT_URL` | Public Ops base URL, e.g. `https://scholario-ops.bylinelearning.cloud` (must be `https://…`, no trailing path) |
+| `OPS_DEPLOY_REPORT_TOKEN` | Same value as `DEPLOY_REPORT_TOKEN` in the server `/var/www/scholario-ops/.env` |
+| `OPS_APPLICATION_CODE` | `codeName` of the Scholario Ops application row in Setup (e.g. `scholario-ops`) |
+
+The three `OPS_*` secrets make CI POST to `/api/v1/deployments/report` after every deploy (SUCCESS, ROLLED_BACK, or FAILED). If any are missing, the **Report the deployment** step fails with exit 1 even when the switch itself succeeded.
 
 Recommended environment settings:
 - **Deployment branches: Selected → `main`.** Feature branches cannot deploy, even by editing the workflow.
@@ -86,7 +91,7 @@ The release manager runs as root because the `scholario-ops` PM2 process belongs
 3. Extract into `/var/www/scholario-ops-releases/<UTC timestamp>-<sha7>/`. Verify `REVISION` equals `<sha>` and that the required files exist.
 4. `npm ci --omit=dev --ignore-scripts` and `node --check dist-server/server.js`.
 5. Report any **new database migrations** compared with the live release.
-6. Pre-deploy database backup: `deploy/backup-db.sh` writes to `/var/www/scholario-ops/backups/`. A failed backup stops the deploy.
+6. Pre-deploy database backup: `deploy/backup-db.sh` writes to `/var/www/scholario-ops/backups/` (encrypted and copied off the server when configured, see DEPLOYMENT.md §13). A failed backup stops the deploy; a failed off-server copy is reported on the Backups page but does not. After updating `deploy/backup-db.sh`, re-install the root-owned copy: `sudo install -m 0755 -o root -g root deploy/backup-db.sh /usr/local/sbin/scholario-ops-backup-db`.
 7. *Up to this point the live release is untouched. Any failure exits with production unchanged.*
 8. Atomically switch `current` to the new release, then run `pm2 restart scholario-ops --update-env` and check that the PID changed.
 9. Health checks (§7). On success: mark the release OK, run `pm2 save`, prune old releases, write the audit log.
@@ -154,6 +159,7 @@ sudo /usr/local/sbin/scholario-ops-release rollback 20261007-120000-ab12cd3   # 
 | readiness 503 | the `checks.database` / `startupError` field in the printed body; `pm2 logs scholario-ops` |
 | public check fails, local passes | nginx / Cloudflare / DNS — the release itself is fine but the deploy was rolled back by design |
 | warning *release manager differs* | reinstall it (§15) |
+| error *Deployment was not recorded* / missing `OPS_*` | add `OPS_REPORT_URL`, `OPS_DEPLOY_REPORT_TOKEN`, `OPS_APPLICATION_CODE` to the `production` environment (§4); ensure `DEPLOY_REPORT_TOKEN` is set on the server `.env` and matches |
 
 Full transcripts: `/var/www/scholario-ops-releases/logs/`. Audit trail: `/var/www/scholario-ops-releases/deployments.log`.
 

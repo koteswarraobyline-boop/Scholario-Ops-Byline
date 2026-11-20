@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { useOps } from '../../context/OpsContext';
 
@@ -8,6 +8,21 @@ interface PaginationProps {
   total: number;
   pageSize: number;
   onPage: (page: number) => void;
+}
+
+/** Client-side paging for filtered Setup / inventory lists. Resets to page 1 when the list identity changes. */
+export function useClientPagination<T>(items: T[], pageSize = 10, resetKey = '') {
+  const [page, setPage] = useState(1);
+  const total = items.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize) || 1);
+  useEffect(() => { setPage(1); }, [resetKey, pageSize]);
+  useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
+  const slice = useMemo(() => {
+    const safe = Math.min(Math.max(1, page), totalPages);
+    const start = (safe - 1) * pageSize;
+    return items.slice(start, start + pageSize);
+  }, [items, page, pageSize, totalPages]);
+  return { page, setPage, pageSize, total, totalPages, slice };
 }
 
 export const Pagination: React.FC<PaginationProps> = ({

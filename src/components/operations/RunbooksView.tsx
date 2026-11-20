@@ -4,6 +4,7 @@ import { useAuth } from '../../context/AuthContext';
 import { Runbook } from '../../types';
 import { CheckCircle2, Square, Plus, Pencil, Trash2, RotateCcw, X, BookOpen, Loader2 } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 
 const CATEGORIES: Runbook['category'][] = ['DATABASE', 'FAILOVER', 'WEB_SERVER', 'PERFORMANCE', 'DEAD_MAN'];
 
@@ -72,7 +73,7 @@ const RunbookEditor: React.FC<{
     }`}>
       <div className="flex items-center justify-between">
         <span className="font-bold text-sm">{isNew ? 'New runbook' : 'Edit runbook'}</span>
-        <button type="button" onClick={onCancel} className="p-1 text-slate-400 hover:text-slate-200 cursor-pointer"><X className="w-4 h-4" /></button>
+        <button type="button" onClick={onCancel} aria-label="Cancel editing" title="Cancel" className="p-1 text-slate-400 hover:text-slate-200 cursor-pointer"><X className="w-4 h-4" aria-hidden="true" /></button>
       </div>
       {!isNew && (
         <p className={`font-sans text-[11px] ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
@@ -167,6 +168,8 @@ export const RunbooksView: React.FC = () => {
   const [editing, setEditing] = useState<{ id: string | null; draft: RunbookDraft } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const runbookPaging = useClientPagination(runbooks, 10);
 
   useEffect(() => {
     if (selectedRunbookId) setActiveRbId(selectedRunbookId);
@@ -178,6 +181,7 @@ export const RunbooksView: React.FC = () => {
     setActiveRbId(id);
     setSelectedRunbookId(id);
     setConfirmDelete(false);
+    setConfirmReset(false);
   };
 
   const withBusy = async (key: string, fn: () => Promise<unknown>) => {
@@ -213,12 +217,7 @@ export const RunbooksView: React.FC = () => {
       isDark ? 'border-[#1E293B]' : 'border-slate-200'
     }`}>
       <div>
-        <h1 className="text-lg font-bold font-mono tracking-tight">
-          OPERATIONAL RUNBOOKS
-        </h1>
-        <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-          Step-by-step procedures; operators check off steps as they work an incident
-        </p>
+        <h1 className="text-lg font-bold tracking-tight">Runbooks</h1>
       </div>
       {isAdmin && !editing && (
         <button
@@ -263,7 +262,7 @@ export const RunbooksView: React.FC = () => {
           <div className={`text-[10px] font-semibold uppercase tracking-wider font-mono px-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
             Runbooks ({runbooks.length})
           </div>
-          {runbooks.map(rb => {
+          {runbookPaging.slice.map(rb => {
             const completedCount = rb.steps.filter(s => s.completed).length;
             const isSelected = !editing && rb.id === currentRunbook?.id;
 
@@ -293,6 +292,7 @@ export const RunbooksView: React.FC = () => {
               </button>
             );
           })}
+          <Pagination page={runbookPaging.page} totalPages={runbookPaging.totalPages} total={runbookPaging.total} pageSize={runbookPaging.pageSize} onPage={runbookPaging.setPage} />
         </div>
 
         {editing ? (
@@ -321,15 +321,31 @@ export const RunbooksView: React.FC = () => {
               </div>
 
               <div className="flex flex-wrap items-center gap-2 shrink-0">
-                {isOperator && (
+                {isOperator && !confirmReset && (
                   <button
-                    onClick={() => withBusy('reset', () => resetRunbook(currentRunbook.id))}
+                    onClick={() => setConfirmReset(true)}
                     disabled={busy !== null || !currentRunbook.steps.some(s => s.completed)}
                     className={secondaryBtn}
                   >
-                    <RotateCcw className={`w-3 h-3 ${busy === 'reset' ? 'animate-spin' : ''}`} />
+                    <RotateCcw className="w-3 h-3" />
                     <span>Reset progress</span>
                   </button>
+                )}
+                {isOperator && confirmReset && (
+                  <div className="flex items-center gap-2 text-[11px]" role="group" aria-label="Confirm reset progress">
+                    <span className="text-amber-500">
+                      Clear {currentRunbook.steps.filter(s => s.completed).length} completed step(s)?
+                    </span>
+                    <button
+                      onClick={() => withBusy('reset', async () => { await resetRunbook(currentRunbook.id); setConfirmReset(false); })}
+                      disabled={busy !== null}
+                      className="px-2.5 py-1 rounded font-semibold bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white cursor-pointer flex items-center gap-1"
+                    >
+                      <RotateCcw className={`w-3 h-3 ${busy === 'reset' ? 'animate-spin' : ''}`} />
+                      {busy === 'reset' ? 'Resetting…' : 'Reset'}
+                    </button>
+                    <button onClick={() => setConfirmReset(false)} disabled={busy !== null} className={secondaryBtn}>Cancel</button>
+                  </div>
                 )}
                 {isAdmin && !confirmDelete && (
                   <>

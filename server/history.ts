@@ -8,16 +8,19 @@ import { config } from './config.ts';
 import { query, T } from './db.ts';
 import { log } from './logger.ts';
 
-const queue: CheckRecord[] = [];
+let queue: CheckRecord[] = [];
 let writing: Promise<void> | null = null;
+/** Records kept in memory while PostgreSQL is unavailable; beyond this the oldest are dropped (bounded memory) */
+const MAX_QUEUED = 50_000;
 
 async function writeQueued(): Promise<void> {
   if (writing) { await writing; }
   if (queue.length === 0) return;
   const batch = queue.splice(0, queue.length);
   writing = (async () => {
+    let i = 0;
     try {
-      for (let i = 0; i < batch.length; i += 200) {
+      for (; i < batch.length; i += 200) {
         const params: unknown[] = [];
         const tuples = batch.slice(i, i + 200).map(r => {
           params.push(r.t, r.monitorId, r.applicationId ?? '', r.environment, r.target, r.ok, r.probeStatus, r.statusCode, r.latencyMs, r.reason ?? '');
@@ -27,7 +30,12 @@ async function writeQueued(): Promise<void> {
         await query(`INSERT INTO ${T('check_results')} (t,monitor_id,application_id,environment,target,ok,probe_status,status_code,latency_ms,reason) VALUES ${tuples.join(',')}`, params);
       }
     } catch (err) {
-      queue.unshift(...batch);
+      // Re-queue only the chunks that were not written (no duplicate rows), keeping the queue bounded
+      queue = batch.slice(i).concat(queue);
+      if (queue.length > MAX_QUEUED) {
+        log.warn('history', `check-record queue full — dropping ${queue.length - MAX_QUEUED} oldest record(s)`);
+        queue = queue.slice(queue.length - MAX_QUEUED);
+      }
       log.error('history', `failed to write check records: ${(err as Error).message}`);
     } finally {
       writing = null;
@@ -97,13 +105,17 @@ export function availability(records: CheckRecord[]): AvailabilityStats {
 
 export async function flushChecks() { await writeQueued(); }
 
+/** Deletes check results older than CHECK_HISTORY_RETENTION_DAYS (default 90). Returns how many rows were removed. */
+export async function pruneCheckHistory(): Promise<number> {
+  const cutoff = new Date(Date.now() - config.checkHistoryRetentionDays * 86_400_000).toISOString();
+  const res = await query(`DELETE FROM ${T('check_results')} WHERE t < $1`, [cutoff]);
+  return res.rowCount ?? 0;
+}
+
 /** Starts the periodic writer and retention pruning (call after the store is ready). */
 export function startHistory() {
   setInterval(() => { void writeQueued(); }, 2000).unref();
-  const prune = () => {
-    const cutoff = new Date(Date.now() - config.checkHistoryRetentionDays * 86_400_000).toISOString();
-    void query(`DELETE FROM ${T('check_results')} WHERE t < $1`, [cutoff]).catch(err => log.error('history', `prune failed: ${(err as Error).message}`));
-  };
+  const prune = () => { void pruneCheckHistory().catch(err => log.error('history', `prune failed: ${(err as Error).message}`)); };
   prune();
   setInterval(prune, 6 * 3600 * 1000).unref();
 }

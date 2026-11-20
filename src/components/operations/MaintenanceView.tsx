@@ -1,9 +1,12 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
-import { MaintenanceWindow } from '../../types';
+import { ImpactPreview, MaintenanceWindow } from '../../types';
 import { Calendar, BellOff, Plus, X, CheckCircle2, Trash2, Info } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
+import { ImpactPreviewCard } from '../ui/ImpactPreviewCard';
+import { api } from '../../services/api';
 
 const fmtDateTime = (iso?: string) => {
   if (!iso) return '—';
@@ -26,24 +29,39 @@ const localInputToIso = (v: string): string | null => {
 const statusColor = (s: MaintenanceWindow['status']) =>
   s === 'IN_PROGRESS' ? 'text-amber-500' : s === 'SCHEDULED' ? 'text-blue-500' : 'text-slate-500';
 
-const CreateMaintenanceForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
-  const { applications, monitors, createMaintenance, theme } = useOps();
+const CreateMaintenanceForm: React.FC<{ onClose: () => void; existing?: MaintenanceWindow }> = ({ onClose, existing }) => {
+  const { applications, monitors, createMaintenance, updateMaintenance, theme } = useOps();
   const isDark = theme === 'dark';
 
-  const [title, setTitle] = useState('');
-  const [applicationId, setApplicationId] = useState(applications[0]?.id ?? '');
-  const [environment, setEnvironment] = useState<'PRD' | 'DR'>('PRD');
-  const [start, setStart] = useState(() => toLocalInput(new Date()));
-  const [end, setEnd] = useState(() => toLocalInput(new Date(Date.now() + 60 * 60 * 1000)));
-  const [reason, setReason] = useState('');
-  const [expectedImpact, setExpectedImpact] = useState('');
-  const [suppress, setSuppress] = useState<string[]>([]);
+  const [title, setTitle] = useState(existing?.title ?? '');
+  const [applicationId, setApplicationId] = useState(existing?.applicationId || applications[0]?.id || '');
+  const [environment, setEnvironment] = useState<'PRD' | 'DR'>(existing?.environment ?? 'PRD');
+  const [start, setStart] = useState(() => toLocalInput(existing ? new Date(existing.startTime) : new Date()));
+  const [end, setEnd] = useState(() => toLocalInput(existing ? new Date(existing.endTime) : new Date(Date.now() + 60 * 60 * 1000)));
+  const [reason, setReason] = useState(existing?.reason ?? '');
+  const [expectedImpact, setExpectedImpact] = useState(existing?.expectedImpact ?? '');
+  const [suppress, setSuppress] = useState<string[]>(existing?.suppressMonitors ?? []);
   const [saving, setSaving] = useState(false);
+  const [preview, setPreview] = useState<ImpactPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const appMonitors = useMemo(
     () => monitors.filter(m => m.applicationId === applicationId && m.environment === environment),
     [monitors, applicationId, environment],
   );
+
+  useEffect(() => {
+    if (!applicationId) { setPreview(null); return; }
+    let cancelled = false;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    api.getImpactPreview({ applicationId, environment })
+      .then(p => { if (!cancelled) setPreview(p); })
+      .catch(err => { if (!cancelled) { setPreview(null); setPreviewError(err instanceof Error ? err.message : 'Preview failed'); } })
+      .finally(() => { if (!cancelled) setPreviewLoading(false); });
+    return () => { cancelled = true; };
+  }, [applicationId, environment]);
 
   const startIso = localInputToIso(start);
   const endIso = localInputToIso(end);
@@ -61,7 +79,7 @@ const CreateMaintenanceForm: React.FC<{ onClose: () => void }> = ({ onClose }) =
     if (!valid || !startIso || !endIso) return;
     setSaving(true);
     try {
-      const w = await createMaintenance({
+      const payload = {
         title: title.trim(),
         applicationId,
         environment,
@@ -70,7 +88,8 @@ const CreateMaintenanceForm: React.FC<{ onClose: () => void }> = ({ onClose }) =
         reason: reason.trim(),
         expectedImpact: expectedImpact.trim(),
         suppressMonitors: suppress.filter(id => appMonitors.some(m => m.id === id)),
-      });
+      };
+      const w = existing ? await updateMaintenance(existing.id, payload) : await createMaintenance(payload);
       if (w) onClose();
     } finally {
       setSaving(false);
@@ -82,8 +101,8 @@ const CreateMaintenanceForm: React.FC<{ onClose: () => void }> = ({ onClose }) =
       isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
     }`}>
       <div className="flex items-center justify-between">
-        <span className="font-bold text-sm">Schedule maintenance window</span>
-        <button type="button" onClick={onClose} className="p-1 text-slate-400 hover:text-slate-200 cursor-pointer"><X className="w-4 h-4" /></button>
+        <span className="font-bold text-sm">{existing ? 'Edit maintenance window' : 'Schedule maintenance window'}</span>
+        <button type="button" onClick={onClose} aria-label="Close schedule maintenance" title="Close" className="p-1 text-slate-400 hover:text-slate-200 cursor-pointer"><X className="w-4 h-4" aria-hidden="true" /></button>
       </div>
 
       <div>
@@ -121,9 +140,11 @@ const CreateMaintenanceForm: React.FC<{ onClose: () => void }> = ({ onClose }) =
         <input className={inputCls} maxLength={1000} value={reason} onChange={e => setReason(e.target.value)} placeholder="Why this work is happening" />
       </div>
       <div>
-        <label className={labelCls}>Expected impact</label>
+        <label className={labelCls}>Expected impact (operator notes)</label>
         <input className={inputCls} maxLength={1000} value={expectedImpact} onChange={e => setExpectedImpact(e.target.value)} placeholder="e.g. Site unavailable for up to 10 minutes" />
       </div>
+
+      <ImpactPreviewCard preview={preview} loading={previewLoading} error={previewError} isDark={isDark} />
 
       <div>
         <label className={labelCls}>Monitors to suppress</label>
@@ -166,7 +187,7 @@ const CreateMaintenanceForm: React.FC<{ onClose: () => void }> = ({ onClose }) =
           disabled={!valid || saving}
           className="px-3 py-1 rounded text-[11px] font-semibold bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white cursor-pointer"
         >
-          {saving ? 'Scheduling…' : 'Schedule window'}
+          {saving ? 'Saving…' : existing ? 'Save changes' : 'Schedule window'}
         </button>
       </div>
     </form>
@@ -181,8 +202,10 @@ export const MaintenanceView: React.FC = () => {
   const isAdmin = hasRole('it_administrator');
 
   const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState<MaintenanceWindow | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const windowPaging = useClientPagination(maintenanceWindows, 10);
 
   const withBusy = async (key: string, fn: () => Promise<unknown>) => {
     setBusy(key);
@@ -199,12 +222,7 @@ export const MaintenanceView: React.FC = () => {
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
       }`}>
         <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">
-            MAINTENANCE WINDOWS &amp; ALERT SILENCING
-          </h1>
-          <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Planned work during which selected monitors do not open incidents
-          </p>
+          <h1 className="text-lg font-bold tracking-tight">Maintenance</h1>
         </div>
         {isOperator && !showForm && (
           <button
@@ -229,7 +247,7 @@ export const MaintenanceView: React.FC = () => {
         </span>
       </div>
 
-      {showForm && <CreateMaintenanceForm onClose={() => setShowForm(false)} />}
+      {(showForm || editing) && <CreateMaintenanceForm existing={editing ?? undefined} onClose={() => { setShowForm(false); setEditing(null); }} />}
 
       {maintenanceWindows.length === 0 ? (
         <EmptyState
@@ -241,8 +259,9 @@ export const MaintenanceView: React.FC = () => {
           action={isOperator && !showForm && applications.length > 0 ? { label: 'Schedule window', onClick: () => setShowForm(true) } : undefined}
         />
       ) : (
+        <>
         <div className="space-y-3 font-mono text-xs">
-          {maintenanceWindows.map(m => {
+          {windowPaging.slice.map(m => {
             const app = applications.find(a => a.id === m.applicationId);
             const active = m.status === 'SCHEDULED' || m.status === 'IN_PROGRESS';
             const suppressed = m.suppressMonitors ?? [];
@@ -279,6 +298,11 @@ export const MaintenanceView: React.FC = () => {
                     <span className={`font-bold text-[10px] uppercase ${statusColor(m.status)}`}>
                       {m.status.replace('_', ' ')}
                     </span>
+                    {isOperator && active && !confirming && (
+                      <button onClick={() => { setEditing(m); setShowForm(false); }} disabled={busy !== null} className={secondaryBtn}>
+                        <span>Edit</span>
+                      </button>
+                    )}
                     {isOperator && active && !confirming && (
                       <button
                         onClick={() => withBusy(`complete:${m.id}`, () => completeMaintenance(m.id))}
@@ -341,6 +365,8 @@ export const MaintenanceView: React.FC = () => {
             );
           })}
         </div>
+        <Pagination page={windowPaging.page} totalPages={windowPaging.totalPages} total={windowPaging.total} pageSize={windowPaging.pageSize} onPage={windowPaging.setPage} />
+        </>
       )}
     </div>
   );

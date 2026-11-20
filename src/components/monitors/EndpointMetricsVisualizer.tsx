@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { THRESHOLDS } from '../../lib/thresholds';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
 import {
@@ -448,7 +449,7 @@ export const EndpointMetricsVisualizer: React.FC = () => {
                 <div className="flex items-center gap-4 sm:gap-6 shrink-0">
                   <div className="text-right">
                     <div className="text-[10px] text-slate-400 uppercase">30d Uptime</div>
-                    <div className={`text-sm font-bold font-sans tabular-nums ${!checked ? 'text-slate-400' : mon.uptimePercent >= 99.9 ? 'text-emerald-400' : mon.uptimePercent >= 99 ? 'text-amber-400' : 'text-rose-400'}`}>
+                    <div className={`text-sm font-bold font-sans tabular-nums ${!checked ? 'text-slate-400' : mon.uptimePercent >= THRESHOLDS.uptimePercent.good ? 'text-emerald-400' : mon.uptimePercent >= THRESHOLDS.uptimePercent.warning ? 'text-amber-400' : 'text-rose-400'}`}>
                       {checked ? `${mon.uptimePercent.toFixed(2)}%` : '—'}
                     </div>
                     <div className="text-[9px] text-slate-500">

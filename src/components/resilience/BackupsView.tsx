@@ -4,6 +4,8 @@ import { BackupRecord, BackupStatus } from '../../types';
 import { api } from '../../services/api';
 import { Ago, verdictColor } from '../ui/Freshness';
 import { Archive } from 'lucide-react';
+import { OpsBackupPanel } from './OpsBackupPanel';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 
 const validDate = (s?: string | null) => Boolean(s) && !Number.isNaN(Date.parse(s as string));
 const fmtDateTime = (s?: string | null, fallback = '—') => (validDate(s) ? new Date(s as string).toLocaleString() : fallback);
@@ -16,6 +18,7 @@ export const BackupsView: React.FC = () => {
   const { backups, applications, servers, theme, integrations } = useOps();
   const isDark = theme === 'dark';
   const muted = isDark ? 'text-slate-400' : 'text-slate-500';
+  const backupPaging = useClientPagination(backups, 10);
   const card = `p-3 rounded border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`;
 
   const baseUrl = integrations?.publicUrl || (typeof window !== 'undefined' ? window.location.origin : '');
@@ -73,7 +76,7 @@ curl -fsS -X POST "${baseUrl}/api/v1/backups/report" \\
     <div className={`rounded-lg border p-5 space-y-3 font-mono text-xs ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
       <div className="font-bold uppercase tracking-wider text-[11px]">How backups are reported</div>
       <p className={`font-sans text-[12px] ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
-        Scholario Ops does not run backups itself. Your backup script on each VPS reports every run to{' '}
+        Scholario Ops does not run backups itself. Hostinger recovery points are fetched with the existing VPS API token. A database dump is separate: the backup script on each VPS reports every run to{' '}
         <code className="font-mono">POST /api/v1/backups/report</code>, authenticated with that server's agent token
         (<code className="font-mono">Authorization: Bearer &lt;agent token&gt;</code>). The token is the <code className="font-mono">AGENT_TOKEN</code>{' '}
         value in <code className="font-mono">/etc/scholario-agent.conf</code>, written when the agent was installed from Setup.
@@ -95,15 +98,14 @@ curl -fsS -X POST "${baseUrl}/api/v1/backups/report" \\
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
       }`}>
         <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">
-            BACKUPS
-          </h1>
-          <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Backup runs reported by the backup scripts on your servers
+          <h1 className="text-lg font-bold tracking-tight">Backups</h1>
+          <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            Recovery points from the provider, and runs reported by backup scripts.
           </p>
         </div>
       </div>
 
+      <OpsBackupPanel />
       {statusPanel}
 
       {backups.length === 0 ? (
@@ -114,7 +116,7 @@ curl -fsS -X POST "${baseUrl}/api/v1/backups/report" \\
             </div>
             <h3 className={`text-sm font-semibold font-mono ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>No backups reported yet</h3>
             <p className={`text-xs mt-1.5 max-w-md ${muted}`}>
-              Backups appear here once a backup script on one of your servers reports a run. Add the call below to the end of your backup script.
+              Hostinger backups and the current snapshot are read for each linked VPS during provider sync. A database dump still has to be reported by the backup script on that server.
             </p>
           </div>
           {instructions}
@@ -172,7 +174,7 @@ curl -fsS -X POST "${baseUrl}/api/v1/backups/report" \\
                   </tr>
                 </thead>
                 <tbody className={`divide-y ${isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
-                  {backups.map(b => {
+                  {backupPaging.slice.map(b => {
                     const app = applications.find(a => a.id === b.applicationId);
                     const srv = servers.find(s => s.id === b.serverId);
                     return (
@@ -206,6 +208,7 @@ curl -fsS -X POST "${baseUrl}/api/v1/backups/report" \\
               </table>
             </div>
           </div>
+          <Pagination page={backupPaging.page} totalPages={backupPaging.totalPages} total={backupPaging.total} pageSize={backupPaging.pageSize} onPage={backupPaging.setPage} />
 
           <details className={`rounded-lg border ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
             <summary className={`px-4 py-2 text-xs font-mono cursor-pointer ${muted}`}>How to report backups from a server</summary>

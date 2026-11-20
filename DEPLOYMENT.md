@@ -74,8 +74,8 @@ Create `/var/www/scholario-ops/.env` from `.env.example` and run `chmod 600 .env
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_NAME` | first start | Creates the first super-admin when the database has no users. If `ADMIN_PASSWORD` is empty or weak, a generated password is written to `DATA_DIR/initial-admin-password.txt` (mode 600), never to the log. |
 | `CLOUDFLARE_API_TOKEN` | recommended | Read-only token: Account › Load Balancing: Monitors and Pools › Read, Zone › Load Balancers › Read, Zone › Zone › Read, with the application zone (e.g. `kodeit.digital`) included in **Zone Resources** (without it, routing / pool order shows "not readable"). It stays on the server. **A token that was ever pasted into chat, source code, a ticket or a log must be rolled** in Cloudflare before production. |
 | `HOSTINGER_API_TOKEN` | optional | Hostinger VPS API (plan, CPU, RAM, disk, OS, state, region), read-only. `HOSTINGER_TIMEOUT_MS` (15000). |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | optional | Email notification channels |
-| `DEADMAN_HEARTBEAT_URL` | recommended | External heartbeat (e.g. healthchecks.io) that alerts you if this server dies |
+| `SMTP_SERVICE` or `SMTP_URL` or `SMTP_HOST`/`SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_REQUIRE_TLS`, `SMTP_TLS_REJECT_UNAUTHORIZED` | optional | Email notification channels, any SMTP provider (examples in `.env.example`). Test the login with **Check SMTP** on Notifications. |
+| `DEADMAN_HEARTBEAT_URL` | no — deprecated | Ignored (with a warning if set). The dead-man heartbeat is built in and covers the monitored servers / applications / services / databases |
 | `DEPLOY_REPORT_TOKEN` | optional | Lets CI report deployments |
 | `LOG_LEVEL` / `LOG_FORMAT` | no | `info` / JSON in production (`LOG_FORMAT=text` for plain text) |
 | `DATA_DIR` | no (`./data`) | Holds only the generated session secret and first-admin password file |
@@ -87,7 +87,6 @@ With `NODE_ENV=production` the server checks this at startup. A missing `DATABAS
 - no `JWT_SECRET`
 - `HOST=0.0.0.0`
 - no Cloudflare token
-- no dead-man URL
 
 ## 3. Database setup
 
@@ -177,10 +176,38 @@ Firewall (you do this; the app never changes firewalls): `ufw allow OpenSSH && u
 | Endpoint | Meaning | Codes |
 |---|---|---|
 | `GET /api/health/live` (also `/health/live`) | **Liveness.** The Node process is running and serving HTTP. | 200 always while the process is up |
-| `GET /api/health/ready` (also `/health/ready`) | **Readiness.** The database is reachable (`SELECT 1`, 3 s timeout) and the data is loaded. | 200 `ready`; **503** `not_ready` while starting, when PostgreSQL is down, or during shutdown |
+| `GET /api/health/ready` (also `/health/ready`) | **Readiness.** The database is reachable (`SELECT 1`, 3 s timeout), the data is loaded and the monitor scheduler is running (`checks.scheduler`: a stalled scheduler means monitoring stopped). | 200 `ready`; **503** `not_ready` while starting, when PostgreSQL is down, when the scheduler has not run for 30 s, or during shutdown |
 | `GET /api/health` (also `/health`) | Detailed status: integrations, counts, monitor summary | 200 (503 while starting) |
 
-Point external uptime monitoring at `https://ops.yourdomain.com/api/health/ready`. Neither endpoint needs a login or returns secrets.
+Neither endpoint needs a login or returns secrets.
+
+### 10.1 Who watches Scholario Ops? (`deploy/ops-watchdog.sh`)
+
+If the Ops server, PM2, PostgreSQL or the scheduler dies, Ops cannot alert about itself. Run the watchdog from cron on **another server you own** — the DR node. Ops already opens an incident when the DR node's agent stops reporting, so the two servers watch each other. No third-party monitoring service is used: alerts go through your own SMTP relay and/or your own Teams/Slack webhook.
+
+```bash
+# on the DR node (needs only bash + curl)
+sudo install -m 0755 -o root -g root deploy/ops-watchdog.sh /usr/local/sbin/scholario-ops-watchdog
+sudo install -m 0600 -o root -g root /dev/null /etc/scholario-ops-watchdog.conf
+sudo nano /etc/scholario-ops-watchdog.conf
+#   OPS_URL=https://ops.yourdomain.com
+#   FAILURES_BEFORE_ALERT=3          # ≈ 3 minutes
+#   REMIND_EVERY_MIN=60
+#   SMTP_URL=smtps://smtp.yourdomain.com:465
+#   SMTP_USER=alerts@yourdomain.com
+#   SMTP_PASS=...
+#   MAIL_FROM=alerts@yourdomain.com
+#   MAIL_TO=oncall@yourdomain.com,it-team@yourdomain.com
+#   WEBHOOK_URL=https://...           # optional Teams/Slack incoming webhook
+#   PING_URL=https://ops.yourdomain.com/api/v1/heartbeat/<token>   # see below
+sudo /usr/local/sbin/scholario-ops-watchdog; echo "exit $?"      # 0 = Ops healthy
+sudo crontab -e
+# * * * * * /usr/local/sbin/scholario-ops-watchdog >> /var/log/scholario-ops-watchdog.log 2>&1
+```
+
+It alerts after `FAILURES_BEFORE_ALERT` failed checks in a row, once per outage, reminds every `REMIND_EVERY_MIN`, and sends a recovery message with the downtime. An alert that could not be delivered is retried on the next run. Credentials are passed to curl on stdin, never on the command line.
+
+**Close the loop:** in Scholario Ops create a monitor of type *Cron heartbeat* named "DR watchdog" with a 60 s interval and put its push URL in `PING_URL`. The watchdog pings it after every successful check, so Ops opens an incident if the watchdog itself stops (cron removed, DR node down).
 
 ## 11. Logs
 
@@ -215,14 +242,47 @@ Single instance only: the monitor scheduler and realtime state live in the proce
 ## 13. Backups
 
 ```bash
-chmod +x deploy/backup-db.sh
+chmod +x deploy/backup-db.sh deploy/verify-backup.sh
 ./deploy/backup-db.sh             # test once → backups/ops-YYYYmmdd-HHMMSS.sql.gz (mode 600)
 crontab -e
 # 15 2 * * * /var/www/scholario-ops/deploy/backup-db.sh >> /var/www/scholario-ops/logs/backup.log 2>&1
 ```
 
-It keeps 14 days (`KEEP_DAYS`). **Copy `backups/` off the server** because it contains your whole configuration. Also back up `.env` somewhere safe (it holds the secrets).
-To restore: `gunzip -c backups/ops-XXXX.sql.gz | psql "$DATABASE_URL"` (into an empty schema, with the app stopped).
+It keeps 14 days (`BACKUP_KEEP_DAYS`). Every run checks the dump is complete (gzip test + pg_dump's completion trailer), records the row count of every table, writes a SHA-256 checksum next to the file, and writes `backups/last-backup.json`. The app reads that file: **Backups → Scholario Ops database backup** shows it, and an incident opens when the backup failed, is older than `BACKUP_MAX_AGE_HOURS`, or the off-server copy failed.
+
+**Recommended production setup** (all optional settings, in `.env`; see `.env.example`):
+
+1. **Encrypt** with a public key, so the private key never sits on the Ops server:
+   ```bash
+   # on your admin machine (keep key.txt safe, e.g. a password manager)
+   age-keygen -o key.txt            # prints "Public key: age1..."
+   # on the Ops server: apt install age, then in .env
+   BACKUP_AGE_RECIPIENT=age1...
+   ```
+   (`BACKUP_GPG_RECIPIENT=<key id>` works too, with the public key imported into root's keyring.)
+2. **Copy off the server** (the DR node is a good target). The copy is verified by checksum on the far side; a failure is reported but never blocks a deploy:
+   ```bash
+   ssh-keygen -t ed25519 -N '' -f /root/.ssh/scholario_backup
+   ssh-copy-id -i /root/.ssh/scholario_backup.pub backup@dr-host     # a dedicated, unprivileged user
+   ssh -i /root/.ssh/scholario_backup backup@dr-host true            # accept the host key once
+   # .env
+   BACKUP_REMOTE=backup@dr-host:/var/backups/scholario-ops
+   BACKUP_SSH_KEY=/root/.ssh/scholario_backup
+   BACKUP_REMOTE_KEEP_DAYS=30
+   ```
+3. **Test a restore every week** — into a separate scratch database, never production (the script refuses when the URL points at the `DATABASE_URL` database):
+   ```bash
+   sudo -u postgres createdb -O <ops db user> scholario_restore_test
+   # .env
+   BACKUP_VERIFY_DATABASE_URL=postgres://<user>:<password>@127.0.0.1:5432/scholario_restore_test
+   BACKUP_AGE_IDENTITY=/root/.config/scholario/backup-age-key.txt   # only for age-encrypted backups (mode 0400)
+   crontab -e
+   # 45 3 * * 0 /var/www/scholario-ops/deploy/verify-backup.sh >> /var/www/scholario-ops/logs/backup.log 2>&1
+   ```
+   It checks the checksum, decrypts, restores in one transaction, compares every table's row count with the dump, drops the restored copy and writes `backups/last-restore-test.json` (shown on the Backups page; a failed test raises an incident).
+
+Also back up `.env` somewhere safe (it holds the secrets).
+To restore for real: `gunzip -c backups/ops-XXXX.sql.gz | psql "$DATABASE_URL"` (encrypted: `age -d -i key.txt FILE.age | gunzip | psql …`), into an empty schema, with the app stopped.
 
 ## 14. Updating and rollback
 

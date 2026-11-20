@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
+import { effectiveRoutingMethod } from '../../lib/trafficHealth';
 import { useAuth } from '../../context/AuthContext';
 import {
   Search,
@@ -17,6 +18,7 @@ import {
   Send,
   Terminal,
   Radio,
+  KeyRound,
   Check,
   FileText,
   Database,
@@ -30,6 +32,8 @@ import {
   Settings,
   Network,
   Loader2,
+  Gauge,
+  Waypoints,
 } from 'lucide-react';
 
 export type PaletteCategory =
@@ -63,24 +67,29 @@ export interface CommandItem {
 const OPEN_STATUSES = new Set(['OPEN', 'ACKNOWLEDGED', 'INVESTIGATING', 'MITIGATING', 'MONITORING']);
 
 const ROUTES: Array<{ tab: string; title: string; subtitle: string; icon: CommandItem['icon']; keywords: string }> = [
-  { tab: 'setup', title: 'Setup', subtitle: 'Register servers and applications, install the telemetry agent, integration status', icon: Settings, keywords: 'setup register onboarding agent install integrations configure' },
-  { tab: 'overview', title: 'Overview', subtitle: 'Overall health of applications, servers, monitors and incidents', icon: Activity, keywords: 'overview dashboard home status health' },
-  { tab: 'applications', title: 'Applications', subtitle: 'Applications with PRD/DR mapping and failover state', icon: Layers, keywords: 'applications apps catalog' },
-  { tab: 'infrastructure', title: 'Infrastructure', subtitle: 'Registered VPS servers and agent telemetry', icon: Server, keywords: 'infrastructure servers vps nodes cpu ram disk telemetry' },
-  { tab: 'monitors', title: 'Monitors', subtitle: 'HTTP/TCP/DNS/SSL and heartbeat monitors', icon: Radio, keywords: 'monitors probes checks uptime' },
-  { tab: 'incidents', title: 'Incidents', subtitle: 'Open and resolved incidents', icon: AlertTriangle, keywords: 'incidents tickets triage acknowledge resolve' },
-  { tab: 'resilience', title: 'DR Readiness', subtitle: 'Disaster recovery readiness and failover', icon: ShieldCheck, keywords: 'resilience dr disaster recovery readiness failover' },
-  { tab: 'backups', title: 'Backups', subtitle: 'Backup records and freshness', icon: Database, keywords: 'backups restore snapshots' },
-  { tab: 'dependencies', title: 'Dependencies', subtitle: 'Application dependency map', icon: Network, keywords: 'dependencies map topology' },
-  { tab: 'hostinger', title: 'Hostinger', subtitle: 'Hostinger VPS inventory from the provider API', icon: Cpu, keywords: 'hostinger provider vps vms' },
-  { tab: 'cloudflare', title: 'Cloudflare', subtitle: 'Zones, DNS records and DNS failover', icon: Cloud, keywords: 'cloudflare dns zones ssl edge' },
-  { tab: 'deployments', title: 'Deployments', subtitle: 'Deployment history', icon: GitBranch, keywords: 'deployments releases versions' },
-  { tab: 'runbooks', title: 'Runbooks', subtitle: 'Operational procedures', icon: Terminal, keywords: 'runbooks procedures sop' },
-  { tab: 'maintenance', title: 'Maintenance', subtitle: 'Maintenance windows', icon: Calendar, keywords: 'maintenance windows schedule' },
-  { tab: 'communications', title: 'Communications', subtitle: 'Notification channels and escalation policies', icon: Send, keywords: 'communications notifications channels escalation teams email webhook' },
-  { tab: 'reports', title: 'Reports', subtitle: 'Daily operations report', icon: FileText, keywords: 'reports daily summary' },
-  { tab: 'audit', title: 'Audit Logs', subtitle: 'Record of operator actions', icon: Shield, keywords: 'audit logs history' },
-  { tab: 'users', title: 'Users', subtitle: 'Operator accounts and roles', icon: Users, keywords: 'users accounts roles password' },
+  { tab: 'setup', title: 'Setup', subtitle: 'Servers, applications, and the agent', icon: Settings, keywords: 'setup register onboarding agent install integrations configure' },
+  { tab: 'overview', title: 'Overview', subtitle: 'Current health', icon: Activity, keywords: 'overview dashboard home status health' },
+  { tab: 'applications', title: 'Applications', subtitle: 'Each application and where it runs', icon: Layers, keywords: 'applications apps catalog' },
+  { tab: 'infrastructure', title: 'Infrastructure', subtitle: 'Servers and agent telemetry', icon: Server, keywords: 'infrastructure servers vps nodes cpu ram disk telemetry' },
+  { tab: 'resources', title: 'Capacity', subtitle: 'Limits and measured usage', icon: Gauge, keywords: 'capacity limits seats storage quota database disk cpu memory warning critical' },
+  { tab: 'impact', title: 'Impact', subtitle: 'What fails if this part fails', icon: Waypoints, keywords: 'impact blast radius hard soft users features applications' },
+  { tab: 'monitors', title: 'Monitors', subtitle: 'Checks and heartbeats', icon: Radio, keywords: 'monitors probes checks uptime' },
+  { tab: 'credentials', title: 'Credentials', subtitle: 'Expiry dates for keys and certificates', icon: KeyRound, keywords: 'credentials api key token subscription certificate expiry ssl' },
+  { tab: 'incidents', title: 'Incidents', subtitle: 'Open and resolved', icon: AlertTriangle, keywords: 'incidents tickets triage acknowledge resolve' },
+  { tab: 'resilience', title: 'Readiness', subtitle: 'Whether failover is safe', icon: ShieldCheck, keywords: 'resilience dr disaster recovery readiness failover' },
+  { tab: 'backups', title: 'Backups', subtitle: 'Recovery points and reported runs', icon: Database, keywords: 'backups restore snapshots' },
+  { tab: 'dependencies', title: 'Dependencies', subtitle: 'What each application uses', icon: Network, keywords: 'dependencies map topology projects' },
+  { tab: 'dependency-register', title: 'Dependency register', subtitle: 'Consumer, provider, type, and feature', icon: Network, keywords: 'dependency register links hard soft feature module consumer provider search' },
+  { tab: 'hostinger', title: 'Provider VPS', subtitle: 'Servers from each provider account', icon: Cpu, keywords: 'hostinger provider vps vms account connection' },
+  { tab: 'cloudflare', title: 'Cloudflare', subtitle: 'DNS, load balancing, and failover', icon: Cloud, keywords: 'cloudflare dns zones ssl edge' },
+  { tab: 'deployments', title: 'Deployments', subtitle: 'Releases from CI', icon: GitBranch, keywords: 'deployments releases versions' },
+  { tab: 'runbooks', title: 'Runbooks', subtitle: 'Steps for an incident', icon: Terminal, keywords: 'runbooks procedures sop' },
+  { tab: 'maintenance', title: 'Maintenance', subtitle: 'Planned work windows', icon: Calendar, keywords: 'maintenance windows schedule' },
+  { tab: 'communications', title: 'Notifications', subtitle: 'Channels and delivery', icon: Send, keywords: 'communications notifications channels escalation teams email webhook' },
+  { tab: 'reliability', title: 'Reliability', subtitle: 'Error budgets', icon: Gauge, keywords: 'slo sla error budget burn rate capacity forecast disk full flapping reliability' },
+  { tab: 'reports', title: 'Reports', subtitle: 'Daily report', icon: FileText, keywords: 'reports daily summary' },
+  { tab: 'audit', title: 'Audit logs', subtitle: 'Who changed what', icon: Shield, keywords: 'audit logs history' },
+  { tab: 'users', title: 'Users', subtitle: 'Accounts and roles', icon: Users, keywords: 'users accounts roles password' },
 ];
 
 export const CommandPalette: React.FC = () => {
@@ -212,8 +221,23 @@ export const CommandPalette: React.FC = () => {
         },
       });
 
-      // Failover / failback (super_admin, requires DNS failover configuration)
-      if (canFailover && app.dnsRecordName && app.prdServerId && app.drServerId && app.failoverState !== 'FAILING_OVER') {
+      // Load-Balancer apps: traffic is switched in Cloudflare after the pre-flight review — open that console
+      if (canFailover && effectiveRoutingMethod(app) === 'cloudflare_lb' && app.loadBalancer) {
+        items.push({
+          id: `action-lb-failover-${app.id}`,
+          category: 'ACTIONS',
+          categoryLabel: 'Failover',
+          title: `Review failover for ${app.name} (Cloudflare Load Balancer)`,
+          subtitle: `Pre-flight checks and decision for ${app.loadBalancer.hostname} — the switch itself is made in Cloudflare`,
+          badge: 'PRE-FLIGHT',
+          badgeType: 'action',
+          icon: Cloud,
+          keywords: `failover failback load balancer cloudflare pool ${app.name} ${app.codeName} dr primary prd`,
+          action: () => { setSelectedAppId(app.id); go('resilience'); },
+        });
+      }
+      // DNS failover / failback (super_admin, requires DNS failover configuration; never for Load-Balancer apps)
+      if (canFailover && (effectiveRoutingMethod(app) === 'direct_dns' || (effectiveRoutingMethod(app) === 'unknown' && !app.loadBalancer)) && app.dnsRecordName && app.prdServerId && app.drServerId && app.failoverState !== 'FAILING_OVER') {
         const target: 'DR' | 'PRIMARY' = isDr ? 'PRIMARY' : 'DR';
         const targetServer = isDr ? prd : dr;
         items.push({
@@ -595,7 +619,7 @@ export const CommandPalette: React.FC = () => {
           <input
             ref={inputRef}
             type="text"
-            placeholder="Search pages, applications, servers, incidents, monitors, runbooks or actions..."
+            placeholder="Search"
             value={query}
             onChange={e => setQuery(e.target.value)}
             className={`w-full bg-transparent text-xs placeholder:text-slate-400 focus:outline-none font-mono tracking-tight ${

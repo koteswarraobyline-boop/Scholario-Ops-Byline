@@ -3,6 +3,12 @@ import {
   CommunicationChannel, EscalationPolicy, MaintenanceWindow, Runbook, Deployment, BackupRecord,
   IntegrationStatus, HttpProbeResult, TcpProbeResult, ServerMetricPoint, DrReadinessItem, OpsUser,
   LoadBalancerState, FailoverPreflight, DrOverall, CheckRecord, BackupStatus, DatabaseHealth, DatabaseReport, HostingerInfo,
+  GoLivePreview, GoLiveRun,
+  ProviderConnectionView, ProviderInstanceView,
+  ReliabilityInsights, OpsBackupHealth, NotificationDelivery, NotificationDeliveryStats, NotificationDeliveryDetail, NotificationHealth,
+  SmtpCheckResult,   RegistryComponent, DependencyLink, RegistryImpact, ApplicationServiceDependencies,
+  TrackedCredential, CredentialExpiryState, CredentialKind, Environment, OperationalStatus,
+  ResourceMeasurement, ResourceView, QuotaWindow,
 } from '../types';
 
 export interface HealthCheckResponse {
@@ -23,6 +29,7 @@ export interface HealthCheckResponse {
     cloudflare_load_balancing?: string;
     vps_telemetry_stream: string;
     continuous_probes: string;
+    database_save?: 'OK' | 'RETRYING' | 'CONFLICT' | 'REJECTED';
   };
   counts: {
     applications: number;
@@ -41,6 +48,42 @@ export interface ApiResponse<T> {
   message?: string;
 }
 
+export interface CredentialInput {
+  name: string;
+  kind: CredentialKind;
+  provider: string;
+  owner: string;
+  environment: Environment;
+  expiresAt: string;
+  applicationId?: string | null;
+  notes?: string;
+}
+
+export interface CredentialRow extends TrackedCredential {
+  daysLeft: number | null;
+  state: CredentialExpiryState;
+  evaluated?: { opened: number; resolved: number };
+}
+
+export interface CertificateRow {
+  monitorId: string;
+  name: string;
+  target: string;
+  applicationId: string;
+  environment: Environment;
+  status: OperationalStatus;
+  daysLeft: number | null;
+  validTo: string | null;
+  state: CredentialExpiryState | 'UNKNOWN';
+  detail: string;
+}
+
+export interface CredentialCatalogue {
+  credentials: CredentialRow[];
+  certificates: CertificateRow[];
+  warnDays: number;
+}
+
 export interface PaginatedApiResponse<T> {
   success: boolean;
   data: T[];
@@ -53,6 +96,8 @@ export interface SystemSummary {
   totalMonitors: number; healthyMonitors: number;
   openIncidents: number; criticalIncidents: number;
   drReadinessCount: number; backupsCurrentCount: number;
+  /** Backup status per application (absent from older servers) */
+  backupApps?: { total: number; healthy: number; failed: number; stale: number; unknown: number };
   cloudflareStatus: 'HEALTHY' | 'DEGRADED' | 'NOT_CONFIGURED' | 'UNKNOWN';
   deadManStatus: string; deadManLastHeartbeat: string | null;
   overallHealth: 'OPERATIONAL' | 'WARNING' | 'CRITICAL' | 'UNKNOWN';
@@ -70,12 +115,19 @@ export interface BootstrapData {
   escalationPolicies: EscalationPolicy[];
   maintenanceWindows: MaintenanceWindow[];
   runbooks: Runbook[];
+  /** Absent from servers older than the dependency register */
+  registry?: RegistryComponent[];
+  dependencyLinks?: DependencyLink[];
   deployments: Deployment[];
   backups: BackupRecord[];
   auditLogs: AuditLog[];
   cloudflareZones: CloudflareZone[];
   loadBalancer: LoadBalancerState;
+  /** Absent until the server that added Worker monitoring is deployed. */
+  workerMonitor?: import('../types').WorkerMonitorState;
   deadMan: DeadManControlPlane;
+  /** Outbound Ops self-heartbeat. Absent on older servers. */
+  externalHeartbeat?: import('../types').ExternalHeartbeat;
   integrations: IntegrationStatus;
   summary: SystemSummary;
 }
@@ -102,7 +154,22 @@ export interface AgentHealthRow {
   serverId: string; hostname: string; ip: string; environment: 'PRD' | 'DR';
   state: 'ONLINE' | 'STALE' | 'OFFLINE' | 'NOT_CONNECTED'; version: string | null; lastSeen: string | null;
   startedAt: string | null; restartCount: number; errors: string[];
+  /** Added with agent 3.3 telemetry */
+  expectedVersion?: string; outdated?: boolean | null; clockSkewMs?: number | null; transportDelayMs?: number | null;
+  ntpSynchronized?: boolean | null; clockIssue?: boolean; failedServices?: number; pm2Issues?: number; dbIssues?: number;
+  warnings?: number; critical?: number;
 }
+
+/** Fleet-wide agent / server health (GET /api/v1/health/agents → summary) */
+export interface AgentFleetSummary {
+  expectedVersion: string;
+  total: number; connected: number; stale: number; disconnected: number; neverConnected: number;
+  outdated: number; clockIssues: number; withErrors: number;
+  failedServices: number; pm2Issues: number; dbIssues: number;
+}
+
+/** GET /api/v1/health/databases → summary */
+export interface DatabaseHealthSummary { total: number; healthy: number; warning: number; critical: number; unavailable: number; notConfigured: number }
 
 export interface AvailabilityStats {
   total: number; ok: number; availabilityPercent: number | null;
@@ -131,10 +198,13 @@ export type HistoryPoint = CheckRecord & { samples?: number; okSamples?: number 
 
 export interface AgentInstallInfo {
   installCommand: string;
+  updateCommand: string;
   uninstallCommand: string;
   ingestUrl: string;
   agentVersion: string;
   publicUrlConfigured: boolean;
+  /** Set when no install command is safe to copy. Never contains the agent token. */
+  problem?: string;
 }
 
 export class ApiError extends Error {
@@ -272,18 +342,24 @@ export const api = {
 
   // ── Applications ────────────────────────────────────────────────────────────
   getApplications: () => unwrap(api.get<ApiResponse<Application[]>>('/api/v1/applications')),
+  /** Stored application plus `serviceDependencies` from the register. The list endpoint does not include that object. */
+  getApplication: (id: string) => unwrap(api.get<ApiResponse<Application & { serviceDependencies: ApplicationServiceDependencies }>>(`/api/v1/applications/${encodeURIComponent(id)}`)),
   createApplication: (data: Partial<Application>) => unwrap(api.post<ApiResponse<Application>>('/api/v1/applications', data)),
   updateApplication: (id: string, data: Partial<Application>) => unwrap(api.patch<ApiResponse<Application>>(`/api/v1/applications/${encodeURIComponent(id)}`, data)),
   deleteApplication: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean; removedMonitors: number }>>(`/api/v1/applications/${encodeURIComponent(id)}`)),
-  triggerFailover: (id: string, target: 'DR' | 'PRIMARY', reason?: string) =>
-    unwrap(api.post<ApiResponse<{ app: Application; changed: Array<{ from: string; to: string }> }>>(`/api/v1/applications/${encodeURIComponent(id)}/failover`, { target, reason })),
+  /** force = proceed although the pre-flight failed (the server answers 412 otherwise; the override is audited) */
+  triggerFailover: (id: string, target: 'DR' | 'PRIMARY', reason?: string, force = false) =>
+    unwrap(api.post<ApiResponse<{ app: Application; changed: Array<{ from: string; to: string }> }>>(`/api/v1/applications/${encodeURIComponent(id)}/failover`, { target, reason, ...(force ? { force: true } : {}) })),
   getDrReadiness: (id: string) => unwrap(api.get<ApiResponse<DrReadiness>>(`/api/v1/applications/${encodeURIComponent(id)}/dr-readiness`)),
   getAvailability: (id: string, range: '24h' | '7d' | '30d' | '90d' = '24h') =>
     unwrap(api.get<ApiResponse<ApplicationAvailability>>(`/api/v1/applications/${encodeURIComponent(id)}/availability?range=${range}`)),
   getFailoverPreflight: (id: string, target: 'DR' | 'PRIMARY') =>
     unwrap(api.get<ApiResponse<FailoverPreflight>>(`/api/v1/applications/${encodeURIComponent(id)}/failover/preflight?target=${target}`)),
   recordFailoverDecision: (id: string, target: 'DR' | 'PRIMARY', decision: 'APPROVED' | 'REJECTED', reason: string) =>
-    unwrap(api.post<ApiResponse<{ recorded: boolean }>>(`/api/v1/applications/${encodeURIComponent(id)}/failover/decision`, { target, decision, reason })),
+    unwrap(api.post<ApiResponse<{ recorded: boolean; decision: 'APPROVED' | 'REJECTED'; preflight: FailoverPreflight }>>(`/api/v1/applications/${encodeURIComponent(id)}/failover/decision`, { target, decision, reason })),
+  getGoLive: (id: string) => unwrap(api.get<ApiResponse<GoLivePreview>>(`/api/v1/applications/${encodeURIComponent(id)}/go-live`)),
+  recordGoLive: (id: string, defect?: string) =>
+    unwrap(api.post<ApiResponse<{ recorded: boolean; run: GoLiveRun; preview: GoLivePreview }>>(`/api/v1/applications/${encodeURIComponent(id)}/go-live`, defect ? { defect } : {})),
 
   // ── Monitors ────────────────────────────────────────────────────────────────
   getMonitors: () => unwrap(api.get<ApiResponse<Monitor[]>>('/api/v1/monitors')),
@@ -305,14 +381,25 @@ export const api = {
 
   // ── Incidents ───────────────────────────────────────────────────────────────
   getIncidents: () => api.get<PaginatedApiResponse<Incident>>('/api/v1/incidents?pageSize=500').then(r => r.data),
-  createIncident: (data: { title: string; severity: string; applicationId?: string; environment?: string; description?: string }) =>
+  createIncident: (data: { title: string; severity: string; applicationId?: string; environment?: string; description?: string; rootCauseCategory?: string }) =>
     unwrap(api.post<ApiResponse<Incident>>('/api/v1/incidents', data)),
   acknowledgeIncident: (id: string) => unwrap(api.post<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/acknowledge`)),
   updateIncidentStatus: (id: string, status: string) => unwrap(api.patch<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/status`, { status })),
   updateIncidentSeverity: (id: string, severity: string) => unwrap(api.patch<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/severity`, { severity })),
   assignIncident: (id: string, owner: string) => unwrap(api.patch<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/assign`, { owner })),
   addIncidentNote: (id: string, content: string) => unwrap(api.post<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/notes`, { content })),
-  resolveIncident: (id: string, resolution?: string) => unwrap(api.post<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/resolve`, { resolution })),
+  resolveIncident: (id: string, resolution?: string, force?: boolean) =>
+    unwrap(api.post<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/resolve`, { resolution, force: force || undefined })),
+  updateIncidentRootCause: (id: string, data: { rootCauseCategory: string; description?: string }) =>
+    unwrap(api.patch<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/root-cause`, data)),
+  updateIncidentRunbook: (id: string, runbookId: string | null) =>
+    unwrap(api.patch<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/runbook`, { runbookId })),
+  setIncidentFixSteps: (id: string, steps: Array<string | { id?: string; text: string }>) =>
+    unwrap(api.put<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/fix-steps`, { steps })),
+  toggleIncidentFixStep: (id: string, stepId: string) =>
+    unwrap(api.post<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/fix-steps/${encodeURIComponent(stepId)}/toggle`)),
+  refreshIncidentImpact: (id: string) =>
+    unwrap(api.post<ApiResponse<Incident>>(`/api/v1/incidents/${encodeURIComponent(id)}/refresh-impact`)),
 
   // ── Notifications ───────────────────────────────────────────────────────────
   getChannels: () => unwrap(api.get<ApiResponse<CommunicationChannel[]>>('/api/v1/channels')),
@@ -326,25 +413,79 @@ export const api = {
   // ── Maintenance / runbooks / deployments / backups ──────────────────────────
   getMaintenance: () => unwrap(api.get<ApiResponse<MaintenanceWindow[]>>('/api/v1/maintenance')),
   createMaintenance: (data: Partial<MaintenanceWindow>) => unwrap(api.post<ApiResponse<MaintenanceWindow>>('/api/v1/maintenance', data)),
+  updateMaintenance: (id: string, data: Partial<MaintenanceWindow>) => unwrap(api.patch<ApiResponse<MaintenanceWindow>>(`/api/v1/maintenance/${encodeURIComponent(id)}`, data)),
   completeMaintenance: (id: string) => unwrap(api.post<ApiResponse<MaintenanceWindow>>(`/api/v1/maintenance/${encodeURIComponent(id)}/complete`)),
   deleteMaintenance: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/maintenance/${encodeURIComponent(id)}`)),
   getRunbooks: () => unwrap(api.get<ApiResponse<Runbook[]>>('/api/v1/runbooks')),
+  getCredentials: () => unwrap(api.get<ApiResponse<CredentialCatalogue>>('/api/v1/credentials')),
+  createCredential: (data: CredentialInput) => unwrap(api.post<ApiResponse<CredentialRow>>('/api/v1/credentials', data)),
+  updateCredential: (id: string, data: Partial<CredentialInput>) => unwrap(api.patch<ApiResponse<CredentialRow>>(`/api/v1/credentials/${encodeURIComponent(id)}`, data)),
+  deleteCredential: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/credentials/${encodeURIComponent(id)}`)),
+  evaluateCredentials: () => unwrap(api.post<ApiResponse<{ opened: number; resolved: number }>>('/api/v1/credentials/evaluate')),
   createRunbook: (data: Partial<Runbook>) => unwrap(api.post<ApiResponse<Runbook>>('/api/v1/runbooks', data)),
   updateRunbook: (id: string, data: Partial<Runbook>) => unwrap(api.patch<ApiResponse<Runbook>>(`/api/v1/runbooks/${encodeURIComponent(id)}`, data)),
   deleteRunbook: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/runbooks/${encodeURIComponent(id)}`)),
   toggleRunbookStep: (id: string, stepId: number) => unwrap(api.post<ApiResponse<Runbook>>(`/api/v1/runbooks/${encodeURIComponent(id)}/steps/${stepId}/toggle`)),
   resetRunbook: (id: string) => unwrap(api.post<ApiResponse<Runbook>>(`/api/v1/runbooks/${encodeURIComponent(id)}/reset`)),
+
+  // ── Dependency register ─────────────────────────────────────────────────────
+  getRegistry: () => unwrap(api.get<ApiResponse<{ components: RegistryComponent[]; links: DependencyLink[] }>>('/api/v1/registry')),
+  getRegistryImpact: (id: string) => unwrap(api.get<ApiResponse<RegistryImpact>>(`/api/v1/registry/${encodeURIComponent(id)}/impact`)),
+  getRegistryPaths: (id: string) => unwrap(api.get<ApiResponse<import('../types').RegistryPaths>>(`/api/v1/registry/${encodeURIComponent(id)}/paths`)),
+  getImpactPreview: (q: { applicationId?: string; serverId?: string; registryId?: string; environment?: string }) => {
+    const p = new URLSearchParams();
+    if (q.applicationId) p.set('applicationId', q.applicationId);
+    if (q.serverId) p.set('serverId', q.serverId);
+    if (q.registryId) p.set('registryId', q.registryId);
+    if (q.environment) p.set('environment', q.environment);
+    return unwrap(api.get<ApiResponse<import('../types').ImpactPreview>>(`/api/v1/impact/preview?${p}`));
+  },
+  createRegistryComponent: (data: Partial<RegistryComponent>) => unwrap(api.post<ApiResponse<RegistryComponent>>('/api/v1/registry', data)),
+  updateRegistryComponent: (id: string, data: Partial<RegistryComponent>) => unwrap(api.patch<ApiResponse<RegistryComponent>>(`/api/v1/registry/${encodeURIComponent(id)}`, data)),
+  deleteRegistryComponent: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean; linksRemoved: number }>>(`/api/v1/registry/${encodeURIComponent(id)}`)),
+
+  getResources: (query = '') => api.get<PaginatedApiResponse<ResourceView>>(`/api/v1/resources${query}`),
+  getResource: (id: string) => unwrap(api.get<ApiResponse<{ resource: ResourceView; alerts: Incident[]; measurements: ResourceMeasurement[] }>>(`/api/v1/resources/${encodeURIComponent(id)}`)),
+  getExternalHeartbeat: () => unwrap(api.get<ApiResponse<import('../types').ExternalHeartbeat>>('/api/v1/external-heartbeat')),
+  createResource: (data: Partial<ResourceView>) => unwrap(api.post<ApiResponse<ResourceView>>('/api/v1/resources', data)),
+  updateResource: (id: string, data: Partial<ResourceView>) => unwrap(api.patch<ApiResponse<ResourceView>>(`/api/v1/resources/${encodeURIComponent(id)}`, data)),
+  deleteResource: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/resources/${encodeURIComponent(id)}`)),
+  measureResource: (id: string, data: { usage: number; measuredAt?: string; measurementId?: string; window?: QuotaWindow }) =>
+    unwrap(api.post<ApiResponse<ResourceView & { idempotent: boolean }>>(`/api/v1/resources/${encodeURIComponent(id)}/measure`, data)),
+  evaluateResources: () => unwrap(api.post<ApiResponse<ResourceView[]>>('/api/v1/resources/evaluate', {})),
+  getDependencyLinks: () => unwrap(api.get<ApiResponse<DependencyLink[]>>('/api/v1/dependency-links')),
+  getDependencyLink: (id: string) => unwrap(api.get<ApiResponse<DependencyLink>>(`/api/v1/dependency-links/${encodeURIComponent(id)}`)),
+  createDependencyLink: (data: Partial<DependencyLink>) => unwrap(api.post<ApiResponse<DependencyLink>>('/api/v1/dependency-links', data)),
+  updateDependencyLink: (id: string, data: Partial<DependencyLink>) => unwrap(api.patch<ApiResponse<DependencyLink>>(`/api/v1/dependency-links/${encodeURIComponent(id)}`, data)),
+  deleteDependencyLink: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/dependency-links/${encodeURIComponent(id)}`)),
   getDeployments: () => api.get<PaginatedApiResponse<Deployment>>('/api/v1/deployments?pageSize=200').then(r => r.data),
   getBackups: () => api.get<PaginatedApiResponse<BackupRecord>>('/api/v1/backups?pageSize=200').then(r => r.data),
   getBackupStatus: () => unwrap(api.get<ApiResponse<BackupStatus[]>>('/api/v1/backups/status')),
   getDatabaseHealth: () => unwrap(api.get<ApiResponse<DatabaseHealthRow[]>>('/api/v1/health/databases')),
   getAgentHealth: () => unwrap(api.get<ApiResponse<AgentHealthRow[]>>('/api/v1/health/agents')),
+  /** Rows plus the fleet summary (same endpoint as getAgentHealth) */
+  getAgentFleet: () => api.get<ApiResponse<AgentHealthRow[]> & { summary: AgentFleetSummary }>('/api/v1/health/agents').then(r => ({ rows: r.data, summary: r.summary })),
+  getDatabaseFleet: () => api.get<ApiResponse<DatabaseHealthRow[]> & { summary: DatabaseHealthSummary }>('/api/v1/health/databases').then(r => ({ rows: r.data, summary: r.summary })),
+  /** Agent events (connected, source-IP mismatch, token rotated) of one server, newest first */
+  getAgentEvents: (serverId: string) => api.get<PaginatedApiResponse<AuditLog>>(`/api/v1/audit?category=INFRASTRUCTURE&q=${encodeURIComponent(serverId)}&pageSize=50`)
+    .then(r => r.data.filter(l => l.action.startsWith('AGENT_')).slice(0, 10)),
 
   // ── Providers ───────────────────────────────────────────────────────────────
   getCloudflareZones: () => api.get<{ success: boolean; configured: boolean; lastSyncAt: string | null; lastError: string | null; data: CloudflareZone[] }>('/api/v1/cloudflare/zones'),
   syncCloudflare: () => unwrap(api.post<ApiResponse<CloudflareZone[]>>('/api/v1/cloudflare/sync')),
   getHostingerVms: () => api.get<{ success: boolean; configured: boolean; status: string; lastSyncAt: string | null; lastSuccessAt: string | null; lastError: string | null; data: HostingerInfo[] }>('/api/v1/hostinger/vms'),
   syncHostinger: () => unwrap(api.post<ApiResponse<Array<Record<string, unknown>>>>('/api/v1/hostinger/sync')),
+  getProviderConnections: () => unwrap(api.get<ApiResponse<ProviderConnectionView[]>>('/api/v1/providers/connections')),
+  createProviderConnection: (body: { name: string; provider: 'hostinger'; tokenEnv: string }) => unwrap(api.post<ApiResponse<ProviderConnectionView>>('/api/v1/providers/connections', body)),
+  updateProviderConnection: (id: string, body: { name?: string; syncEnabled?: boolean }) => unwrap(api.patch<ApiResponse<ProviderConnectionView>>(`/api/v1/providers/connections/${encodeURIComponent(id)}`, body)),
+  deleteProviderConnection: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/providers/connections/${encodeURIComponent(id)}`)),
+  testProviderConnection: (id: string) => unwrap(api.post<ApiResponse<{ vmCount: number; connection: ProviderConnectionView }>>(`/api/v1/providers/connections/${encodeURIComponent(id)}/test`)),
+  syncProviderConnection: (id: string) => unwrap(api.post<ApiResponse<{ connection: ProviderConnectionView; instances: ProviderInstanceView[] }>>(`/api/v1/providers/connections/${encodeURIComponent(id)}/sync`)),
+  getProviderInstances: () => api.get<{ success: boolean; data: ProviderInstanceView[]; connections: ProviderConnectionView[] }>('/api/v1/providers/instances'),
+  registerProviderInstance: (id: string, body?: { environment?: 'PRD' | 'DR' }) =>
+    unwrap(api.post<ApiResponse<{ status: string; server?: VpsServer; instanceId: string; reason?: string }>>(`/api/v1/providers/instances/${encodeURIComponent(id)}/register`, body ?? {})),
+  registerAllProviderInstances: (body?: { environment?: 'PRD' | 'DR' }) =>
+    unwrap(api.post<ApiResponse<{ created: number; existed: number; skipped: number; servers: VpsServer[] }>>('/api/v1/providers/instances/register-all', body ?? {})),
   getLoadBalancers: () => unwrap(api.get<ApiResponse<LoadBalancerState>>('/api/v1/loadbalancers')),
   /** Cloudflare lookups for the configuration forms — the API token stays on the server */
   getCloudflareAccounts: () => unwrap(api.get<ApiResponse<Array<{ id: string; name: string }>>>('/api/v1/cloudflare/accounts')),
@@ -362,6 +503,29 @@ export const api = {
   },
   getSummary: () => unwrap(api.get<ApiResponse<SystemSummary>>('/api/v1/reports/summary')),
   getDailyReport: () => unwrap(api.get<ApiResponse<{ report: string; generatedAt: string }>>('/api/v1/reports/daily')),
+  getInsights: () => unwrap(api.get<ApiResponse<ReliabilityInsights>>('/api/v1/insights')),
+  getOpsBackup: () => unwrap(api.get<ApiResponse<OpsBackupHealth>>('/api/v1/ops-backup')),
+  runOpsBackup: (action: 'backup' | 'restore-test') => unwrap(api.post<ApiResponse<{ started: boolean; action: string }>>('/api/v1/ops-backup/run', { action })),
+
+  // ── Notification delivery log ───────────────────────────────────────────────
+  getNotificationDeliveries: (params: { page?: number; pageSize?: number; channelId?: string; result?: string; kind?: string; incidentId?: string; q?: string; unread?: boolean; sort?: 'newest' | 'oldest' } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') qs.set(k, String(v));
+    return api.get<PaginatedApiResponse<NotificationDelivery>>(`/api/v1/notifications/deliveries?${qs}`);
+  },
+  getNotificationHealth: () => unwrap(api.get<ApiResponse<NotificationHealth>>('/api/v1/notifications/health')),
+  verifySmtp: () => unwrap(api.post<ApiResponse<SmtpCheckResult>>('/api/v1/integrations/smtp/verify')),
+  mockIncidentStatus: () => unwrap(api.get<ApiResponse<import('../lib/mockIncident').MockIncidentStatus>>('/api/v1/tools/mock-incident')),
+  runMockIncident: () => unwrap(api.post<ApiResponse<import('../lib/mockIncident').MockIncidentReport>>('/api/v1/tools/mock-incident', { confirm: true })),
+  closeMockIncident: () => unwrap(api.post<ApiResponse<{ closed: boolean; incidentId: string | null }>>('/api/v1/tools/mock-incident/close')),
+  getNotificationStats: () => unwrap(api.get<ApiResponse<NotificationDeliveryStats>>('/api/v1/notifications/stats')),
+  getNotificationDetail: (id: string) => unwrap(api.get<ApiResponse<NotificationDeliveryDetail>>(`/api/v1/notifications/deliveries/${encodeURIComponent(id)}`)),
+  getUnreadNotifications: () => unwrap(api.get<ApiResponse<{ unread: number; unreadFailed: number }>>('/api/v1/notifications/unread-count')),
+  markNotificationsRead: (ids: string[], read = true) => unwrap(api.post<ApiResponse<{ marked: number; read: boolean }>>('/api/v1/notifications/read', { ids, read })),
+  markAllNotificationsRead: () => unwrap(api.post<ApiResponse<{ unread: number; unreadFailed: number }>>('/api/v1/notifications/read-all')),
+  resendNotifications: (ids: string[]) => unwrap(api.post<ApiResponse<{ results: Array<{ id: string; ok: boolean; message: string }>; delivered: number; failed: number }>>('/api/v1/notifications/resend', { ids })),
+  resendNotification: (deliveryId: string) =>
+    unwrap(api.post<ApiResponse<{ delivered: boolean; deliveryId: string }>>(`/api/v1/notifications/deliveries/${encodeURIComponent(deliveryId)}/resend`)),
 
   // ── Realtime (Server-Sent Events) ───────────────────────────────────────────
   connectRealtimeStream(onEvent: (event: string, data: unknown) => void, onStatus?: (connected: boolean) => void): () => void {
@@ -369,7 +533,7 @@ export const api = {
     const EVENTS = [
       'connected', 'telemetry_tick', 'server_update', 'servers_changed', 'applications_changed', 'application_update',
       'monitor_update', 'monitor_deleted', 'monitors_changed', 'incident_created', 'incident_update', 'audit',
-      'channel_update', 'channels_changed', 'maintenance_update', 'maintenance_deleted', 'runbooks_changed',
+      'channel_update', 'channels_changed', 'maintenance_update', 'maintenance_deleted', 'runbooks_changed', 'registry_changed',
       'deployments_changed', 'backups_changed', 'cloudflare_update', 'deadman_update', 'loadbalancer_update',
     ];
     let source: EventSource | null = null;
@@ -409,10 +573,27 @@ export const api = {
     };
     void connect();
 
+    // Leaving the page (navigation, tab discarded, back/forward cache) must close the stream.
+    // Otherwise the connection can stay open after the page is gone; browsers allow only 6
+    // connections per server over HTTP/1.1, so a few lingering streams queue every other request
+    // ("Saving…" / "Loading…" forever). A page restored from the back/forward cache reconnects.
+    const onPageHide = () => {
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      source?.close();
+      source = null;
+    };
+    const onPageShow = (e: PageTransitionEvent) => {
+      if (e.persisted && !closed && !source) { attempt = 0; void connect(); }
+    };
+    window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('pageshow', onPageShow);
+
     return () => {
       closed = true;
       if (retryTimer) clearTimeout(retryTimer);
       source?.close();
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('pageshow', onPageShow);
     };
   },
 };

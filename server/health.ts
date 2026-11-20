@@ -5,6 +5,7 @@
  */
 import { Application, BackupStatus, DatabaseHealth, DatabaseReport, EnvironmentInventory, Monitor } from '../src/types/index.ts';
 import { config } from './config.ts';
+import { providerBackupCheck } from './hostinger.ts';
 import { db, ServerRecord } from './store.ts';
 
 export type Env = 'PRD' | 'DR';
@@ -81,7 +82,14 @@ export function backupStatus(app: Application): BackupStatus {
   const last = backups[0];
   const base = { applicationId: app.id, applicationName: app.name, thresholdHours };
   if (!last) {
-    return { ...base, status: 'UNKNOWN', lastBackupAt: null, lastBackupStatus: null, ageHours: null, type: null, destination: null, detail: 'No backup has reported to Scholario Ops (POST /api/v1/backups/report from the backup job)' };
+    const srv = serverFor(app, 'PRD') ?? serverFor(app, 'DR');
+    const check = providerBackupCheck(srv?.hostingerVmId);
+    const detail = check?.error
+      ? `Hostinger did not return backups for this server (${check.error}). No backup script has reported a run either.`
+      : check && check.count === 0
+        ? 'Hostinger lists no backups and no snapshot for this server. No backup script has reported a run either.'
+        : 'No backup has reported to Scholario Ops (POST /api/v1/backups/report from the backup job)';
+    return { ...base, status: 'UNKNOWN', lastBackupAt: null, lastBackupStatus: null, ageHours: null, type: null, destination: null, detail };
   }
   const ageHours = Math.round(((Date.now() - Date.parse(last.completedAt)) / 3_600_000) * 10) / 10;
   const lastSuccess = backups.find(b => b.status === 'SUCCESS');

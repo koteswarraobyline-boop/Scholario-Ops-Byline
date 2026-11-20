@@ -48,3 +48,34 @@ test('agent python: valid syntax and database probe parsing', (t) => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('agent 3.3 python: CPU / memory / swap / filesystems / inodes / disk I/O / network / systemd / ports / PM2 allow-list / NTP / local health', (t) => {
+  const py = findPython();
+  if (!py) { t.skip('Python 3 not available'); return; }
+  const script = buildInstaller({ serverUrl: 'https://ops.example.com', agentToken: 'a'.repeat(48), hostname: 'vps', services: 'nginx' });
+  const agent = script.split("<<'SCHOLARIO_AGENT_EOF'\n")[1].split('SCHOLARIO_AGENT_EOF')[0];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scholario-agent-'));
+  const file = path.join(dir, 'agent.py');
+  fs.writeFileSync(file, agent);
+  try {
+    const r = spawnSync(py[0], [...py.slice(1), path.join('tests', 'fixtures', 'agent_telemetry_check.py'), file], { encoding: 'utf8', env: pyEnv, timeout: 60_000 });
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /ALL AGENT TELEMETRY CHECKS PASSED/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('agent is read-only: no restart / stop / kill / reconfigure commands in the agent', () => {
+  const script = buildInstaller({ serverUrl: 'https://ops.example.com', agentToken: 'a'.repeat(48), hostname: 'vps', services: 'nginx' });
+  const agent = script.split("<<'SCHOLARIO_AGENT_EOF'\n")[1].split('SCHOLARIO_AGENT_EOF')[0];
+  // Every external command the agent runs, as written in the source
+  const commands = [...agent.matchAll(/\[\s*(?:exe|"[a-z]+"|shutil\.which\("[a-z]+"\)[^,]*)\s*,\s*"([a-z-]+)"/g)].map(m => m[1]);
+  for (const forbidden of ['restart', 'stop', 'start', 'kill', 'delete', 'reload', 'enable', 'disable', 'mask', 'flush', 'reset', 'update']) {
+    assert.equal(commands.includes(forbidden), false, `agent must not run "${forbidden}"`);
+  }
+  const killLines = agent.split('\n').filter(l => l.includes('os.kill('));
+  assert.ok(killLines.length > 0 && killLines.every(l => /, 0\)\s*$/.test(l)), 'os.kill only with signal 0 (liveness check)');
+  assert.equal(/subprocess\.(?:Popen|call)\(/.test(agent), false);
+  assert.match(agent, /"jlist"/, 'PM2 is only read with jlist');
+});

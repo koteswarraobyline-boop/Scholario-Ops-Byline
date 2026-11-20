@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { ApiError } from '../../services/api';
+import { ApiError, api } from '../../services/api';
+import { AuthService } from '../../services/auth';
 import { Activity, Eye, EyeOff, AlertCircle, Loader2 } from 'lucide-react';
 
 export const LoginPage: React.FC = () => {
@@ -15,10 +16,37 @@ export const LoginPage: React.FC = () => {
   const [showPass, setShowPass] = useState(false);
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState<string | null>(null);
+  const [sso, setSso]           = useState(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const code = params.get('sso_error');
+    const messages: Record<string, string> = {
+      not_configured: 'SSO is not configured.',
+      denied: 'The identity provider did not complete sign-in.',
+      no_account: 'That email has no account here. An administrator must create it first.',
+    };
+    if (code && messages[code]) setError(messages[code]);
+    const ticket = params.get('sso');
+    if (!ticket) return;
+    let gone = false;
+    setLoading(true);
+    AuthService.exchangeSso(ticket)
+      .then(() => { if (!gone) navigate(from, { replace: true }); })
+      .catch(err => { if (!gone) setError(err instanceof ApiError ? err.message : 'SSO sign-in did not finish.'); })
+      .finally(() => { if (!gone) setLoading(false); });
+    return () => { gone = true; };
+  }, [location.search, navigate, from]);
 
   useEffect(() => {
     if (isAuthenticated) navigate(from, { replace: true });
   }, [isAuthenticated, navigate, from]);
+
+  useEffect(() => {
+    api.get<{ success: boolean; data: { configured: boolean } }>('/api/auth/oidc/status')
+      .then(res => setSso(Boolean(res.data?.configured)))
+      .catch(() => setSso(false));
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -55,13 +83,12 @@ export const LoginPage: React.FC = () => {
           <div className="inline-flex items-center justify-center w-12 h-12 bg-blue-600 rounded-xl mb-4 shadow-lg shadow-blue-900/40">
             <Activity className="w-6 h-6 text-white" />
           </div>
-          <h1 className="text-xl font-bold text-white font-mono tracking-tight">SCHOLARIO OPS</h1>
-          <p className="text-slate-500 text-xs font-mono mt-1">IT Operations Control Center</p>
+          <h1 className="text-xl font-bold text-white tracking-tight">Scholario Ops</h1>
         </div>
 
         {/* Card */}
         <div className="bg-[#0F1520] border border-[#1E293B] rounded-xl p-6 shadow-2xl">
-          <h2 className="text-sm font-semibold text-slate-200 font-mono mb-5">Sign in to your account</h2>
+          <h2 className="text-sm font-semibold text-slate-200 mb-5">Sign in</h2>
 
           {error && (
             <div className="flex items-start gap-2.5 p-3 bg-rose-950/60 border border-rose-800/60 rounded-lg mb-4 text-xs text-rose-300 font-mono">
@@ -133,6 +160,11 @@ export const LoginPage: React.FC = () => {
               )}
             </button>
           </form>
+          {sso && (
+            <a href="/api/auth/oidc/start" className="mt-3 flex items-center justify-center w-full py-2.5 px-4 border border-[#2A3A52] rounded-lg text-sm font-mono text-slate-200 hover:bg-[#162033]">
+              Sign in with SSO
+            </a>
+          )}
         </div>
 
         {/* First-run hint */}
