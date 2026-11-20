@@ -16,13 +16,10 @@ import {
 import { IncidentFlowChart } from '../visuals/IncidentFlowChart';
 import { IncidentTimelineView } from './IncidentTimelineView';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 import { useDialog } from '../ui/useDialog';
 import { ROOT_CAUSE_CATEGORIES, ROOT_CAUSE_LABELS } from '../../lib/rootCause';
 import { featureAction } from '../../lib/featureAction';
-import { useDependencyDemo } from '../../context/DependencyDemoContext';
-import { DemoBanner, DemoScenarios, DemoToggle } from '../resilience/DemoModeControls';
-import { demoIncident } from '../../mocks/dependencyDemoData';
-
 const SEVERITIES: IncidentSeverity[] = ['INFO', 'WARNING', 'HIGH', 'CRITICAL', 'EMERGENCY'];
 const STATUSES: IncidentStatus[] = ['OPEN', 'ACKNOWLEDGED', 'INVESTIGATING', 'MITIGATING', 'MONITORING', 'RESOLVED', 'CLOSED'];
 
@@ -994,7 +991,6 @@ const DeclareIncidentModal: React.FC<{ onClose: () => void }> = ({ onClose }) =>
 export const IncidentsView: React.FC = () => {
   const { incidents, selectedIncidentId, setSelectedIncidentId, applications, theme } = useOps();
   const { hasRole } = useAuth();
-  const demo = useDependencyDemo();
   const isDark = theme === 'dark';
   const [filter, setFilter] = useState<'ALL' | 'OPEN' | 'CRITICAL' | 'RESOLVED'>('ALL');
   const [showDeclare, setShowDeclare] = useState(false);
@@ -1007,42 +1003,7 @@ export const IncidentsView: React.FC = () => {
     if (filter === 'RESOLVED') return isClosed(inc);
     return true;
   });
-
-  if (demo.enabled) {
-    const picture = demo.scenario ? demoIncident(demo.scenario) : null;
-    return (
-      <div className="space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h1 className="text-lg font-bold font-mono">INCIDENT COMMAND WORKSPACE</h1>
-          <DemoToggle isDark={isDark} />
-        </div>
-        <DemoBanner />
-        <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-          HYPOTHETICAL SIMULATION. This is not a confirmed live incident. Live incidents are hidden until DEMO mode is off. Nothing is created or resolved.
-        </p>
-        <div className={`rounded-lg p-3 ${isDark ? 'bg-slate-950' : 'bg-slate-900'}`}>
-          <DemoScenarios />
-        </div>
-        {!picture && <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Select a scenario to see an illustrative blast radius.</p>}
-        {picture && (
-          <article className={`rounded border p-4 space-y-2 text-xs font-mono ${isDark ? 'border-violet-800 bg-[#111726]' : 'border-violet-300 bg-white'}`}>
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="px-2 py-0.5 rounded bg-violet-600 text-white text-[10px] font-bold">DEMO</span>
-              <span className={isDark ? 'text-slate-400' : 'text-slate-500'}>{picture.id}</span>
-            </div>
-            <h2 className="text-base font-bold font-sans">{picture.title}</h2>
-            <div>Root provider: {picture.simulation.rootName}</div>
-            <div>Detection time: {fmtDateTime(picture.detectedAt)}</div>
-            <div>Direct {picture.simulation.direct.length} · indirect {picture.simulation.indirect.length} · applications {picture.simulation.affectedApplications}</div>
-            <div>Recovery status: {picture.recovery}</div>
-            <ul className="space-y-1">
-              {picture.timeline.map(event => <li key={event.at}>{event.at} · {event.text}</li>)}
-            </ul>
-          </article>
-        )}
-      </div>
-    );
-  }
+  const incidentPaging = useClientPagination(filteredIncidents, 10, filter);
 
   return (
     <div className="space-y-6">
@@ -1059,12 +1020,7 @@ export const IncidentsView: React.FC = () => {
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
       }`}>
         <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">
-            INCIDENT COMMAND WORKSPACE
-          </h1>
-          <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Incidents opened by confirmed monitor failures or declared by operators
-          </p>
+          <h1 className="text-lg font-bold tracking-tight">Incidents</h1>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -1134,7 +1090,7 @@ export const IncidentsView: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className={`divide-y ${isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
-                    {filteredIncidents.map(inc => {
+                    {incidentPaging.slice.map(inc => {
                       const app = applications.find(a => a.id === inc.applicationId);
                       const isCrit = (inc.severity === 'CRITICAL' || inc.severity === 'EMERGENCY') && !isClosed(inc);
                       const unassigned = !inc.owner || inc.owner === 'Unassigned';
@@ -1192,6 +1148,7 @@ export const IncidentsView: React.FC = () => {
               </div>
             )}
           </div>
+          <Pagination page={incidentPaging.page} totalPages={incidentPaging.totalPages} total={incidentPaging.total} pageSize={incidentPaging.pageSize} onPage={incidentPaging.setPage} />
         </>
       )}
     </div>

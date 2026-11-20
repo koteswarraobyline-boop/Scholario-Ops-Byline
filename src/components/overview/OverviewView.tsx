@@ -3,19 +3,19 @@ import { THRESHOLDS } from '../../lib/thresholds';
 import { useNavigate } from 'react-router-dom';
 import { useOps } from '../../context/OpsContext';
 import { SinceLastUpdate } from '../ui/SinceLastUpdate';
-import { useAuth } from '../../context/AuthContext';
 import { api } from '../../services/api';
 import { OperationalStatus, ServerMetricPoint } from '../../types';
 import {
   Layers, Server, Radio, AlertTriangle, Cloud, Database,
-  ShieldCheck, Activity, ArrowRight, RefreshCw, CheckCircle2,
-  TrendingUp, Clock, Eye, BarChart2, Wifi, WifiOff, Circle, Zap, Loader2, Settings2,
+  ShieldCheck, Activity, ArrowRight, CheckCircle2,
+  TrendingUp, Clock, Zap, Loader2, Settings2,
 } from 'lucide-react';
 import { HeartbeatPulseChart } from '../visuals/HeartbeatPulseChart';
 import { TrafficFlowChart } from '../visuals/TrafficFlowChart';
 import { IncidentFlowChart } from '../visuals/IncidentFlowChart';
 import { TelemetryAreaGraph } from '../visuals/TelemetryAreaGraph';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 import { ApplicationStatusPanel } from './ApplicationStatusPanel';
 import { dnsPointsAt, originFlows, routeState, servingLabel } from '../ui/routing';
 import { statusCause } from '../../lib/statusCause';
@@ -118,25 +118,19 @@ const MetricCard: React.FC<MetricCardProps> = ({
 // ── Main Component ────────────────────────────────────────────────────────────
 export const OverviewView: React.FC = () => {
   const {
-    applications, servers, monitors, runbooks, cloudflareZones, deadMan, integrations, systemSummary,
-    setSelectedAppId, setSelectedIncidentId, incidents, runAllProbes, theme,
-    apiHealth, isLoading, loadError, refreshAll, realtimeStatus, loadBalancer,
+    applications, servers, monitors, cloudflareZones, deadMan, integrations, systemSummary,
+    setSelectedAppId, setSelectedIncidentId, incidents, theme,
+    isLoading, loadError, refreshAll, loadBalancer,
   } = useOps();
-  const { canDo } = useAuth();
   const navigate = useNavigate();
   const go = (tab: string) => navigate(`/${tab}`);
 
   const isDark = theme === 'dark';
   const openIncidents = incidents.filter(i => i.status !== 'RESOLVED' && i.status !== 'CLOSED');
   const activeIncident = openIncidents[0];
-  const criticalOpen = openIncidents.filter(i => i.severity === 'CRITICAL' || i.severity === 'EMERGENCY');
 
-  const [probing, setProbing] = useState(false);
   const [retrying, setRetrying] = useState(false);
-  const handleProbeAll = async () => {
-    setProbing(true);
-    try { await runAllProbes(); } finally { setProbing(false); }
-  };
+  const appPaging = useClientPagination(applications, 10);
   const handleRetry = async () => {
     setRetrying(true);
     try { await refreshAll(); } finally { setRetrying(false); }
@@ -253,101 +247,22 @@ export const OverviewView: React.FC = () => {
 
   // ── Header ─────────────────────────────────────────────────────────────────
   const header = (
-    <div className={`flex flex-col md:flex-row md:items-center justify-between gap-3 pb-4 border-b ${
-      isDark ? 'border-[#1E293B]' : 'border-slate-200'
-    }`}>
-      <div>
-        <div className="flex items-center gap-2.5 flex-wrap">
-          <h1 className={`text-lg font-bold tracking-tight font-mono ${isDark ? 'text-white' : 'text-slate-900'}`}>
-            OPERATIONS COMMAND CENTER
-          </h1>
-          {!isEmpty && (
-            <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold flex items-center gap-1.5 ${
-              systemSummary.overallHealth === 'CRITICAL'
-                ? 'text-rose-400 bg-rose-950/60 border border-rose-800/60'
-                : systemSummary.overallHealth === 'WARNING'
-                  ? 'text-amber-400 bg-amber-950/60 border border-amber-800/60'
-                  : systemSummary.overallHealth === 'UNKNOWN'
-                    ? 'text-slate-400 bg-slate-900/60 border border-slate-700/60'
-                    : 'text-emerald-400 bg-emerald-950/60 border border-emerald-800/60'
-            }`}>
-              <StatusDot
-                status={systemSummary.overallHealth === 'CRITICAL' ? 'crit' : systemSummary.overallHealth === 'WARNING' ? 'warn' : systemSummary.overallHealth === 'UNKNOWN' ? 'unknown' : 'ok'}
-                pulse={systemSummary.overallHealth !== 'OPERATIONAL'}
-              />
-              {systemSummary.overallHealth}{systemSummary.overallHealth === 'OPERATIONAL' && systemSummary.visibilityGaps.length ? ' · PARTIAL DATA' : ''}
-            </span>
-          )}
-          {/* API backend badge (from the context's periodic /api/health check) */}
-          <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold flex items-center gap-1.5 ${
-            !apiHealth.lastChecked
-              ? (isDark ? 'text-slate-500 bg-slate-900 border border-slate-700' : 'text-slate-400 bg-slate-50 border border-slate-200')
-              : apiHealth.reachable
-                ? (isDark ? 'text-blue-400 bg-blue-950/50 border border-blue-800/50' : 'text-blue-700 bg-blue-50 border border-blue-200')
-                : (isDark ? 'text-rose-400 bg-rose-950/50 border border-rose-800/50' : 'text-rose-700 bg-rose-50 border border-rose-200')
-          }`}>
-            {!apiHealth.lastChecked
-              ? <><Circle className="w-2.5 h-2.5 animate-pulse" /> CHECKING</>
-              : apiHealth.reachable
-                ? <><Wifi className="w-3 h-3" /> API {apiHealth.latencyMs}ms</>
-                : <><WifiOff className="w-3 h-3" /> API UNREACHABLE</>
-            }
-          </span>
-          <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
-            realtimeStatus === 'LIVE'
-              ? 'text-emerald-400 bg-emerald-950/50 border border-emerald-800/50'
-              : realtimeStatus === 'RECONNECTING'
-                ? 'text-amber-400 bg-amber-950/50 border border-amber-800/50'
-                : 'text-rose-400 bg-rose-950/50 border border-rose-800/50'
-          }`}>
-            STREAM {realtimeStatus}
-          </span>
-        </div>
-        <p className={`text-[11px] mt-1 flex items-center gap-2 font-mono flex-wrap ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-          <Clock className="w-3 h-3" />
-          <span>Last update <SinceLastUpdate /></span>
-          {systemSummary.visibilityGaps.length > 0 && (
-            <>
-              <span className={isDark ? 'text-slate-700' : 'text-slate-300'}>·</span>
-              <span className="text-amber-500">Partial data: {systemSummary.visibilityGaps.join(' · ')}</span>
-            </>
-          )}
-          <span className={isDark ? 'text-slate-700' : 'text-slate-300'}>·</span>
-          <span className={overallUptime === null ? '' : overallUptime >= THRESHOLDS.uptimePercent.good ? 'text-emerald-500 font-semibold' : 'text-amber-500 font-semibold'}>
-            {overallUptime === null ? 'No uptime data yet' : `${overallUptime.toFixed(2)}% avg uptime (30d, ${uptimeVals.length} app${uptimeVals.length === 1 ? '' : 's'})`}
-          </span>
-        </p>
-      </div>
-
-      <div className="flex items-center gap-2 shrink-0">
-        {canDo('run_probe') && enabledMonitors.length > 0 && (
-          <button
-            onClick={handleProbeAll}
-            disabled={probing}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-medium rounded-lg transition-all border cursor-pointer hover:scale-105 disabled:opacity-60 disabled:cursor-wait disabled:hover:scale-100 ${
-              isDark
-                ? 'text-slate-200 bg-[#162033] hover:bg-[#1C2942] border-[#243552]'
-                : 'text-slate-700 bg-white hover:bg-slate-50 border-slate-300 shadow-xs'
-            }`}
-          >
-            {probing ? <Loader2 className="w-3.5 h-3.5 text-blue-400 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5 text-blue-400" />}
-            <span>{probing ? 'PROBING…' : 'PROBE ALL'}</span>
-          </button>
+    <div className={`pb-4 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
+      <h1 className={`text-lg font-bold tracking-tight ${isDark ? 'text-white' : 'text-slate-900'}`}>Overview</h1>
+      <p className={`text-[11px] mt-1 flex items-center gap-2 flex-wrap ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+        <Clock className="w-3 h-3" />
+        <span>Updated <SinceLastUpdate /></span>
+        {systemSummary.visibilityGaps.length > 0 && (
+          <>
+            <span className={isDark ? 'text-slate-700' : 'text-slate-300'}>·</span>
+            <span className="text-amber-500">Partial data: {systemSummary.visibilityGaps.join(' · ')}</span>
+          </>
         )}
-        <button
-          onClick={() => go(criticalOpen.length > 0 ? 'incidents' : 'reports')}
-          className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-semibold rounded-lg transition-all shadow-xs cursor-pointer hover:scale-105 ${
-            criticalOpen.length > 0
-              ? 'text-white bg-rose-600 hover:bg-rose-700'
-              : 'text-white bg-blue-600 hover:bg-blue-700'
-          }`}
-        >
-          {criticalOpen.length > 0
-            ? <><AlertTriangle className="w-3.5 h-3.5" /> {criticalOpen.length} CRITICAL</>
-            : <><BarChart2 className="w-3.5 h-3.5" /> DAILY REPORT</>
-          }
-        </button>
-      </div>
+        <span className={isDark ? 'text-slate-700' : 'text-slate-300'}>·</span>
+        <span className={overallUptime === null ? '' : overallUptime >= THRESHOLDS.uptimePercent.good ? 'text-emerald-500 font-semibold' : 'text-amber-500 font-semibold'}>
+          {overallUptime === null ? 'No uptime data yet' : `${overallUptime.toFixed(2)}% average uptime, last 30 days`}
+        </span>
+      </p>
     </div>
   );
 
@@ -393,78 +308,6 @@ export const OverviewView: React.FC = () => {
     );
   }
 
-  // ── The 5 operational answers (derived from real state) ────────────────────
-  const healthyAppNames = applications.filter(a => a.status === 'HEALTHY').map(a => a.name);
-  const incidentApp = activeIncident ? applications.find(a => a.id === activeIncident.applicationId) : undefined;
-  const incidentRunbook = activeIncident?.runbookId ? runbooks.find(r => r.id === activeIncident.runbookId) : undefined;
-  const incidentMonitors = activeIncident ? monitors.filter(m => activeIncident.affectedMonitors.includes(m.id)) : [];
-  const recoveryLine = incidentMonitors.length
-    ? incidentMonitors.map(m => `${Math.min(m.consecutiveRecoveries, m.recoveryConfirmationThreshold)}/${m.recoveryConfirmationThreshold}`).join(', ')
-    : null;
-
-  const answers = [
-    {
-      n: '01',
-      q: 'What is healthy?',
-      color: 'text-emerald-500',
-      highlight: null as null | 'rose' | 'amber' | 'emerald',
-      answer: `${systemSummary.healthyApps}/${systemSummary.totalApps} apps, ${systemSummary.healthyServers}/${systemSummary.totalServers} servers`,
-      detail: healthyAppNames.length ? `${healthyAppNames.join(', ')} healthy.` : 'No application is currently reporting HEALTHY.',
-    },
-    {
-      n: '02',
-      q: 'What is failing?',
-      color: 'text-rose-400',
-      highlight: activeIncident ? 'rose' as const : null,
-      answer: activeIncident
-        ? `${incidentApp?.name ?? activeIncident.applicationId ?? 'Unknown app'} ${activeIncident.environment}`
-        : criticalMonitors > 0 ? `${criticalMonitors} monitor(s) critical` : 'No open incidents',
-      detail: activeIncident
-        ? (activeIncident.rootCause || activeIncident.title)
-        : unknownMonitors > 0 ? `${unknownMonitors} monitor(s) have not reported a result yet.` : 'All enabled monitors are passing.',
-    },
-    {
-      n: '03',
-      q: 'What is affected?',
-      color: 'text-amber-400',
-      highlight: activeIncident ? 'amber' as const : null,
-      answer: activeIncident
-        ? (activeIncident.affectedServices.length ? activeIncident.affectedServices.slice(0, 2).join(', ') : 'See incident')
-        : 'Nothing reported',
-      detail: activeIncident
-        ? `${activeIncident.affectedMonitors.length} monitor(s) affected.${incidentApp?.failoverState === 'DR_ACTIVE' ? ' Traffic is on the DR server.' : ''}`
-        : `${openIncidents.length} open incidents.`,
-    },
-    {
-      n: '04',
-      q: 'What should IT do?',
-      color: 'text-blue-400',
-      highlight: null,
-      answer: activeIncident
-        ? (incidentRunbook ? `Run: ${incidentRunbook.title}` : !activeIncident.acknowledged ? `Acknowledge ${activeIncident.id}` : `Work ${activeIncident.id}`)
-        : 'No action required',
-      detail: activeIncident
-        ? `Status ${activeIncident.status} · owner ${activeIncident.owner || 'Unassigned'}${openIncidents.length > 1 ? ` · ${openIncidents.length - 1} more open` : ''}`
-        : 'Keep monitoring.',
-    },
-    {
-      n: '05',
-      q: 'Has it recovered?',
-      color: activeIncident ? 'text-slate-400' : 'text-emerald-400',
-      highlight: activeIncident ? null : 'emerald' as const,
-      answer: activeIncident ? 'Not yet' : 'No open incidents',
-      detail: activeIncident
-        ? (recoveryLine ? `Recovery confirmations: ${recoveryLine}` : (activeIncident.recoveryStatus || 'Awaiting recovery'))
-        : 'Nothing awaiting recovery.',
-    },
-  ];
-
-  const highlightBg = (h: null | 'rose' | 'amber' | 'emerald') =>
-    h === 'rose' ? (isDark ? 'bg-[#180E13]' : 'bg-rose-50')
-      : h === 'amber' ? (isDark ? 'bg-[#18130E]' : 'bg-amber-50')
-        : h === 'emerald' ? (isDark ? 'bg-[#0E1713]' : 'bg-emerald-50')
-          : (isDark ? 'bg-[#0B0F17]' : 'bg-slate-50');
-
   const regions = [...new Set(servers.map(s => s.region).filter(Boolean))];
 
   return (
@@ -484,7 +327,7 @@ export const OverviewView: React.FC = () => {
             <Zap className="w-4 h-4 text-blue-400" />
           </div>
           <div className="min-w-0 space-y-1">
-            <span className="font-bold text-xs font-mono">ACTIVE ROUTES</span>
+            <span className="font-bold text-xs">Routes</span>
             {applications.length === 0 ? (
               <div className="text-[11px] font-mono text-slate-400">
                 No applications registered — add one in Setup. DR and routing are optional per application.
@@ -528,7 +371,7 @@ export const OverviewView: React.FC = () => {
           onClick={() => go(applications.length === 0 ? 'setup' : 'resilience')}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-mono font-bold bg-blue-600 hover:bg-blue-500 text-white transition-all shadow-xs cursor-pointer shrink-0 self-start"
         >
-          <span>{applications.length === 0 ? 'OPEN SETUP' : 'PRD / DR READINESS'}</span>
+          <span>{applications.length === 0 ? 'Open Setup' : 'Open readiness'}</span>
           <ArrowRight className="w-3.5 h-3.5" />
         </button>
       </div>
@@ -575,9 +418,9 @@ export const OverviewView: React.FC = () => {
           badgeColor={systemSummary.openIncidents > 0 ? 'text-rose-400 bg-rose-950/60' : 'text-emerald-400 bg-emerald-950/60'}
         />
         <MetricCard
-          label="DR Ready"
+          label="Readiness"
           value={`${systemSummary.drReadinessCount}/${systemSummary.totalApps}`}
-          sub="Server-evaluated DR readiness = READY"
+          sub="Ready to switch to the recovery server"
           icon={Cloud}
           status={systemSummary.totalApps === 0 ? 'unknown' : systemSummary.drReadinessCount < systemSummary.totalApps ? 'warn' : 'ok'}
           onClick={() => go('resilience')}
@@ -607,7 +450,7 @@ export const OverviewView: React.FC = () => {
           isDark={isDark}
         />
         <MetricCard
-          label="Dead-Man"
+          label="Heartbeat"
           value={deadManLabel(deadMan.status)}
           sub={hbServers.length ? `${hbServers.map(s => `${s.environment} VPS`).join(' + ')} · apps · services · DB` : 'Register servers in Setup'}
           icon={Activity}
@@ -703,32 +546,6 @@ export const OverviewView: React.FC = () => {
         )}
       </div>
 
-      {/* ── The 5 Operational Answers ────────────────────────────────────── */}
-      <div className={`rounded-lg border overflow-hidden ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
-        <div className={`px-4 py-2.5 border-b flex items-center justify-between ${isDark ? 'border-[#1A2332] bg-[#0D1220]' : 'border-slate-100 bg-slate-50'}`}>
-          <div className="flex items-center gap-2">
-            <Eye className="w-3.5 h-3.5 text-blue-400" />
-            <span className="text-[11px] font-bold uppercase tracking-wider font-mono">Operational Assessment — The 5 Answers</span>
-          </div>
-          <span className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-            Derived from live incidents &amp; monitors
-          </span>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-5">
-          {answers.map(item => (
-            <div key={item.n} className={`p-3.5 border-r last:border-r-0 min-w-0 ${highlightBg(item.highlight)} ${isDark ? 'border-[#1A2436]' : 'border-slate-100'}`}>
-              <div className="flex items-center gap-1.5 mb-2">
-                <span className={`text-[9px] font-mono font-bold ${item.color}`}>{item.n}</span>
-                <span className={`text-[9px] uppercase tracking-wider font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{item.q}</span>
-              </div>
-              <div className={`text-xs font-bold font-mono break-words ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{item.answer}</div>
-              <div className={`text-[11px] font-sans mt-1 leading-snug break-words ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{item.detail}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-
       {/* ── Live Visual Charts ───────────────────────────────────────────── */}
       <div className="space-y-4">
         <HeartbeatPulseChart />
@@ -738,16 +555,9 @@ export const OverviewView: React.FC = () => {
 
       {/* ── Telemetry Time-Series Graphs ─────────────────────────────────── */}
       <div>
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <TrendingUp className="w-3.5 h-3.5 text-blue-400" />
-            <h3 className="text-[11px] font-bold uppercase tracking-wider font-mono">
-              Infrastructure Telemetry — Past 60 Minutes
-            </h3>
-          </div>
-          <span className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-            Per-minute agent samples · refreshed every 60s
-          </span>
+        <div className="flex items-center gap-2 mb-3">
+          <TrendingUp className="w-3.5 h-3.5 text-blue-400" />
+          <h3 className="text-sm font-semibold">Last 60 minutes</h3>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           <TelemetryAreaGraph
@@ -777,13 +587,10 @@ export const OverviewView: React.FC = () => {
       <div className={`rounded-lg border overflow-hidden ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`}>
         <div className={`px-4 py-3 border-b flex items-center justify-between ${isDark ? 'border-[#1A2332] bg-[#0D1220]' : 'border-slate-100 bg-slate-50'}`}>
           <div>
-            <h2 className="text-[11px] font-bold font-mono uppercase tracking-wider">Application Systems &amp; Failover Matrix</h2>
-            <p className={`text-[10px] mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-              Live health · RTO/RPO targets · Replication lag · Active origin
-            </p>
+            <h2 className="text-sm font-semibold">Applications</h2>
           </div>
           <button onClick={() => go('applications')} className="text-xs text-blue-400 hover:text-blue-300 font-mono font-medium flex items-center gap-1 cursor-pointer">
-            <span>Full view</span><ArrowRight className="w-3 h-3" />
+            <span>Open</span><ArrowRight className="w-3 h-3" />
           </button>
         </div>
 
@@ -795,6 +602,7 @@ export const OverviewView: React.FC = () => {
             </button>
           </div>
         ) : (
+          <>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs font-mono">
               <thead className={`text-[10px] font-semibold uppercase border-b ${isDark ? 'bg-[#0B0F17] text-slate-500 border-[#1A2332]' : 'bg-slate-50 text-slate-500 border-slate-200'}`}>
@@ -812,7 +620,7 @@ export const OverviewView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className={`divide-y text-[11px] ${isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
-                {applications.map(app => {
+                {appPaging.slice.map(app => {
                   const prdServer = servers.find(s => s.id === app.prdServerId);
                   const drServer  = servers.find(s => s.id === app.drServerId);
                   const dot = dotFor(app.status);
@@ -904,6 +712,8 @@ export const OverviewView: React.FC = () => {
               </tbody>
             </table>
           </div>
+          <Pagination page={appPaging.page} totalPages={appPaging.totalPages} total={appPaging.total} pageSize={appPaging.pageSize} onPage={appPaging.setPage} />
+          </>
         )}
       </div>
 

@@ -21,6 +21,7 @@ import { HeartbeatPulseChart } from '../visuals/HeartbeatPulseChart';
 import { EndpointMetricsVisualizer, formatMonitorReading } from './EndpointMetricsVisualizer';
 import { MonitorFormModal, monitorTypeGroup, PUSH_MONITOR_TYPES } from './CreateMonitorModal';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 import { Monitor, OperationalStatus } from '../../types';
 
 const FILTERS = ['ALL', 'FAILING', 'HTTP', 'TCP', 'DNS', 'SSL', 'INFRA', 'PUSH'] as const;
@@ -154,6 +155,7 @@ export const MonitorsView: React.FC = () => {
         (app?.name ?? '').toLowerCase().includes(q)
       );
     });
+  const monitorPaging = useClientPagination(filteredMonitors, 10, `${filterType}|${search}`);
 
   const failingCount = monitors.filter(isFailing).length;
 
@@ -169,12 +171,7 @@ export const MonitorsView: React.FC = () => {
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
       }`}>
         <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">
-            MONITORS &amp; HEARTBEATS
-          </h1>
-          <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Scheduled HTTP(S), TCP, DNS, SSL and agent resource checks, plus push heartbeats
-          </p>
+          <h1 className="text-lg font-bold tracking-tight">Monitors</h1>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -346,7 +343,7 @@ export const MonitorsView: React.FC = () => {
                         No monitors match your filter.
                       </td>
                     </tr>
-                  ) : filteredMonitors.map(m => {
+                  ) : monitorPaging.slice.map(m => {
                     const app = applications.find(a => a.id === m.applicationId);
                     const failing = isFailing(m);
                     const isProbing = probingId === m.id;
@@ -551,6 +548,7 @@ export const MonitorsView: React.FC = () => {
               </table>
             </div>
           </div>
+          <Pagination page={monitorPaging.page} totalPages={monitorPaging.totalPages} total={monitorPaging.total} pageSize={monitorPaging.pageSize} onPage={monitorPaging.setPage} />
         </>
       )}
     </div>

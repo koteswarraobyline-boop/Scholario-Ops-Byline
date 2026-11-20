@@ -4,16 +4,18 @@
  * they never mutate `db` themselves.
  */
 import crypto from 'crypto';
-import type { RegistryComponent, RegistryKind, DependencyLink, DependencyMethod, RegistryImpact } from '../src/types/index.ts';
+import type { RegistryComponent, RegistryKind, DependencyLink, DependencyMethod, DependencyCriticality, RegistryImpact } from '../src/types/index.ts';
 import { db } from './store.ts';
-import { ValidationError, body, reqStr, optStr, oneOf, optOneOf } from './validate.ts';
+import { ValidationError, reqStr, optStr, oneOf, optOneOf } from './validate.ts';
 import { registryNameKey } from './registryName.ts';
+import { dependencyFeatureAllowed } from '../src/lib/serviceDependencies.ts';
 
 export const REGISTRY_KINDS = ['APPLICATION', 'SERVER', 'DATABASE', 'STORAGE', 'THIRD_PARTY_API', 'PROVIDER', 'BUSINESS_FEATURE'] as const satisfies readonly RegistryKind[];
 export const REGISTRY_TIERS = ['TIER_1', 'TIER_2', 'TIER_3'] as const;
 export const LINK_TYPES = ['HARD', 'SOFT'] as const;
 /** How a consumer reaches a provider. Empty is allowed and stored as null. */
 export const LINK_METHODS = ['HTTP', 'API', 'DATABASE', 'EMBED', 'LINK', 'OTHER'] as const satisfies readonly DependencyMethod[];
+export const LINK_CRITICALITY = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as const satisfies readonly DependencyCriticality[];
 /** Kinds that serve people directly, so they carry a user count and the teams/customers served */
 export const AUDIENCE_KINDS: readonly RegistryKind[] = ['APPLICATION', 'BUSINESS_FEATURE'];
 
@@ -23,13 +25,34 @@ export class RegistryConflict extends Error {}
 type Obj = Record<string, unknown>;
 const MAX_USERS = 1_000_000_000;
 
-/** undefined = not sent (keep), null = clear, otherwise the trimmed id */
+/** Dependency and register writes accept one JSON object. An array or a bare value is refused. */
+function objectBody(req: { body?: unknown }): Obj {
+  const value = req.body;
+  if (value === undefined || value === null) return {};
+  if (typeof value !== 'object' || Array.isArray(value)) throw new ValidationError('Request body must be a JSON object');
+  return value as Obj;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * PostgreSQL stores uuids in lowercase. A client may send the same id in either case.
+ * Anything that is not a uuid is returned trimmed, so a code name is not rewritten.
+ */
+export function canonicalUuid(value: string): string {
+  const trimmed = value.trim();
+  return UUID_RE.test(trimmed) ? trimmed.toLowerCase() : trimmed;
+}
+
+/** undefined = not sent (keep), null or blank = clear, otherwise the id */
 function optRef(o: Obj, key: string, label: string): string | null | undefined {
   const v = o[key];
   if (v === undefined) return undefined;
-  if (v === null || v === '') return null;
+  if (v === null) return null;
   if (typeof v !== 'string') throw new ValidationError(`${label} must be an id`);
-  return v.trim();
+  const trimmed = v.trim();
+  if (!trimmed) return null;
+  return canonicalUuid(trimmed);
 }
 
 function userCountOf(o: Obj): number | null | undefined {
@@ -58,7 +81,7 @@ function servedOf(o: Obj): string[] | undefined {
 }
 
 export function buildComponent(req: { body?: unknown }, existing?: RegistryComponent): RegistryComponent {
-  const b = body(req);
+  const b = objectBody(req);
   const kind = existing ? existing.kind : oneOf(b, 'kind', 'Kind', REGISTRY_KINDS);
   if (existing && b.kind !== undefined && b.kind !== existing.kind) throw new ValidationError('Kind cannot be changed; delete the entry and register it again');
 
@@ -68,6 +91,7 @@ export function buildComponent(req: { body?: unknown }, existing?: RegistryCompo
   if (!owner) throw new ValidationError('Owner is required');
   const tier = existing ? (optOneOf(b, 'tier', 'Tier', REGISTRY_TIERS) ?? existing.tier) : oneOf(b, 'tier', 'Tier', REGISTRY_TIERS);
   const description = b.description !== undefined ? (optStr(b, 'description', 'Description', 2000) ?? '') : existing?.description ?? '';
+  const endpoint = keptText(b, 'endpoint', 'Config', 500, existing?.endpoint ?? '');
 
   const audience = AUDIENCE_KINDS.includes(kind);
   const sentApp = optRef(b, 'applicationId', 'Application');
@@ -81,7 +105,12 @@ export function buildComponent(req: { body?: unknown }, existing?: RegistryCompo
 
   const applicationId = sentApp !== undefined ? sentApp : existing?.applicationId ?? null;
   const serverId = sentServer !== undefined ? sentServer : existing?.serverId ?? null;
-  if (applicationId && !db.applications.some(a => a.id === applicationId)) throw new ValidationError('Application not found');
+  if (applicationId && !db.applications.some(a => a.id === applicationId)) {
+    if (db.servers.some(s => s.id === applicationId)) throw new ValidationError('That id is a server. Choose an application record.');
+    if (db.registry.some(c => c.id === applicationId)) throw new ValidationError('That id is a register entry. Choose an application record.');
+    if (db.dependencyLinks.some(l => l.id === applicationId)) throw new ValidationError('That id is a dependency link. Choose an application record.');
+    throw new ValidationError('Application not found');
+  }
   if (serverId && !db.servers.some(s => s.id === serverId)) throw new ValidationError('Server not found');
 
   const id = existing?.id ?? crypto.randomUUID();
@@ -97,43 +126,124 @@ export function buildComponent(req: { body?: unknown }, existing?: RegistryCompo
     serverId: kind === 'SERVER' ? serverId : null,
     userCount: audience ? (sentUsers !== undefined ? sentUsers : existing?.userCount ?? null) : null,
     served: audience ? (sentServed ?? existing?.served ?? []) : [],
+    endpoint,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
 }
 
+/** Consumer and provider are register entries. An application id or a server id is not an entry. */
+function linkEnd(id: string, role: 'consumer' | 'provider'): RegistryComponent {
+  const component = db.registry.find(c => c.id === id);
+  if (component) {
+    if (component.kind === 'APPLICATION' && component.applicationId && !db.applications.some(a => a.id === component.applicationId)) {
+      throw new ValidationError(`The ${role} application is no longer registered`);
+    }
+    if (component.kind === 'SERVER' && component.serverId && !db.servers.some(s => s.id === component.serverId)) {
+      throw new ValidationError(`The ${role} server is no longer registered`);
+    }
+    return component;
+  }
+  if (db.applications.some(a => a.id === id)) {
+    throw new ValidationError(`That id is an application. Choose the application's register entry as the ${role}.`);
+  }
+  if (db.servers.some(s => s.id === id)) {
+    throw new ValidationError(`That id is a server. Choose the server's register entry as the ${role}. Hosting is recorded on the application, not as a dependency.`);
+  }
+  throw new ValidationError(role === 'consumer' ? 'The dependent component (A) is not in the register' : 'The dependency (B) is not in the register');
+}
+
 export function buildLink(req: { body?: unknown }, existing?: DependencyLink): DependencyLink {
-  const b = body(req);
-  const fromId = existing ? (optRef(b, 'fromId', 'Dependent') ?? existing.fromId) : optRef(b, 'fromId', 'Dependent');
-  const toId = existing ? (optRef(b, 'toId', 'Dependency') ?? existing.toId) : optRef(b, 'toId', 'Dependency');
+  const b = objectBody(req);
+  if (Object.prototype.hasOwnProperty.call(b, 'applicationId')) {
+    throw new ValidationError('A dependency does not take an application id. Choose the consumer and provider register entries.');
+  }
+  // A present but blank end is rejected. Omitting the field keeps the stored end.
+  const sentFrom = optRef(b, 'fromId', 'Dependent');
+  const sentTo = optRef(b, 'toId', 'Dependency');
+  if (sentFrom === null) throw new ValidationError('Choose what depends on something (A)');
+  if (sentTo === null) throw new ValidationError('Choose what it depends on (B)');
+  const fromId = sentFrom ?? existing?.fromId;
+  const toId = sentTo ?? existing?.toId;
   if (!fromId) throw new ValidationError('Choose what depends on something (A)');
   if (!toId) throw new ValidationError('Choose what it depends on (B)');
-  const from = db.registry.find(c => c.id === fromId);
-  const to = db.registry.find(c => c.id === toId);
-  if (!from) throw new ValidationError('The dependent component (A) is not in the register');
-  if (!to) throw new ValidationError('The dependency (B) is not in the register');
+  const from = linkEnd(fromId, 'consumer');
+  const to = linkEnd(toId, 'provider');
   if (fromId === toId) throw new ValidationError('A component cannot depend on itself');
+  rejectOwnHosting(from, to);
 
   const type = existing ? (optOneOf(b, 'type', 'Type', LINK_TYPES) ?? existing.type) : oneOf(b, 'type', 'Type', LINK_TYPES);
   const sentFeature = optRef(b, 'featureId', 'Feature');
   const featureId = sentFeature !== undefined ? sentFeature : existing?.featureId ?? null;
   if (featureId) {
     const f = db.registry.find(c => c.id === featureId);
-    if (!f) throw new ValidationError('Feature not found');
+    if (!f) {
+      if (db.applications.some(a => a.id === featureId)) throw new ValidationError('That id is an application. Choose a business feature from the register.');
+      if (db.servers.some(s => s.id === featureId)) throw new ValidationError('That id is a server. Choose a business feature from the register.');
+      throw new ValidationError('Feature not found');
+    }
     if (f.kind !== 'BUSINESS_FEATURE') throw new ValidationError('The feature that needs this dependency must be a business feature');
+    if (f.applicationId && !db.applications.some(a => a.id === f.applicationId)) throw new ValidationError('The feature application is no longer registered');
+    // A named feature belongs to one application. Both ends unbound is a register-only link.
+    if (!dependencyFeatureAllowed(f, from)) {
+      throw new ValidationError('The feature must belong to the consumer application');
+    }
     // The named feature always stops when B is down, so naming A (or B) itself would contradict the link type
     if (featureId === fromId) throw new ValidationError('The feature that needs it cannot be A itself; set the type to Hard instead');
     if (featureId === toId) throw new ValidationError('The feature that needs it cannot be B itself');
   }
-  const notes = b.notes !== undefined ? (optStr(b, 'notes', 'Notes', 500) ?? '') : existing?.notes ?? '';
+  const notes = keptText(b, 'notes', 'Notes', 500, existing?.notes ?? '');
   const method = methodOf(b, existing);
+  const criticality = criticalityOf(b, existing);
+  const healthCheck = keptText(b, 'healthCheck', 'Health check', 500, existing?.healthCheck ?? '');
+  const failureBehaviour = keptText(b, 'failureBehaviour', 'Failure behaviour', 500, existing?.failureBehaviour ?? '');
+  const owner = keptText(b, 'owner', 'Owner', 200, existing?.owner ?? '');
+  const recoveryExpectation = keptText(b, 'recoveryExpectation', 'Recovery expectation', 500, existing?.recoveryExpectation ?? '');
 
   const id = existing?.id ?? crypto.randomUUID();
   if (db.dependencyLinks.some(l => l.id !== id && l.fromId === fromId && l.toId === toId && (l.featureId ?? null) === featureId)) {
     throw new RegistryConflict(`"${from.name}" already depends on "${to.name}"${featureId ? ' for that feature' : ''}`);
   }
   const now = new Date().toISOString();
-  return { id, fromId, toId, type, featureId, method, notes, createdAt: existing?.createdAt ?? now, updatedAt: now };
+  return {
+    id, fromId, toId, type, featureId, method, criticality, healthCheck, failureBehaviour, owner, recoveryExpectation, notes,
+    createdAt: existing?.createdAt ?? now, updatedAt: now,
+  };
+}
+
+/** The application's own PRD or DR server is hosting. It is not a service dependency. */
+function rejectOwnHosting(from: RegistryComponent, to: RegistryComponent) {
+  const consumerAppId = (from.kind === 'APPLICATION' || from.kind === 'BUSINESS_FEATURE') ? from.applicationId : null;
+  if (!consumerAppId || to.kind !== 'SERVER' || !to.serverId) return;
+  const app = db.applications.find(a => a.id === consumerAppId);
+  if (!app) return;
+  if (to.serverId !== app.prdServerId && to.serverId !== app.drServerId) return;
+  const which = to.serverId === app.prdServerId ? 'production' : 'recovery';
+  throw new ValidationError(`Hosting is recorded on the application. ${app.name} already runs on this ${which} server, so it is not a dependency.`);
+}
+
+/**
+ * The APPLICATION register row keeps the application record's name and tier.
+ * Owner and description stay as the register editor left them.
+ * Returns the row when it changed. A name already used by another application entry is 409.
+ */
+export function syncBoundApplication(
+  app: { id: string; name: string; tier: RegistryComponent['tier'] },
+  before: { name: string; tier: string },
+): RegistryComponent | null {
+  if (before.name === app.name && before.tier === app.tier) return null;
+  const component = db.registry.find(c => c.kind === 'APPLICATION' && c.applicationId === app.id);
+  if (!component) return null;
+  if (before.name !== app.name) {
+    const key = registryNameKey(app.name);
+    if (db.registry.some(c => c.id !== component.id && c.kind === 'APPLICATION' && registryNameKey(c.name) === key)) {
+      throw new RegistryConflict(`An application named "${app.name}" is already in the register`);
+    }
+    component.name = app.name;
+  }
+  if (before.tier !== app.tier) component.tier = app.tier;
+  component.updatedAt = new Date().toISOString();
+  return component;
 }
 
 /** undefined means "not sent" (keep). null or '' clears. Anything else must be an approved method. */
@@ -141,10 +251,44 @@ function methodOf(b: Record<string, unknown>, existing?: DependencyLink): Depend
   if (!Object.prototype.hasOwnProperty.call(b, 'method')) return existing?.method ?? null;
   const v = b.method;
   if (v === null || v === '') return null;
-  if (typeof v !== 'string' || !(LINK_METHODS as readonly string[]).includes(v)) {
+  if (typeof v !== 'string') throw new ValidationError(`Method must be one of: ${LINK_METHODS.join(', ')}, or empty`);
+  const method = v.trim();
+  if (!method) return null;
+  if (!(LINK_METHODS as readonly string[]).includes(method)) {
     throw new ValidationError(`Method must be one of: ${LINK_METHODS.join(', ')}, or empty`);
   }
-  return v as DependencyMethod;
+  return method as DependencyMethod;
+}
+
+/** undefined means "not sent" (keep). null or '' clears. */
+function criticalityOf(b: Obj, existing?: DependencyLink): DependencyCriticality | null {
+  if (!Object.prototype.hasOwnProperty.call(b, 'criticality')) return existing?.criticality ?? null;
+  const v = b.criticality;
+  if (v === null || v === '') return null;
+  if (typeof v !== 'string') throw new ValidationError(`Criticality must be one of: ${LINK_CRITICALITY.join(', ')}, or empty`);
+  const criticality = v.trim();
+  if (!criticality) return null;
+  if (!(LINK_CRITICALITY as readonly string[]).includes(criticality)) {
+    throw new ValidationError(`Criticality must be one of: ${LINK_CRITICALITY.join(', ')}, or empty`);
+  }
+  return criticality as DependencyCriticality;
+}
+
+/** Text that may name a host, URL, or bucket, and must not carry a password or token. */
+function keptText(b: Obj, key: string, label: string, max: number, current: string): string {
+  return rejectSecret(plainText(b, key, label, max, current), label);
+}
+
+function plainText(b: Obj, key: string, label: string, max: number, current: string): string {
+  if (!Object.prototype.hasOwnProperty.call(b, key)) return current;
+  return optStr(b, key, label, max) ?? '';
+}
+
+function rejectSecret(value: string, label: string): string {
+  if (/(password|passwd|secret|api[_-]?key|token)\s*[:=]/i.test(value) || /:\/\/[^/\s]+:[^/\s]+@/.test(value)) {
+    throw new ValidationError(`${label} must not include a password or token. Record the host, URL, or bucket only.`);
+  }
+  return value;
 }
 
 /** Removes a component with its links; links that named it as their feature keep existing without one */
@@ -179,9 +323,9 @@ export function forgetRegistryReferences(ref: { applicationId?: string; serverId
 
 /**
  * How a failure travels. Each edge says: when `from` is down, `to` is affected.
- *   - Link "A depends on B" (type T):        B → A, hard only if T is HARD.
- *   - Feature F named on that link:          B → F, always hard: F needs B, so F stops whenever
- *                                            B is unavailable (whatever T says about the rest of A).
+ *   - Link "A depends on B" with no feature: B → A, hard only if the link is HARD.
+ *   - HARD link that names feature F:        B → A hard, and B → F hard. The project stops.
+ *   - SOFT link that names feature F:        B → F hard only. That feature stops. The project does not.
  *   - Feature F provided by application P    P → F, hard: F inherits P's state. P is the APPLICATION
  *     (both point at the same application):  entry with the same applicationId as F.
  * An item STOPS (HARD) when some path from the failed component to it uses hard edges only;
@@ -190,6 +334,10 @@ export function forgetRegistryReferences(ref: { applicationId?: string; serverId
 function failureEdges(): Array<{ from: string; to: string; hard: boolean }> {
   const edges: Array<{ from: string; to: string; hard: boolean }> = [];
   for (const l of db.dependencyLinks) {
+    if (l.type === 'SOFT' && l.featureId) {
+      edges.push({ from: l.toId, to: l.featureId, hard: true });
+      continue;
+    }
     edges.push({ from: l.toId, to: l.fromId, hard: l.type === 'HARD' });
     if (l.featureId) edges.push({ from: l.toId, to: l.featureId, hard: true });
   }

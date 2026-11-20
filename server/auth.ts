@@ -6,6 +6,7 @@ import { OpsUser } from '../src/types/index.ts';
 import { config, DATA_DIR } from './config.ts';
 import { db, persist, UserRecord } from './store.ts';
 import { log } from './logger.ts';
+import { apiError } from './validate.ts';
 
 /**
  * Compares two secrets in constant time. The byte compare always runs, including when the
@@ -181,7 +182,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const isStream = req.path.endsWith('/realtime/stream');
   const user = isStream && !bearer ? consumeStreamTicket(req.query.ticket as string | undefined) : userFromAccessToken(bearer);
   if (!user) {
-    res.status(401).json({ success: false, message: 'Authentication required' });
+    res.status(401).json(apiError(401, 'Authentication required'));
     return;
   }
   req.user = user;
@@ -192,7 +193,7 @@ export function requireRole(minRole: Role) {
   return (req: Request, res: Response, next: NextFunction) => {
     const level = req.user ? ROLE_LEVEL[req.user.roleName] ?? 0 : 0;
     if (level < ROLE_LEVEL[minRole]) {
-      res.status(403).json({ success: false, message: `Requires ${minRole} role or higher` });
+      res.status(403).json(apiError(403, `Requires ${minRole} role or higher`));
       return;
     }
     next();

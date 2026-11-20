@@ -14,7 +14,7 @@ import {
   consumeRefreshToken, revokeRefreshToken, safeUser, loginRateLimited, recordLoginFailure, clearLoginFailures, dummyPasswordHash, ROLES, ROLE_LEVEL, Role, issueStreamTicket, safeEqual,
 } from './auth.ts';
 import {
-  ValidationError, body, reqStr, optStr, optInt, optBool, oneOf, optOneOf, optDate, strArray, isHostname, isDomain, isEmail,
+  ValidationError, apiError, body, reqStr, optStr, optInt, optBool, oneOf, optOneOf, optDate, strArray, isHostname, isDomain, isEmail,
 } from './validate.ts';
 import {
   HTTP_TYPES, TCP_TYPES, INFRA_TYPES, PUSH_TYPES, runMonitorNow, registerNewMonitor, recomputeDerived,
@@ -56,9 +56,9 @@ import { quietHoursProblem, type QuietHours } from '../src/lib/quietHours.ts';
 import { listDeliveries, getDelivery, getDeliveryForUser, deliveryChain, deliveryStats, unreadCounts, setRead, markAllRead, deliveryHealth, pendingLogWrites } from './deliveries.ts';
 import { workerState } from './leader.ts';
 import { notificationStatus, evaluateResourceAlerts, evaluateResourceForecastAlerts, evaluateCredentialExpiry, resolveAlert } from './alerts.ts';
-import { buildComponent, buildLink, removeComponent, forgetRegistryReferences, registryImpact, RegistryConflict, kindLabel } from './registry.ts';
+import { buildComponent, buildLink, removeComponent, forgetRegistryReferences, registryImpact, syncBoundApplication, RegistryConflict, kindLabel, canonicalUuid } from './registry.ts';
 import {
-  enrichNewIncident, buildImpactSnapshot, previewImpact, registryPaths, newFixStep, ROOT_CAUSE_CATEGORIES,
+  enrichNewIncident, buildImpactSnapshot, previewImpact, registryPaths, serviceDependenciesForApplication, newFixStep, ROOT_CAUSE_CATEGORIES,
 } from './incidentImpact.ts';
 import { applyConnectorReport, applyMeasurement, applyServerTelemetry, buildResource, detachServerResources, MeasurementConflict, presentResource, pullUsageEndpoints, syncServerPlan, unlinkApplicationResources } from './resources.ts';
 import { readResourceMeasurements, recordResourceMeasurement } from './resourceHistory.ts';
@@ -94,7 +94,7 @@ async function isLinkLocalTarget(rawUrl: string): Promise<boolean> {
 }
 
 const ok = (res: Response, data: unknown, status = 200) => res.status(status).json({ success: true, data });
-const fail = (res: Response, status: number, message: string) => res.status(status).json({ success: false, message });
+const fail = (res: Response, status: number, message: string, code?: string) => res.status(status).json(apiError(status, message, code));
 const METADATA_REFUSED = 'Link-local / cloud metadata addresses (169.254.0.0/16, fe80::/10) cannot be probed';
 
 /** A CI or agent report is accepted only after PostgreSQL has the row. A 201 is then safe to retry from. */
@@ -866,7 +866,7 @@ export function buildRouter(): Router {
         if (!saved && res.statusCode < 400) {
           const failure = saveFailureClient();
           if (failure) { res.status(failure.status); send({ success: false, code: failure.code, message: failure.message }); return; }
-          res.status(503); send({ success: false, message: 'The change was applied but is not in the database yet (PostgreSQL unreachable) — it is saved automatically when the database is back. Do not repeat it.' }); return;
+          res.status(503); send(apiError(503, 'The change was applied but is not in the database yet (PostgreSQL unreachable) — it is saved automatically when the database is back. Do not repeat it.', 'SAVE_UNREACHABLE')); return;
         }
         send(payload);
       });
@@ -1098,6 +1098,7 @@ export function buildRouter(): Router {
     forgetServer(srv.id);
     forgetRegistryReferences({ serverId: srv.id });
     closeIncidentsReferencing([srv.id, ...removedMonitors.map(m => m.id), ...removedResources], operatorName(req), `server ${srv.hostname} was removed`);
+    recomputeDerived();
     persist();
     audit(operatorName(req), 'SERVER_REMOVED', 'INFRASTRUCTURE', srv.id, `${srv.hostname} (${srv.ip}) removed with ${removedMonitors.length} monitor(s)`);
     broadcast('servers_changed', null);
@@ -1119,25 +1120,35 @@ export function buildRouter(): Router {
   });
 
   // ── Applications ───────────────────────────────────────────────────────────
+  // A signed-in user may read any application by its id. A code name, server id,
+  // register id, or dependency id is a different record and is not returned here.
+  function applicationRecord(id: string): Application | undefined {
+    return db.applications.find(a => a.id === id);
+  }
+  function applicationIndex(id: string): number {
+    return db.applications.findIndex(a => a.id === id);
+  }
   r.get('/v1/applications', (_req, res) => { ok(res, db.applications); });
   r.get('/v1/applications/:id', (req, res) => {
-    const a = db.applications.find(x => x.id === req.params.id);
-    return a ? ok(res, a) : fail(res, 404, 'Application not found');
+    const a = applicationRecord(req.params.id);
+    if (!a) return fail(res, 404, 'Application not found');
+    // Copy: serviceDependencies is a read of the register, not a column on the application row.
+    ok(res, { ...a, serviceDependencies: serviceDependenciesForApplication(a.id) });
   });
   r.get('/v1/applications/:id/dr-readiness', (req, res) => {
-    const a = db.applications.find(x => x.id === req.params.id);
+    const a = applicationRecord(req.params.id);
     if (!a) return fail(res, 404, 'Application not found');
     const rd = readiness(a);
     ok(res, { appId: a.id, appName: a.name, failoverState: a.failoverState, checks: rd.checks, overall: rd.overall, overallReady: rd.overall === 'READY', passed: rd.passed, total: rd.total, evaluatedAt: rd.evaluatedAt });
   });
   r.get('/v1/applications/:id/availability', h(async (req, res) => {
-    const a = db.applications.find(x => x.id === req.params.id);
+    const a = applicationRecord(req.params.id);
     if (!a) return fail(res, 404, 'Application not found');
     const ranges: Record<string, number> = { '24h': 24, '7d': 24 * 7, '30d': 24 * 30, '90d': 24 * 90 };
     ok(res, await applicationAvailability(a, ranges[String(req.query.range ?? '24h')] ?? 24));
   }));
   r.get('/v1/applications/:id/failover/preflight', requireRole('operator'), (req, res) => {
-    const a = db.applications.find(x => x.id === req.params.id);
+    const a = applicationRecord(req.params.id);
     if (!a) return fail(res, 404, 'Application not found');
     const target = req.query.target === 'PRIMARY' ? 'PRIMARY' : 'DR';
     const pf = failoverPreflight(a, target);
@@ -1147,7 +1158,7 @@ export function buildRouter(): Router {
     ok(res, pf);
   });
   r.post('/v1/applications/:id/failover/decision', requireRole('super_admin'), h((req, res) => {
-    const a = db.applications.find(x => x.id === req.params.id);
+    const a = applicationRecord(req.params.id);
     if (!a) return fail(res, 404, 'Application not found');
     const b = body(req);
     const target = oneOf(b, 'target', 'Target', ['DR', 'PRIMARY'] as const);
@@ -1162,12 +1173,12 @@ export function buildRouter(): Router {
     ok(res, { recorded: true, decision, preflight: pf });
   }));
   r.get('/v1/applications/:id/go-live', (req, res) => {
-    const a = db.applications.find(x => x.id === req.params.id);
+    const a = applicationRecord(req.params.id);
     if (!a) return fail(res, 404, 'Application not found');
     ok(res, evaluateGoLive(a));
   });
   r.post('/v1/applications/:id/go-live', requireRole('operator'), h((req, res) => {
-    const a = db.applications.find(x => x.id === req.params.id);
+    const a = applicationRecord(req.params.id);
     if (!a) return fail(res, 404, 'Application not found');
     const defect = optStr(body(req), 'defect', 'Defect', 2000);
     const run = recordGoLive(a, operatorName(req), defect);
@@ -1191,10 +1202,11 @@ export function buildRouter(): Router {
   }));
   r.patch('/v1/applications/:id', requireRole('it_administrator'), h((req, res) => {
     if (isFailoverInProgress(req.params.id)) return fail(res, 409, 'A failover for this application is in progress — try again in a moment');
-    const idx = db.applications.findIndex(x => x.id === req.params.id);
+    const idx = applicationIndex(req.params.id);
     if (idx === -1) return fail(res, 404, 'Application not found');
     const before = db.applications[idx];
     const app = buildApplication(req, before);
+    const synced = syncBoundApplication(app, before);
     db.applications[idx] = app;
     persist();
     const monitorChanges = syncAppUrlMonitors(app, operatorName(req));
@@ -1206,13 +1218,17 @@ export function buildRouter(): Router {
     if (JSON.stringify(before.healthCheck ?? null) !== JSON.stringify(app.healthCheck ?? null)) diff.push(`health check: ${JSON.stringify(app.healthCheck)}`);
     if (JSON.stringify(before.environments ?? null) !== JSON.stringify(app.environments ?? null)) diff.push('environment details updated');
     audit(operatorName(req), 'APPLICATION_UPDATED', 'APPLICATION', app.id, `${app.name}: ${diff.join('; ') || 'no field changes'}${monitorChanges.length ? ` · monitors: ${monitorChanges.join('; ')}` : ''}`);
+    if (synced) {
+      audit(operatorName(req), 'REGISTRY_COMPONENT_UPDATED', 'REGISTRY', synced.id, `${kindLabel(synced.kind)} ${synced.name} · owner ${synced.owner} · ${synced.tier}`);
+      broadcast('registry_changed', null);
+    }
     broadcast('applications_changed', null);
     if (isCloudflareConfigured()) void syncCloudflare().catch(() => {});
     if (app.loadBalancer || before.loadBalancer) void syncLoadBalancers().catch(() => {});
     ok(res, app);
   }));
   r.delete('/v1/applications/:id', requireRole('it_administrator'), h((req, res) => {
-    const app = db.applications.find(x => x.id === req.params.id);
+    const app = applicationRecord(req.params.id);
     if (!app) return fail(res, 404, 'Application not found');
     const removed = db.monitors.filter(m => m.applicationId === app.id);
     db.monitors = db.monitors.filter(m => m.applicationId !== app.id);
@@ -1224,6 +1240,7 @@ export function buildRouter(): Router {
     db.workerEvents = db.workerEvents.filter(e => e.applicationId !== app.id);
     unlinkApplicationResources(app.id);
     forgetRegistryReferences({ applicationId: app.id });
+    recomputeDerived();
     persist();
     audit(operatorName(req), 'APPLICATION_DELETED', 'APPLICATION', app.id, `${app.name} deleted with ${removed.length} monitor(s)`);
     broadcast('applications_changed', null);
@@ -1231,7 +1248,7 @@ export function buildRouter(): Router {
     ok(res, { deleted: true, removedMonitors: removed.length });
   }));
   r.post('/v1/applications/:id/failover', requireRole('super_admin'), h(async (req, res) => {
-    const app = db.applications.find(x => x.id === req.params.id);
+    const app = applicationRecord(req.params.id);
     if (!app) return fail(res, 404, 'Application not found');
     const b = body(req);
     const target = oneOf(b, 'target', 'Target', ['DR', 'PRIMARY'] as const);
@@ -2176,7 +2193,7 @@ export function buildRouter(): Router {
     const envRaw = typeof req.query.environment === 'string' ? req.query.environment.trim().toUpperCase() : '';
     const environment = envRaw === 'DR' || envRaw === 'PRD' ? envRaw as 'PRD' | 'DR' : undefined;
     if (!applicationId && !serverId && !registryId) return fail(res, 400, 'Pass applicationId, serverId or registryId');
-    if (applicationId && !db.applications.some(a => a.id === applicationId)) return fail(res, 404, 'Application not found');
+    if (applicationId && !applicationRecord(applicationId)) return fail(res, 404, 'Application not found');
     if (serverId && !db.servers.some(s => s.id === serverId)) return fail(res, 404, 'Server not found');
     ok(res, previewImpact({ applicationId: applicationId || undefined, serverId: serverId || undefined, registryId: registryId || undefined, environment }));
   });
@@ -2210,15 +2227,21 @@ export function buildRouter(): Router {
     const name = (id: string | null) => db.registry.find(c => c.id === id)?.name ?? '?';
     return `${name(l.fromId)} → ${name(l.toId)} (${l.type})${l.featureId ? ` for ${name(l.featureId)}` : ''}`;
   };
+  r.get('/v1/dependency-links', (_req, res) => { ok(res, db.dependencyLinks); });
+  r.get('/v1/dependency-links/:id', (req, res) => {
+    const l = db.dependencyLinks.find(x => x.id === canonicalUuid(req.params.id));
+    return l ? ok(res, l) : fail(res, 404, 'Dependency link not found');
+  });
   r.post('/v1/dependency-links', requireRole('it_administrator'), h((req, res) => {
     const l = buildLink(req);
     db.dependencyLinks.push(l);
+    db.dependencyLinks.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
     registryChanged();
     audit(operatorName(req), 'DEPENDENCY_LINK_CREATED', 'REGISTRY', l.id, linkLabel(l));
     ok(res, l, 201);
   }));
   r.patch('/v1/dependency-links/:id', requireRole('it_administrator'), h((req, res) => {
-    const idx = db.dependencyLinks.findIndex(x => x.id === req.params.id);
+    const idx = db.dependencyLinks.findIndex(x => x.id === canonicalUuid(req.params.id));
     if (idx === -1) return fail(res, 404, 'Dependency link not found');
     const l = buildLink(req, db.dependencyLinks[idx]);
     db.dependencyLinks[idx] = l;
@@ -2227,7 +2250,7 @@ export function buildRouter(): Router {
     ok(res, l);
   }));
   r.delete('/v1/dependency-links/:id', requireRole('it_administrator'), h((req, res) => {
-    const l = db.dependencyLinks.find(x => x.id === req.params.id);
+    const l = db.dependencyLinks.find(x => x.id === canonicalUuid(req.params.id));
     if (!l) return fail(res, 404, 'Dependency link not found');
     const label = linkLabel(l);
     db.dependencyLinks = db.dependencyLinks.filter(x => x.id !== l.id);

@@ -27,7 +27,6 @@ import {
   Radio, 
   KeyRound,
   Cpu,
-  Zap,
   ArrowRight,
   Shield,
   Sun,
@@ -36,7 +35,8 @@ import {
   Settings,
   Users,
   Gauge,
-  Waypoints
+  Waypoints,
+  Network,
 } from 'lucide-react';
 import { CommandPalette } from './CommandPalette';
 import { CriticalAlerts } from './CriticalAlerts';
@@ -122,11 +122,11 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     {
       title: 'Configuration',
       items: [
-        { id: 'setup', label: 'Setup & Connections', icon: Settings, badge: systemSummary.totalServers === 0 ? 'START' : undefined, badgeColor: 'text-amber-400 font-bold' }
+        { id: 'setup', label: 'Setup', icon: Settings, badge: systemSummary.totalServers === 0 ? 'Start' : undefined, badgeColor: 'text-amber-400 font-bold' }
       ]
     },
     {
-      title: 'Command Center',
+      title: 'Status',
       items: [
         { id: 'overview', label: 'Overview', icon: Activity },
         { id: 'incidents', label: 'Incidents', icon: AlertTriangle, badge: systemSummary.openIncidents > 0 ? `${systemSummary.openIncidents}` : undefined, badgeColor: systemSummary.criticalIncidents > 0 ? 'text-rose-400 font-semibold' : 'text-amber-400' }
@@ -141,13 +141,14 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
         { id: 'infrastructure', label: 'Infrastructure', icon: Server, count: `${systemSummary.healthyServers}/${systemSummary.totalServers}` },
         { id: 'resources', label: 'Capacity', icon: Gauge, },
         { id: 'impact', label: 'Impact', icon: Waypoints },
-        { id: 'dependencies', label: 'Dependencies', icon: Cpu }
+        { id: 'dependencies', label: 'Dependencies', icon: Cpu },
+        { id: 'dependency-register', label: 'Dependency register', icon: Network },
       ]
     },
     {
       title: 'Resilience',
       items: [
-        { id: 'resilience', label: 'PRD / DR Readiness', icon: Cloud, badge: `${systemSummary.drReadinessCount}/${systemSummary.totalApps}` },
+        { id: 'resilience', label: 'Readiness', icon: Cloud, badge: `${systemSummary.drReadinessCount}/${systemSummary.totalApps}` },
         { id: 'backups', label: 'Backups', icon: Database, badge: systemSummary.backupApps?.total ? `${systemSummary.backupApps.healthy}/${systemSummary.backupApps.total}` : systemSummary.backupsCurrentCount > 0 ? `${systemSummary.backupsCurrentCount}` : undefined }
       ]
     },
@@ -155,7 +156,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       title: 'Providers',
       items: [
         { id: 'hostinger', label: 'Provider VPS', icon: Server },
-        { id: 'cloudflare', label: 'Cloudflare Edge', icon: ShieldCheck, badge: !integrations?.cloudflare.configured ? 'Off' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'Degraded' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'Active' : 'Unknown', badgeColor: !integrations?.cloudflare.configured ? 'text-slate-500' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'text-amber-400' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'text-emerald-400' : 'text-slate-400' }
+        { id: 'cloudflare', label: 'Cloudflare', icon: ShieldCheck, badge: !integrations?.cloudflare.configured ? 'Off' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'Degraded' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'Active' : 'Unknown', badgeColor: !integrations?.cloudflare.configured ? 'text-slate-500' : systemSummary.cloudflareStatus === 'DEGRADED' ? 'text-amber-400' : systemSummary.cloudflareStatus === 'HEALTHY' ? 'text-emerald-400' : 'text-slate-400' }
       ]
     },
     {
@@ -175,7 +176,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     {
       title: 'Analytics & Compliance',
       items: [
-        { id: 'reliability', label: 'Reliability & SLOs', icon: Gauge },
+        { id: 'reliability', label: 'Reliability', icon: Gauge },
         { id: 'reports', label: 'Reports', icon: FileText },
         { id: 'audit', label: 'Audit Logs', icon: Shield }
       ]
@@ -183,13 +184,13 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
     {
       title: 'Admin',
       items: [
-        { id: 'users', label: 'Users & Account', icon: Users }
+        { id: 'users', label: 'Users', icon: Users }
       ]
     }
   ];
 
   return (
-    <div className={`flex h-screen w-screen overflow-hidden font-sans selection:bg-blue-600/30 selection:text-blue-200 ${
+    <div className={`flex flex-1 min-h-0 w-full overflow-hidden font-sans selection:bg-blue-600/30 selection:text-blue-200 ${
       isDark ? 'bg-[#0B0F17] text-slate-100' : 'bg-[#F6F8FC] text-slate-900'
     }`}>
       <CommandPalette />
@@ -284,7 +285,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
           {!isSidebarCollapsed ? (
             <div className="space-y-1.5 font-mono">
               <div className="flex items-center justify-between text-slate-300">
-                <span className="text-[9px] uppercase tracking-wider">Dead-Man Heartbeat</span>
+                <span className="text-[9px] uppercase tracking-wider">Heartbeat</span>
                 <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${deadManDot(deadMan.status)} ${deadMan.status === 'HEALTHY' ? 'animate-pulse' : deadMan.status === 'FAILING' ? 'animate-ping' : ''}`} aria-label={deadManLabel(deadMan.status)} />
               </div>
               <div className="text-slate-400 text-[10px] truncate" title={deadMan.servers.map(s => `${s.environment} ${s.hostname}: ${s.state}`).join(' · ') || 'No servers registered'}>
@@ -302,7 +303,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       </aside>
 
       {/* MAIN VIEWPORT */}
-      <div className={`flex-1 flex flex-col min-w-0 overflow-hidden ${
+      <div className={`flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden ${
         isDark ? 'bg-[#0E131F]' : 'bg-[#F6F8FC]'
       }`}>
         
@@ -313,17 +314,34 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
             : 'bg-white border-[#E2E8F0] text-slate-900 shadow-xs'
         }`}>
           
-          {/* Left Zone: Environment Tag & Context */}
-          <div className="flex items-center gap-3 min-w-0 shrink-0">
-            <span className="text-xs font-bold tracking-tight font-mono whitespace-nowrap">
-              SCHOLARIO IT OPS
+          <div className="flex items-center min-w-0 shrink">
+            <span className="text-sm font-semibold truncate">
+              {{
+                setup: 'Setup',
+                overview: 'Overview',
+                incidents: 'Incidents',
+                applications: 'Applications',
+                monitors: 'Monitors',
+                credentials: 'Credentials',
+                infrastructure: 'Infrastructure',
+                resources: 'Capacity',
+                impact: 'Impact',
+                dependencies: 'Dependencies',
+                'dependency-register': 'Dependency register',
+                resilience: 'Readiness',
+                backups: 'Backups',
+                hostinger: 'Provider VPS',
+                cloudflare: 'Cloudflare',
+                deployments: 'Deployments',
+                maintenance: 'Maintenance',
+                runbooks: 'Runbooks',
+                communications: 'Notifications',
+                reliability: 'Reliability',
+                reports: 'Reports',
+                audit: 'Audit logs',
+                users: 'Users',
+              }[activeTab] ?? 'Scholario Ops'}
             </span>
-            {/* Counts only where there is room (they are also on the Overview); never wrap out of the bar */}
-            <span className={`hidden 2xl:inline ${isDark ? 'text-slate-600' : 'text-slate-400'}`}>/</span>
-            <div className={`hidden 2xl:flex items-center gap-1.5 text-[11px] font-mono whitespace-nowrap ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${systemSummary.totalServers === 0 ? 'bg-slate-500' : systemSummary.healthyServers === systemSummary.totalServers ? 'bg-emerald-500' : 'bg-amber-500'}`} />
-              <span>{systemSummary.totalServers} SERVERS · {systemSummary.totalApps} APPS · {systemSummary.totalMonitors} MONITORS</span>
-            </div>
           </div>
 
           {/* Center Zone: Search bar */}
@@ -338,7 +356,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
             >
               <div className="flex items-center gap-2 min-w-0">
                 <Search className="w-3.5 h-3.5 shrink-0 text-slate-400 group-hover:text-blue-500" />
-                <span className="truncate text-[11px]">Search routes, apps, VPS, incidents, actions...</span>
+                <span className="truncate text-[11px]">Search</span>
               </div>
               <div className="hidden xl:flex items-center gap-1 font-mono text-[9px] shrink-0 ml-2">
                 <kbd className={`px-1 py-0.5 border rounded ${
@@ -354,22 +372,6 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
           {/* Right Zone: Setup, Theme Toggle, Health & Profile */}
           <div className="flex items-center gap-2 lg:gap-2.5 shrink-0">
-            {/* Setup quick action */}
-            <button
-              onClick={() => navigate('/setup')}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-bold transition-all border cursor-pointer ${
-                activeTab === 'setup'
-                  ? 'bg-blue-600 text-white border-blue-500 shadow-xs'
-                  : isDark
-                    ? 'bg-[#151E30] hover:bg-[#1A263D] text-emerald-400 border-emerald-900/60'
-                    : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-300'
-              }`}
-              title="Register servers & applications, install agents, check integrations"
-            >
-              <Zap className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="hidden md:inline">SETUP</span>
-            </button>
-
             {/* Sound + browser notification for new critical incidents (per browser) */}
             <CriticalAlerts isDark={isDark} />
 
@@ -414,18 +416,13 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                 systemSummary.overallHealth === 'CRITICAL' ? 'bg-rose-500 animate-pulse' :
                 systemSummary.overallHealth === 'WARNING' ? 'bg-amber-500' : systemSummary.overallHealth === 'UNKNOWN' ? 'bg-slate-500' : 'bg-emerald-500'
               }`} />
-              <span className="text-[11px] font-semibold whitespace-nowrap xl:hidden">
-                {systemSummary.criticalIncidents > 0 ? `${systemSummary.criticalIncidents} CRITICAL` : systemSummary.openIncidents > 0 ? `${systemSummary.openIncidents} OPEN`
-                  : systemSummary.overallHealth === 'OPERATIONAL' ? 'OK' : systemSummary.overallHealth === 'WARNING' ? 'DEGRADED' : systemSummary.overallHealth === 'CRITICAL' ? 'CRITICAL' : 'UNKNOWN'}
-              </span>
-              <span className="text-[11px] font-semibold whitespace-nowrap hidden xl:inline">
-                {systemSummary.criticalIncidents > 0 
-                  ? `${systemSummary.criticalIncidents} CRITICAL INCIDENT` 
-                  : systemSummary.openIncidents > 0 
-                    ? `${systemSummary.openIncidents} INCIDENT OPEN`
-                    : systemSummary.overallHealth === 'OPERATIONAL'
-                      ? (systemSummary.visibilityGaps.length ? 'OPERATIONAL · PARTIAL DATA' : 'ALL SYSTEMS OPERATIONAL')
-                      : systemSummary.overallHealth === 'WARNING' ? 'DEGRADED' : systemSummary.overallHealth === 'CRITICAL' ? 'CRITICAL' : 'STATUS UNKNOWN'}
+              <span className="text-[11px] font-semibold whitespace-nowrap">
+                {systemSummary.criticalIncidents > 0 ? `${systemSummary.criticalIncidents} critical`
+                  : systemSummary.openIncidents > 0 ? `${systemSummary.openIncidents} open`
+                  : systemSummary.overallHealth === 'OPERATIONAL'
+                    ? (systemSummary.visibilityGaps.length ? 'Partial' : 'Operational')
+                    : systemSummary.overallHealth === 'WARNING' ? 'Degraded'
+                    : systemSummary.overallHealth === 'CRITICAL' ? 'Critical' : 'Unknown'}
               </span>
             </button>
 
@@ -525,7 +522,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
 
         {/* SCROLLABLE MAIN CONTENT AREA */}
         {/* Content container: clear gutter to the sidebar and the window edge; children can never widen the page */}
-        <main className={`flex-1 min-w-0 overflow-y-auto overflow-x-hidden px-4 py-4 sm:px-5 lg:px-6 xl:px-7 transition-colors ${
+        <main className={`flex-1 min-w-0 min-h-0 overflow-y-auto overflow-x-hidden px-4 py-4 sm:px-5 lg:px-6 xl:px-7 transition-colors ${
           isDark ? 'bg-[#0E131F] text-slate-100' : 'bg-[#F6F8FC] text-slate-900'
         }`}>
           {/* Full width of the content area (no centred max-width column, so no large empty side margins) */}

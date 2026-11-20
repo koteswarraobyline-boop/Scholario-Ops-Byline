@@ -124,8 +124,8 @@ test('manual incident captures category and Impact Analysis from the register', 
   assert.equal(inc.rootCause, 'Postgres connection refused');
   assert.ok(inc.impactAnalysis, 'impactAnalysis attached');
   assert.equal(inc.impactAnalysis.componentId, ids.regApp);
-  assert.ok(inc.impactAnalysis.features.some((f: { id: string }) => f.id === ids.feat)
-    || inc.impactAnalysis.applications.some((a: { id: string }) => a.id === ids.regApp));
+  assert.ok(inc.impactAnalysis.features.some((f: { id: string }) => f.id === ids.feat));
+  assert.ok(inc.impactAnalysis.applications.some((a: { id: string; name: string }) => a.id === ids.app && a.name === 'Impact App'), 'application id is the application record, not the register row');
   assert.equal(inc.impactAnalysis.usersStopped, 500);
   const enrolment = inc.impactAnalysis.features.find((f: { id: string }) => f.id === ids.feat);
   assert.ok(enrolment, 'Enrolment is an affected feature');

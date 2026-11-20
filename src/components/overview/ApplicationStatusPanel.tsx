@@ -7,6 +7,7 @@ import { Ago, triText, triColor, verdictColor } from '../ui/Freshness';
 import { originHealthy, originRtt } from '../providers/LoadBalancerPanel';
 import { effectiveRoutingMethod, ROUTING_METHOD_LABELS } from '../../lib/trafficHealth';
 import { ExpandToggle, InventoryFilters, matchesQuery, useExpandSet } from '../ui/InventoryFilters';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 
 type Env = 'PRD' | 'DR';
 
@@ -50,6 +51,7 @@ export const ApplicationStatusPanel: React.FC = () => {
     const dr = servers.find(s => s.id === a.drServerId);
     return matchesQuery(search, [a.name, a.codeName, a.prdUrl, a.drUrl, prd?.hostname, prd?.ip, dr?.hostname, dr?.ip]);
   }).sort((a, b) => a.name.localeCompare(b.name)), [applications, servers, chip, search]);
+  const appPaging = useClientPagination(filtered, 10, `${chip}|${search}`);
 
   const ids = useMemo(() => filtered.map(a => a.id), [filtered]);
   // With many apps, start collapsed so overview stays scannable
@@ -79,9 +81,10 @@ export const ApplicationStatusPanel: React.FC = () => {
       />
       {filtered.length === 0 ? (
         <div className={`text-xs font-mono ${st.muted}`}>No applications match these filters.</div>
-      ) : filtered.map(app => (
+      ) : appPaging.slice.map(app => (
         <AppPanel key={app.id} app={app} open={expand.isOpen(app.id)} onToggle={() => expand.toggle(app.id)} />
       ))}
+      <Pagination page={appPaging.page} totalPages={appPaging.totalPages} total={appPaging.total} pageSize={appPaging.pageSize} onPage={appPaging.setPage} />
     </section>
   );
 };

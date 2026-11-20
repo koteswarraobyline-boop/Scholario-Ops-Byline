@@ -5,12 +5,13 @@
 import crypto from 'crypto';
 import type {
   Environment, Incident, IncidentFixStep, IncidentImpactSnapshot,
-  ImpactPreview, LikelyCause, RegistryComponent, RegistryImpact, RegistryLiveStatus, RegistryPathNode, RegistryPaths,
+  ApplicationServiceDependencies, ImpactPreview, LikelyCause, RegistryComponent, RegistryImpact, RegistryLiveStatus, RegistryPathNode, RegistryPaths,
   RootCauseCategory,
 } from '../src/types/index.ts';
 import { inferRootCauseCategory } from '../src/lib/rootCause.ts';
 import { featureAction } from '../src/lib/featureAction.ts';
 import { suggestSeverity } from '../src/lib/severity.ts';
+import { projectServiceDependencies, registryLiveStatus } from '../src/lib/serviceDependencies.ts';
 import { db } from './store.ts';
 import { registryImpact } from './registry.ts';
 import { likelyCauseForIncident } from './likelyCause.ts';
@@ -60,13 +61,24 @@ export function registryComponentForScope(scope: {
   return null;
 }
 
+/** Application record id when the register entry is bound; otherwise the register id. */
+function applicationRecordId(component: RegistryComponent): string {
+  return component.applicationId && db.applications.some(a => a.id === component.applicationId)
+    ? component.applicationId
+    : component.id;
+}
+
 export function snapshotFromImpact(impact: RegistryImpact, component: RegistryComponent): IncidentImpactSnapshot {
   const applications = impact.affected
     .filter(a => a.kind === 'APPLICATION')
-    .map(a => ({ id: a.id, name: a.name, via: a.via }));
+    .map(a => {
+      const entry = db.registry.find(c => c.id === a.id);
+      return { id: entry ? applicationRecordId(entry) : a.id, name: a.name, via: a.via };
+    });
   // Include the failed component itself when it is an application
-  if (component.kind === 'APPLICATION' && !applications.some(a => a.id === component.id)) {
-    applications.unshift({ id: component.id, name: component.name, via: 'HARD' });
+  if (component.kind === 'APPLICATION') {
+    const id = applicationRecordId(component);
+    if (!applications.some(a => a.id === id)) applications.unshift({ id, name: component.name, via: 'HARD' });
   }
   const features = featuresWithActions(component, impact);
   return {
@@ -222,35 +234,21 @@ export function enrichNewIncident(incident: Incident, hint?: { source?: string; 
 }
 
 export function liveStatusForComponent(c: RegistryComponent): RegistryLiveStatus {
-  if (c.kind === 'APPLICATION' && c.applicationId) {
-    const app = db.applications.find(a => a.id === c.applicationId);
-    if (!app) return 'UNKNOWN';
-    if (app.status === 'MAINTENANCE') return 'MAINTENANCE';
-    if (app.status === 'CRITICAL') return 'CRITICAL';
-    if (app.status === 'WARNING') return 'WARNING';
-    if (app.status === 'HEALTHY') return 'HEALTHY';
-    return 'UNKNOWN';
-  }
-  if (c.kind === 'SERVER' && c.serverId) {
-    const srv = db.servers.find(s => s.id === c.serverId);
-    if (!srv) return 'UNKNOWN';
-    if (srv.status === 'MAINTENANCE') return 'MAINTENANCE';
-    if (srv.status === 'CRITICAL') return 'CRITICAL';
-    if (srv.status === 'WARNING' || srv.status === 'STALE') return 'WARNING';
-    if (srv.status === 'HEALTHY') return 'HEALTHY';
-    return 'UNKNOWN';
-  }
-  // Features / databases / APIs inherit from linked application when present
-  if (c.applicationId) {
-    const app = db.applications.find(a => a.id === c.applicationId);
-    if (app) {
-      if (app.status === 'CRITICAL') return 'CRITICAL';
-      if (app.status === 'WARNING') return 'WARNING';
-      if (app.status === 'HEALTHY') return 'HEALTHY';
-      if (app.status === 'MAINTENANCE') return 'MAINTENANCE';
-    }
-  }
-  return 'UNKNOWN';
+  return registryLiveStatus(c, db.applications, db.servers);
+}
+
+/**
+ * Register links for an application record. Outgoing: this application depends on the other end.
+ * Incoming: the other end depends on this application. Empty lists are valid.
+ * This is not `Application.dependencies`, which is the derived monitor list.
+ */
+export function serviceDependenciesForApplication(applicationId: string): ApplicationServiceDependencies {
+  return projectServiceDependencies(applicationId, {
+    applications: db.applications,
+    servers: db.servers,
+    registry: db.registry,
+    links: db.dependencyLinks,
+  });
 }
 
 /** Direct upstream dependencies (what this component depends on) + downstream blast radius. */

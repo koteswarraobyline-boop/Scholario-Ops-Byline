@@ -7,9 +7,6 @@ import { useAuth } from '../../context/AuthContext';
 import { useOps } from '../../context/OpsContext';
 import { EmptyState } from '../ui/EmptyState';
 import { ImpactPreviewCard } from '../ui/ImpactPreviewCard';
-import { useDependencyDemo } from '../../context/DependencyDemoContext';
-import { DemoBanner, DemoScenarios, DemoToggle } from '../resilience/DemoModeControls';
-import { demoDependencyLinks, demoNameById, simulateDemoFailure } from '../../mocks/dependencyDemoData';
 
 type Target = {
   key: string;
@@ -21,7 +18,6 @@ type Target = {
 export const ImpactView: React.FC = () => {
   const { theme, applications, servers, registry, dependencyLinks, isLoading } = useOps();
   const { hasRole } = useAuth();
-  const demo = useDependencyDemo();
   const navigate = useNavigate();
   const isDark = theme === 'dark';
   const canEditRegister = hasRole('it_administrator');
@@ -99,64 +95,22 @@ export const ImpactView: React.FC = () => {
   const card = isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200';
   const input = `w-full rounded border px-2 py-1 text-xs font-mono ${isDark ? 'bg-[#0B0F17] border-[#1E293B]' : 'bg-white border-slate-300'}`;
 
-  if (demo.enabled) {
-    const simulation = demo.scenario ? simulateDemoFailure(demo.scenario.rootName) : null;
-    const links = demoDependencyLinks();
-    const hop = (fromId: string) => links.find(link => link.fromId === fromId);
-    return (
-      <div className="p-4 md:p-6 space-y-4 max-w-6xl">
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <h1 className="text-sm font-mono font-bold tracking-wide">Impact</h1>
-            <p className={`text-[11px] mt-1 max-w-xl ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>HYPOTHETICAL SIMULATION. This is not a confirmed live incident.</p>
-          </div>
-          <DemoToggle isDark={isDark} />
-        </div>
-        <DemoBanner />
-        <div className={`rounded-lg p-3 ${isDark ? 'bg-slate-950' : 'bg-slate-900'}`}>
-          <DemoScenarios />
-        </div>
-        {!simulation && <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Choose a scenario. Nothing here is written to an incident or a monitor.</p>}
-        {simulation && (
-          <div className={`rounded border p-3 space-y-3 text-xs font-mono break-words ${card}`}>
-            <div className="font-bold">Root failure: {simulation.rootName} · SIMULATED FAILURE</div>
-            <div>Affected applications: {simulation.affectedApplications}. User counts below are demo estimates, not a live census.</div>
-            <div>
-              <div className="font-bold text-rose-500">Directly affected ({simulation.direct.length})</div>
-              {simulation.direct.map(row => {
-                const link = links.find(item => item.fromId === row.id && item.toId === simulation.rootId) ?? hop(row.id);
-                return <div key={row.id}>{simulation.rootName} → {row.name} · {row.via} · {row.tier} · {link?.method ?? 'method not recorded'} · {link?.notes ?? 'rationale not recorded'} · {row.feature} · {row.users != null ? `${row.users.toLocaleString()} demo users` : 'user count not recorded'}</div>;
-              })}
-            </div>
-            <div>
-              <div className="font-bold text-amber-500">Indirectly affected ({simulation.indirect.length})</div>
-              {simulation.indirect.length === 0
-                ? <div>No further demo component is reached only through another consumer.</div>
-                : simulation.indirect.map(row => <div key={row.id}>{demoNameById(row.id)} · {row.via} · {row.tier} · {row.feature} · {row.users != null ? `${row.users.toLocaleString()} demo users` : 'user count not recorded'}</div>)}
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
-
   return (
-    <div className="p-4 md:p-6 space-y-4 max-w-6xl">
+    <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-sm font-mono font-bold tracking-wide">Impact</h1>
-          <p className={`text-[11px] mt-1 max-w-xl ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-            Blast radius from the dependency register: applications, features and users that stop or degrade if this part fails.
-            The list follows live status. A missing register match stays unknown.
+          <h1 className="text-lg font-bold tracking-tight">Impact</h1>
+          <p className={`text-xs mt-0.5 max-w-xl ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+            What stops or slows down if this part fails.
           </p>
         </div>
         {canEditRegister ? (
-          <button type="button" onClick={() => navigate('/dependencies')} className="px-3 py-1.5 text-xs font-mono font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded cursor-pointer">
-            Edit register
+          <button type="button" onClick={() => navigate('/dependencies')} className="px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded cursor-pointer">
+            Edit dependencies
           </button>
         ) : (
-          <p className={`text-[11px] font-mono max-w-xs ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
-            You can view impact. Changing the register requires an IT administrator.
+          <p className={`text-[11px] max-w-xs ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
+            Only an IT administrator can change dependencies.
           </p>
         )}
       </div>
@@ -188,7 +142,6 @@ export const ImpactView: React.FC = () => {
                   const compId = preview.componentId!;
                   const live = selected.live;
                   const confirmed = live === 'CRITICAL';
-                  const degraded = live === 'WARNING' || live === 'STALE';
                   const affected = preview.impact?.affected ?? [];
                   const affectedIds = new Set(affected.map(a => a.id));
                   const incoming = dependencyLinks.filter(l => l.toId === compId);
@@ -216,36 +169,38 @@ export const ImpactView: React.FC = () => {
                   return (
                     <>
                       <p>
-                        {confirmed && <>Confirmed failure on {preview.componentName}. The rows below are the existing impact calculation.</>}
-                        {degraded && <>{preview.componentName} is {live}. That is not CRITICAL. The rows below are still the existing “if this fails” calculation.</>}
-                        {live === 'HEALTHY' && <>{preview.componentName} is HEALTHY. These rows are what the existing calculation would affect if it failed. They are not a live outage.</>}
-                        {live === 'MAINTENANCE' && <>{preview.componentName} is MAINTENANCE. That is not DOWN. These rows are the existing “if this fails” calculation.</>}
-                        {(live === 'UNKNOWN' || live === 'REGISTER') && <>{preview.componentName} is {live === 'REGISTER' ? 'not tied to a live monitor' : 'UNKNOWN'}. UNKNOWN is not DOWN. These rows are what the existing calculation would affect if it failed.</>}
+                        {confirmed
+                          ? `${preview.componentName} is down. These are the parts that depend on it.`
+                          : `${preview.componentName} is ${live === 'REGISTER' ? 'not monitored' : live}. This is what would be affected if it failed.`}
                       </p>
                       <div>
                         <div className="font-bold text-[10px] uppercase text-rose-500">Direct ({direct.length}) · applications {directApps.length}</div>
                         {direct.length === 0
-                          ? <div className="text-slate-500">Nothing one hop away in the existing impact result. That is not the same as no dependency.</div>
-                          : direct.map(a => (
-                            <div key={a.id}>
-                              {nameOf(compId)} → {a.name} · {a.via} · {a.tier}
-                              {a.userCount != null ? ` · ${a.userCount.toLocaleString()} users recorded` : ' · user count not recorded'}
-                              {methodFor.has(a.id) ? ` · ${methodFor.get(a.id) ?? 'method not recorded'}` : ''}
-                            </div>
-                          ))}
+                          ? <div className="text-slate-500">None directly connected.</div>
+                          : direct.map(a => {
+                            const link = dependencyLinks.find(l => l.toId === compId && (l.fromId === a.id || l.featureId === a.id));
+                            const method = methodFor.get(a.id);
+                            const extra = [
+                              a.userCount != null ? `${a.userCount.toLocaleString()} users` : '',
+                              method ?? '',
+                              link?.criticality ?? '',
+                              link?.failureBehaviour ? `users see ${link.failureBehaviour}` : '',
+                            ].filter(Boolean).join(' · ');
+                            return <div key={a.id}>{nameOf(compId)} → {a.name} · {a.via} · {a.tier}{extra ? ` · ${extra}` : ''}</div>;
+                          })}
                       </div>
                       <div>
                         <div className="font-bold text-[10px] uppercase text-amber-500">Indirect ({indirect.length}) · applications {indirectApps.length}</div>
                         {indirect.length === 0
-                          ? <div className="text-slate-500">No further component is reached by the existing impact walk.</div>
+                          ? <div className="text-slate-500">Nothing further along.</div>
                           : indirect.map(a => (
-                            <div key={a.id}>{nameOf(compId)} → {a.name} · {a.via} · {a.tier}{a.userCount != null ? ` · ${a.userCount.toLocaleString()} users recorded` : ' · user count not recorded'}</div>
+                            <div key={a.id}>{nameOf(compId)} → {a.name} · {a.via} · {a.tier}{a.userCount != null ? ` · ${a.userCount.toLocaleString()} users` : ''}</div>
                           ))}
                       </div>
                       <div>
                         <div className="font-bold text-[10px] uppercase">Business features ({preview.features.length})</div>
                         {preview.features.length === 0
-                          ? <div className="text-slate-500">No business feature is on this impact result.</div>
+                          ? <div className="text-slate-500">No features listed.</div>
                           : preview.features.map(f => <div key={f.id}>{f.name} · {f.via} · {f.action}</div>)}
                       </div>
                       <div>
@@ -254,18 +209,18 @@ export const ImpactView: React.FC = () => {
                           ? <div className="text-slate-500">Path details are not available for this result.</div>
                           : (
                             <>
-                              <div>Downstream: {paths.downstream.length === 0 ? 'none recorded' : paths.downstream.map(n => `${n.name} (${n.status}, ${n.via})`).join(' → ')}</div>
-                              <div>Upstream: {paths.upstream.length === 0 ? 'none recorded' : paths.upstream.map(n => `${n.name} (${n.status}, ${n.via})`).join(' → ')}</div>
+                              <div>Downstream: {paths.downstream.length === 0 ? 'none' : paths.downstream.map(n => `${n.name} (${n.status}, ${n.via})`).join(' → ')}</div>
+                              <div>Upstream: {paths.upstream.length === 0 ? 'none' : paths.upstream.map(n => `${n.name} (${n.status}, ${n.via})`).join(' → ')}</div>
                             </>
                           )}
                       </div>
-                      <div>
-                        <div className="font-bold text-[10px] uppercase">Missing or unconfirmed</div>
-                        {dependencyLinks.length === 0 && <div>The dependency register has no relationships. That is not proof there are none.</div>}
-                        {missingMethods.length > 0 && <div>{missingMethods.length} direct link{missingMethods.length === 1 ? '' : 's'} have no method recorded.</div>}
-                        {preview.usersStopped == null && preview.usersAffected == null && <div>No user count is recorded on this blast radius.</div>}
-                        {dependencyLinks.length > 0 && missingMethods.length === 0 && (preview.usersStopped != null || preview.usersAffected != null) && <div>Recorded methods and user counts are present on this result.</div>}
-                      </div>
+                      {(dependencyLinks.length === 0 || missingMethods.length > 0) && (
+                        <div>
+                          <div className="font-bold text-[10px] uppercase">Missing</div>
+                          {dependencyLinks.length === 0 && <div>No dependencies recorded yet.</div>}
+                          {missingMethods.length > 0 && <div>{missingMethods.length} link{missingMethods.length === 1 ? '' : 's'} with no method.</div>}
+                        </div>
+                      )}
                     </>
                   );
                 })()}

@@ -6,7 +6,7 @@ import {
   GoLivePreview, GoLiveRun,
   ProviderConnectionView, ProviderInstanceView,
   ReliabilityInsights, OpsBackupHealth, NotificationDelivery, NotificationDeliveryStats, NotificationDeliveryDetail, NotificationHealth,
-  SmtpCheckResult,   RegistryComponent, DependencyLink, RegistryImpact,
+  SmtpCheckResult,   RegistryComponent, DependencyLink, RegistryImpact, ApplicationServiceDependencies,
   TrackedCredential, CredentialExpiryState, CredentialKind, Environment, OperationalStatus,
   ResourceMeasurement, ResourceView, QuotaWindow,
 } from '../types';
@@ -342,6 +342,8 @@ export const api = {
 
   // ── Applications ────────────────────────────────────────────────────────────
   getApplications: () => unwrap(api.get<ApiResponse<Application[]>>('/api/v1/applications')),
+  /** Stored application plus `serviceDependencies` from the register. The list endpoint does not include that object. */
+  getApplication: (id: string) => unwrap(api.get<ApiResponse<Application & { serviceDependencies: ApplicationServiceDependencies }>>(`/api/v1/applications/${encodeURIComponent(id)}`)),
   createApplication: (data: Partial<Application>) => unwrap(api.post<ApiResponse<Application>>('/api/v1/applications', data)),
   updateApplication: (id: string, data: Partial<Application>) => unwrap(api.patch<ApiResponse<Application>>(`/api/v1/applications/${encodeURIComponent(id)}`, data)),
   deleteApplication: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean; removedMonitors: number }>>(`/api/v1/applications/${encodeURIComponent(id)}`)),
@@ -451,6 +453,8 @@ export const api = {
   measureResource: (id: string, data: { usage: number; measuredAt?: string; measurementId?: string; window?: QuotaWindow }) =>
     unwrap(api.post<ApiResponse<ResourceView & { idempotent: boolean }>>(`/api/v1/resources/${encodeURIComponent(id)}/measure`, data)),
   evaluateResources: () => unwrap(api.post<ApiResponse<ResourceView[]>>('/api/v1/resources/evaluate', {})),
+  getDependencyLinks: () => unwrap(api.get<ApiResponse<DependencyLink[]>>('/api/v1/dependency-links')),
+  getDependencyLink: (id: string) => unwrap(api.get<ApiResponse<DependencyLink>>(`/api/v1/dependency-links/${encodeURIComponent(id)}`)),
   createDependencyLink: (data: Partial<DependencyLink>) => unwrap(api.post<ApiResponse<DependencyLink>>('/api/v1/dependency-links', data)),
   updateDependencyLink: (id: string, data: Partial<DependencyLink>) => unwrap(api.patch<ApiResponse<DependencyLink>>(`/api/v1/dependency-links/${encodeURIComponent(id)}`, data)),
   deleteDependencyLink: (id: string) => unwrap(api.delete<ApiResponse<{ deleted: boolean }>>(`/api/v1/dependency-links/${encodeURIComponent(id)}`)),
