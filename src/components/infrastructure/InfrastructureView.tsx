@@ -4,6 +4,7 @@ import { useOps } from '../../context/OpsContext';
 import { VpsServer, TelemetryLevel } from '../../types';
 import { Search, X, Server, ChevronRight } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 import { useDialog } from '../ui/useDialog';
 import { THRESHOLDS } from '../../lib/thresholds';
 import { explainVps } from '../../lib/trafficHealth';
@@ -342,6 +343,7 @@ export const InfrastructureView: React.FC = () => {
       if (sortBy === 'disk') return metricValue(b, b.telemetry.diskPercent) - metricValue(a, a.telemetry.diskPercent);
       return a.hostname.localeCompare(b.hostname);
     });
+  const serverPaging = useClientPagination(filteredServers, 10, `${filter}|${issue ?? ''}|${search}|${sortBy}`);
 
   const statCard = `p-3 rounded border ${isDark ? 'bg-[#111726] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'}`;
   const muted = isDark ? 'text-slate-400' : 'text-slate-500';
@@ -372,11 +374,9 @@ export const InfrastructureView: React.FC = () => {
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
       }`}>
         <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">
-            VPS INFRASTRUCTURE
-          </h1>
-          <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            {servers.length} registered server{servers.length === 1 ? '' : 's'} · telemetry reported by the Scholario agent
+          <h1 className="text-lg font-bold tracking-tight">Infrastructure</h1>
+          <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            {servers.length} server{servers.length === 1 ? '' : 's'}
           </p>
         </div>
 
@@ -524,7 +524,7 @@ export const InfrastructureView: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className={`divide-y ${isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
-                    {filteredServers.map(s => {
+                    {serverPaging.slice.map(s => {
                       const app = applications.find(a => a.id === s.applicationId);
                       const isCrit = s.status === 'CRITICAL';
 
@@ -589,6 +589,7 @@ export const InfrastructureView: React.FC = () => {
               </div>
             )}
           </div>
+          <Pagination page={serverPaging.page} totalPages={serverPaging.totalPages} total={serverPaging.total} pageSize={serverPaging.pageSize} onPage={serverPaging.setPage} />
 
           {reporting.length < servers.length && (
             <p className={`text-[11px] font-mono ${muted}`}>

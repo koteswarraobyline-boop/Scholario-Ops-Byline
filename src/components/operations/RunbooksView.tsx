@@ -4,6 +4,7 @@ import { useAuth } from '../../context/AuthContext';
 import { Runbook } from '../../types';
 import { CheckCircle2, Square, Plus, Pencil, Trash2, RotateCcw, X, BookOpen, Loader2 } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 
 const CATEGORIES: Runbook['category'][] = ['DATABASE', 'FAILOVER', 'WEB_SERVER', 'PERFORMANCE', 'DEAD_MAN'];
 
@@ -168,6 +169,7 @@ export const RunbooksView: React.FC = () => {
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
+  const runbookPaging = useClientPagination(runbooks, 10);
 
   useEffect(() => {
     if (selectedRunbookId) setActiveRbId(selectedRunbookId);
@@ -215,12 +217,7 @@ export const RunbooksView: React.FC = () => {
       isDark ? 'border-[#1E293B]' : 'border-slate-200'
     }`}>
       <div>
-        <h1 className="text-lg font-bold font-mono tracking-tight">
-          OPERATIONAL RUNBOOKS
-        </h1>
-        <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-          Step-by-step procedures; operators check off steps as they work an incident
-        </p>
+        <h1 className="text-lg font-bold tracking-tight">Runbooks</h1>
       </div>
       {isAdmin && !editing && (
         <button
@@ -265,7 +262,7 @@ export const RunbooksView: React.FC = () => {
           <div className={`text-[10px] font-semibold uppercase tracking-wider font-mono px-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
             Runbooks ({runbooks.length})
           </div>
-          {runbooks.map(rb => {
+          {runbookPaging.slice.map(rb => {
             const completedCount = rb.steps.filter(s => s.completed).length;
             const isSelected = !editing && rb.id === currentRunbook?.id;
 
@@ -295,6 +292,7 @@ export const RunbooksView: React.FC = () => {
               </button>
             );
           })}
+          <Pagination page={runbookPaging.page} totalPages={runbookPaging.totalPages} total={runbookPaging.total} pageSize={runbookPaging.pageSize} onPage={runbookPaging.setPage} />
         </div>
 
         {editing ? (

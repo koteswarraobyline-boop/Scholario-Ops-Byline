@@ -4,6 +4,7 @@ import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
 import { AlertTriangle, Globe, RefreshCw, KeyRound, ArrowRightLeft } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 import { LoadBalancerPanel } from './LoadBalancerPanel';
 
 const fmtDateTime = (iso: string | null | undefined) => {
@@ -30,6 +31,7 @@ export const CloudflareView: React.FC = () => {
   const cf = integrations?.cloudflare;
   const configured = cf?.configured ?? false;
   const selectedZone = cloudflareZones.find(z => z.id === selectedZoneId) ?? cloudflareZones[0];
+  const dnsPaging = useClientPagination(selectedZone?.dnsRecords ?? [], 10, selectedZone?.id ?? '');
 
   const handleSync = async () => {
     setSyncing(true);
@@ -48,9 +50,9 @@ export const CloudflareView: React.FC = () => {
   const header = (
     <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
       <div>
-        <h1 className="text-lg font-bold font-mono tracking-tight">CLOUDFLARE LOAD BALANCING, DNS &amp; FAILOVER</h1>
-        <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-          Load Balancer pools / origin health, zones, DNS records and SSL from the Cloudflare API · zone sync {fmtDateTime(cf?.lastSyncAt)}
+        <h1 className="text-lg font-bold tracking-tight">Cloudflare</h1>
+        <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+          Last sync {fmtDateTime(cf?.lastSyncAt)}
         </p>
       </div>
       <div className="flex items-center gap-2">
@@ -279,6 +281,7 @@ export const CloudflareView: React.FC = () => {
             {selectedZone.dnsRecords.length === 0 ? (
               <div className={`py-6 text-center ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>This zone has no DNS records.</div>
             ) : (
+              <>
               <div className="w-full min-w-0 overflow-x-auto">
                 <table className="w-full text-left text-xs font-mono min-w-[640px]">
                   <thead className={`border-b ${isDark ? 'bg-[#0B0F17] text-slate-400 border-[#1A2332]' : 'bg-slate-50 text-slate-600 border-slate-200'}`}>
@@ -292,7 +295,7 @@ export const CloudflareView: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className={`divide-y ${isDark ? 'divide-[#172030]' : 'divide-slate-100'}`}>
-                    {selectedZone.dnsRecords.map(rec => (
+                    {dnsPaging.slice.map(rec => (
                       <tr key={rec.id} className={isDark ? 'hover:bg-[#151D2E]' : 'hover:bg-slate-50'}>
                         <td className={`py-2 px-3 font-bold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{rec.type}</td>
                         <td className={`py-2 px-3 font-semibold ${strong}`}>{rec.name}</td>
@@ -309,6 +312,8 @@ export const CloudflareView: React.FC = () => {
                   </tbody>
                 </table>
               </div>
+              <Pagination page={dnsPaging.page} totalPages={dnsPaging.totalPages} total={dnsPaging.total} pageSize={dnsPaging.pageSize} onPage={dnsPaging.setPage} />
+              </>
             )}
           </div>
         </>

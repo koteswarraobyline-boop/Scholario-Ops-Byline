@@ -1,9 +1,13 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Network, Plus, Pencil, Trash2, X, Zap } from 'lucide-react';
 import { useOps } from '../../context/OpsContext';
 import { useAuth } from '../../context/AuthContext';
 import { api } from '../../services/api';
-import { Application, DependencyLink, DependencyMethod, RegistryComponent, RegistryImpact, RegistryKind, RegistryPaths, VpsServer } from '../../types';
+import { Pagination, useClientPagination } from '../ui/Pagination';
+import { Application, DependencyCriticality, DependencyLink, DependencyMethod, RegistryComponent, RegistryImpact, RegistryKind, RegistryPaths, VpsServer } from '../../types';
+import { dependencyFeatureAllowed, providerBlockedForFeature } from '../../lib/serviceDependencies';
+import { databaseSuggestions } from '../../lib/dependencySuggestions';
 
 const liveStatusClass = (s: string) =>
   s === 'HEALTHY' ? 'text-emerald-500'
@@ -29,10 +33,19 @@ const KINDS: Array<{ id: RegistryKind; label: string }> = [
 ];
 const kindLabel = (k: RegistryKind) => KINDS.find(x => x.id === k)?.label ?? k;
 const METHODS: DependencyMethod[] = ['HTTP', 'API', 'DATABASE', 'EMBED', 'LINK', 'OTHER'];
-const methodLabel = (m: DependencyLink['method'] | '' | null | undefined) => (m ? m : 'not recorded');
+const CRITICALITY: DependencyCriticality[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+const methodLabel = (m: DependencyLink['method'] | '' | null | undefined) => m || '';
+const criticalityLabel = (c: DependencyLink['criticality'] | '' | null | undefined) => c || '';
+const configHint = (kind: RegistryKind) =>
+  kind === 'DATABASE' ? 'Database host. No password.'
+    : kind === 'STORAGE' ? 'Bucket or path. No key.'
+      : kind === 'THIRD_PARTY_API' || kind === 'PROVIDER' ? 'API or service URL. No token.'
+        : 'Host, URL, or bucket. No password.';
 const TIERS: RegistryComponent['tier'][] = ['TIER_1', 'TIER_2', 'TIER_3'];
 const tierLabel = (t: string) => t.replace('TIER_', 'Tier ');
 const hasAudience = (k: RegistryKind) => k === 'APPLICATION' || k === 'BUSINESS_FEATURE';
+const hostingIds = (app: Application | undefined) => new Set([app?.prdServerId, app?.drServerId].filter((id): id is string => Boolean(id)));
+const isOwnHost = (component: RegistryComponent, hosts: Set<string>) => component.kind === 'SERVER' && !!component.serverId && hosts.has(component.serverId);
 
 const useStyles = () => {
   const { theme } = useOps();
@@ -73,6 +86,7 @@ const ComponentEditor: React.FC<{ initial?: RegistryComponent; onDone: () => voi
   const [owner, setOwner] = useState(initial?.owner ?? '');
   const [tier, setTier] = useState<RegistryComponent['tier']>(initial?.tier ?? 'TIER_2');
   const [description, setDescription] = useState(initial?.description ?? '');
+  const [endpoint, setEndpoint] = useState(initial?.endpoint ?? '');
   const [applicationId, setApplicationId] = useState(initial?.applicationId ?? '');
   const [serverId, setServerId] = useState(initial?.serverId ?? '');
   const [userCount, setUserCount] = useState(initial?.userCount != null ? String(initial.userCount) : '');
@@ -84,7 +98,7 @@ const ComponentEditor: React.FC<{ initial?: RegistryComponent; onDone: () => voi
     e.preventDefault();
     setBusy(true);
     const data: Partial<RegistryComponent> = {
-      name, owner, tier, description,
+      name, owner, tier, description, endpoint,
       applicationId: audience ? applicationId || null : null,
       serverId: kind === 'SERVER' ? serverId || null : null,
       userCount: audience && userCount.trim() !== '' ? Number(userCount) : null,
@@ -142,6 +156,9 @@ const ComponentEditor: React.FC<{ initial?: RegistryComponent; onDone: () => voi
             </Field>
           </>
         )}
+        <Field text="Config" hint={configHint(kind)} className="sm:col-span-2 lg:col-span-4">
+          <input value={endpoint} onChange={e => setEndpoint(e.target.value)} maxLength={500} className={st.input} placeholder="db.internal, https://api.example, or media-bucket" />
+        </Field>
         <Field text="Description" className="sm:col-span-2 lg:col-span-4">
           <input value={description} onChange={e => setDescription(e.target.value)} maxLength={2000} className={st.input} />
         </Field>
@@ -157,21 +174,34 @@ const ComponentEditor: React.FC<{ initial?: RegistryComponent; onDone: () => voi
 // ─────────────────────────────────────────────────────────────────────────────
 const LinkEditor: React.FC<{ initial?: DependencyLink; fromId?: string; onDone: () => void }> = ({ initial, fromId: presetFrom, onDone }) => {
   const st = useStyles();
-  const { registry, saveDependencyLink } = useOps();
+  const { registry, applications, saveDependencyLink } = useOps();
   const [fromId, setFromId] = useState(initial?.fromId ?? presetFrom ?? '');
   const [toId, setToId] = useState(initial?.toId ?? '');
   const [type, setType] = useState<DependencyLink['type']>(initial?.type ?? 'HARD');
   const [featureId, setFeatureId] = useState(initial?.featureId ?? '');
   const [method, setMethod] = useState<DependencyLink['method'] | ''>(initial?.method ?? '');
+  const [criticality, setCriticality] = useState<DependencyLink['criticality'] | ''>(initial?.criticality ?? '');
+  const [healthCheck, setHealthCheck] = useState(initial?.healthCheck ?? '');
+  const [failureBehaviour, setFailureBehaviour] = useState(initial?.failureBehaviour ?? '');
+  const [owner, setOwner] = useState(initial?.owner ?? '');
+  const [recoveryExpectation, setRecoveryExpectation] = useState(initial?.recoveryExpectation ?? '');
   const [notes, setNotes] = useState(initial?.notes ?? '');
   const [busy, setBusy] = useState(false);
-  const features = registry.filter(c => c.kind === 'BUSINESS_FEATURE');
+  const consumer = registry.find(c => c.id === fromId);
+  const features = registry.filter(c => consumer && dependencyFeatureAllowed(c, consumer) && c.id !== fromId && c.id !== toId);
+  const consumerApp = consumer && hasAudience(consumer.kind) ? applications.find(a => a.id === consumer.applicationId) : undefined;
+  const hosts = hostingIds(consumerApp);
+  const providers = registry.filter(c => c.id !== fromId && !isOwnHost(c, hosts));
   const option = (c: RegistryComponent) => <option key={c.id} value={c.id}>{c.name} · {kindLabel(c.kind)}</option>;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
-    const saved = await saveDependencyLink(initial?.id ?? null, { fromId, toId, type, featureId: featureId || null, method: method || null, notes });
+    const feature = features.some(f => f.id === featureId) ? featureId : null;
+    const saved = await saveDependencyLink(initial?.id ?? null, {
+      fromId, toId, type, featureId: feature, method: method || null, criticality: criticality || null,
+      healthCheck, failureBehaviour, owner, recoveryExpectation, notes,
+    });
     setBusy(false);
     if (saved) onDone();
   };
@@ -189,36 +219,54 @@ const LinkEditor: React.FC<{ initial?: DependencyLink; fromId?: string; onDone: 
             {registry.map(option)}
           </select>
         </Field>
-        <Field text="Provider (needed by the consumer)">
-          <select value={toId} onChange={e => setToId(e.target.value)} required className={st.input}>
+        <Field text="Provider (needed by the consumer)" hint={hosts.size ? 'Production and recovery servers stay on the application' : undefined}>
+          <select value={providers.some(c => c.id === toId) ? toId : ''} onChange={e => setToId(e.target.value)} required className={st.input}>
             <option value="">— choose —</option>
-            {registry.filter(c => c.id !== fromId).map(option)}
+            {providers.map(option)}
           </select>
         </Field>
-        <Field text="Type" hint={type === 'HARD' ? 'A stops working without B' : 'A works, degraded, without B'}>
+        <Field text="Type" hint={type === 'HARD' ? 'The consumer stops when the provider fails.' : (features.some(f => f.id === featureId) || consumer?.kind === 'BUSINESS_FEATURE') ? 'That feature stops. The rest of the consumer keeps running.' : 'The consumer keeps running, but worse.'}>
           <select value={type} onChange={e => setType(e.target.value as DependencyLink['type'])} className={st.input}>
             <option value="HARD">Hard</option>
             <option value="SOFT">Soft</option>
           </select>
         </Field>
-        <Field text="Feature that needs it" hint={features.length ? 'Optional' : 'Register business features to choose one'}>
-          <select value={featureId} onChange={e => setFeatureId(e.target.value)} disabled={features.length === 0} className={st.input}>
+        <Field text="Feature that needs it" hint={!consumer ? 'Choose the consumer first.' : features.length ? 'Optional. Only features of this consumer.' : 'No feature of this consumer is in the register.'}>
+          <select value={features.some(f => f.id === featureId) ? featureId : ''} onChange={e => setFeatureId(e.target.value)} disabled={features.length === 0} className={st.input}>
             <option value="">— all of A —</option>
             {features.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
           </select>
         </Field>
-        <Field text="Method" hint="How the consumer reaches the provider. Blank means not recorded.">
+        <Field text="Method" hint="How this application reaches the other one.">
           <select value={method ?? ''} onChange={e => setMethod(e.target.value as DependencyLink['method'] | '')} className={st.input}>
             <option value="">Not recorded</option>
             {METHODS.map(m => <option key={m} value={m}>{m}</option>)}
           </select>
+        </Field>
+        <Field text="Criticality">
+          <select value={criticality ?? ''} onChange={e => setCriticality(e.target.value as DependencyLink['criticality'] | '')} className={st.input}>
+            <option value="">Not recorded</option>
+            {CRITICALITY.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
+        <Field text="Health check" hint="How you know it is up. No password.">
+          <input value={healthCheck} onChange={e => setHealthCheck(e.target.value)} maxLength={500} className={st.input} placeholder="GET /health" />
+        </Field>
+        <Field text="What users see when it fails" className="sm:col-span-2">
+          <input value={failureBehaviour} onChange={e => setFailureBehaviour(e.target.value)} maxLength={500} className={st.input} placeholder="Sign-in shows an error and stops" />
+        </Field>
+        <Field text="Dependency owner" hint="Who is accountable for this relationship">
+          <input value={owner} onChange={e => setOwner(e.target.value)} maxLength={200} className={st.input} placeholder="Academic IT" />
+        </Field>
+        <Field text="Recovery expectation">
+          <input value={recoveryExpectation} onChange={e => setRecoveryExpectation(e.target.value)} maxLength={500} className={st.input} placeholder="Restore within 30 minutes" />
         </Field>
         <Field text="Business rationale" className="sm:col-span-2 lg:col-span-3">
           <input value={notes} onChange={e => setNotes(e.target.value)} maxLength={500} className={st.input} />
         </Field>
       </div>
       <div className="flex gap-2">
-        <button type="submit" disabled={busy || !fromId || !toId} className={`${st.btn} ${st.primary}`}>{initial ? 'Save dependency' : 'Add dependency'}</button>
+        <button type="submit" disabled={busy || !fromId || !providers.some(c => c.id === toId)} className={`${st.btn} ${st.primary}`}>{initial ? 'Save dependency' : 'Add dependency'}</button>
         <button type="button" onClick={onDone} className={`${st.btn} ${st.ghost}`}>Cancel</button>
       </div>
     </form>
@@ -366,9 +414,19 @@ const NEW_KINDS: RegistryKind[] = ['DATABASE', 'STORAGE', 'THIRD_PARTY_API', 'PR
 
 export const DependencyRegisterSection: React.FC = () => {
   const st = useStyles();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const pendingProjectScroll = useRef<string | null>(null);
+  const openedRecord = useRef<string | null>(null);
   useEffect(() => {
-    if (window.location.hash !== '#dependency-register-title') return;
-    document.getElementById('dependency-register-title')?.scrollIntoView({ block: 'start' });
+    const scroll = () => {
+      if (window.location.hash !== '#dependency-register-title') return;
+      if (pendingProjectScroll.current) return;
+      document.getElementById('dependency-register-title')?.scrollIntoView({ block: 'start' });
+    };
+    scroll();
+    window.addEventListener('hashchange', scroll);
+    return () => window.removeEventListener('hashchange', scroll);
   }, []);
   const { applications, servers, registry, dependencyLinks, saveRegistryComponent, deleteRegistryComponent, saveDependencyLink, deleteDependencyLink } = useOps();
   const { canDo } = useAuth();
@@ -383,17 +441,49 @@ export const DependencyRegisterSection: React.FC = () => {
   const [impactError, setImpactError] = useState<string | null>(null);
   const [bringing, setBringing] = useState(false);
   const [projectFilter, setProjectFilter] = useState<'all' | 'open' | 'described'>('all');
-  const [recording, setRecording] = useState<{
-    appId: string;
-    target: string;
-    kind: RegistryKind;
-    name: string;
-    owner: string;
-    type: DependencyLink['type'];
-    method: DependencyLink['method'] | '';
-    notes: string;
-    busy: boolean;
-  } | null>(null);
+  const blankRecording = (appId: string) => ({
+    appId, target: '', kind: 'DATABASE' as RegistryKind, name: '', owner: 'Unassigned', endpoint: '',
+    featureId: '', featureName: '', type: 'HARD' as DependencyLink['type'], method: '' as DependencyLink['method'] | '',
+    criticality: '' as DependencyLink['criticality'] | '', healthCheck: '', failureBehaviour: '', linkOwner: '', recoveryExpectation: '',
+    notes: '', busy: false,
+  });
+  const [recording, setRecording] = useState<ReturnType<typeof blankRecording> | null>(null);
+  const [recordError, setRecordError] = useState<string | null>(null);
+  useEffect(() => {
+    const id = searchParams.get('record');
+    if (!id || applications.length === 0 || openedRecord.current === id) return;
+    openedRecord.current = id;
+    const app = applications.find(a => a.id === id);
+    const next = new URLSearchParams(searchParams);
+    next.delete('record');
+    setSearchParams(next, { replace: true });
+    if (!app) return;
+    setProjectFilter('all');
+    if (!isAdmin) return;
+    setAddingFeature(null);
+    setRecordError(null);
+    setRecording(blankRecording(app.id));
+    pendingProjectScroll.current = app.id;
+  }, [searchParams, applications, isAdmin, setSearchParams]);
+  useEffect(() => {
+    const id = pendingProjectScroll.current;
+    if (!id || recording?.appId !== id) return;
+    pendingProjectScroll.current = null;
+    document.getElementById(`dependency-project-${id}`)?.scrollIntoView({ block: 'center' });
+  }, [recording]);
+  const [addingFeature, setAddingFeature] = useState<{ appId: string; name: string; owner: string; busy: boolean } | null>(null);
+  const [dismissedSuggestions, setDismissedSuggestions] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem('scholario-ops.dismissed-dependency-suggestions') ?? '[]') as string[]; }
+    catch { return []; }
+  });
+  const [confirmingSuggestion, setConfirmingSuggestion] = useState<string | null>(null);
+  const dismissSuggestion = (key: string) => {
+    setDismissedSuggestions(prev => {
+      const next = prev.includes(key) ? prev : [...prev, key];
+      localStorage.setItem('scholario-ops.dismissed-dependency-suggestions', JSON.stringify(next));
+      return next;
+    });
+  };
 
   const projectComponent = (appId: string) => registry.find(c => c.kind === 'APPLICATION' && c.applicationId === appId);
   const missingProjects = applications.filter(a => !projectComponent(a.id));
@@ -411,6 +501,8 @@ export const DependencyRegisterSection: React.FC = () => {
 
   const byId = useMemo(() => new Map(registry.map(c => [c.id, c])), [registry]);
   const shown = kindFilter ? registry.filter(c => c.kind === kindFilter) : registry;
+  const entryPaging = useClientPagination(shown, 10, kindFilter);
+  const linkPaging = useClientPagination(dependencyLinks, 10);
   const linksOf = (id: string) => dependencyLinks.filter(l => l.fromId === id || l.toId === id).length;
 
   const showImpact = async (c: RegistryComponent) => {
@@ -438,6 +530,7 @@ export const DependencyRegisterSection: React.FC = () => {
 
   const recordDependency = async (app: Application) => {
     if (!recording || recording.appId !== app.id || recording.busy) return;
+    setRecordError(null);
     setRecording({ ...recording, busy: true });
     const fromId = await ensureProject(app, registry, saveRegistryComponent);
     if (!fromId) { setRecording(r => r && { ...r, busy: false }); return; }
@@ -449,6 +542,7 @@ export const DependencyRegisterSection: React.FC = () => {
         owner: recording.owner.trim() || 'Unassigned',
         tier: app.tier,
         description: '',
+        endpoint: recording.endpoint,
       });
       toId = saved?.id ?? null;
     } else if (recording.target.startsWith('app:')) {
@@ -460,13 +554,69 @@ export const DependencyRegisterSection: React.FC = () => {
     } else {
       toId = recording.target;
     }
+    let featureId: string | null = null;
+    if (toId && recording.featureId === 'new') {
+      const feature = await saveRegistryComponent(null, {
+        kind: 'BUSINESS_FEATURE',
+        name: recording.featureName.trim(),
+        owner: recording.linkOwner.trim() || 'Unassigned',
+        tier: app.tier,
+        description: '',
+        applicationId: app.id,
+      });
+      featureId = feature?.id ?? null;
+      if (!featureId) toId = null;
+    } else if (recording.featureId) {
+      featureId = recording.featureId;
+    }
     if (toId && toId !== fromId) {
-      const saved = await saveDependencyLink(null, { fromId, toId, type: recording.type, featureId: null, method: recording.method || null, notes: recording.notes });
-      if (saved) setRecording(null);
-      else setRecording(r => r && { ...r, busy: false });
+      const saved = await saveDependencyLink(null, {
+        fromId, toId, type: recording.type, featureId, method: recording.method || null,
+        criticality: recording.criticality || null, healthCheck: recording.healthCheck,
+        failureBehaviour: recording.failureBehaviour, owner: recording.linkOwner,
+        recoveryExpectation: recording.recoveryExpectation, notes: recording.notes,
+      });
+      if (saved) { setRecording(null); setRecordError(null); }
+      else {
+        setRecordError('Not saved. If this project already depends on that provider for the same feature, pick another feature. Otherwise use the message just shown.');
+        setRecording(r => r && { ...r, busy: false });
+      }
       return;
     }
+    setRecordError(toId && toId === fromId ? 'A project cannot depend on itself.' : 'That dependency was not saved. Choose what it depends on and try again.');
     setRecording(r => r && { ...r, busy: false });
+  };
+
+  const addFeature = async (app: Application) => {
+    if (!addingFeature || addingFeature.appId !== app.id || addingFeature.busy || !addingFeature.name.trim()) return;
+    setAddingFeature({ ...addingFeature, busy: true });
+    await ensureProject(app, registry, saveRegistryComponent);
+    const saved = await saveRegistryComponent(null, {
+      kind: 'BUSINESS_FEATURE',
+      name: addingFeature.name.trim(),
+      owner: addingFeature.owner.trim() || 'Unassigned',
+      tier: app.tier,
+      description: '',
+      applicationId: app.id,
+    });
+    if (saved) setAddingFeature(null);
+    else setAddingFeature(f => f && { ...f, busy: false });
+  };
+
+  const confirmSuggestion = async (app: Application, suggestion: { key: string; name: string; endpoint: string; notes: string }) => {
+    if (confirmingSuggestion) return;
+    setConfirmingSuggestion(suggestion.key);
+    const fromId = await ensureProject(app, registry, saveRegistryComponent);
+    const existing = registry.find(c => c.kind === 'DATABASE' && sameName(c.name, suggestion.name));
+    const provider = existing ?? (fromId ? await saveRegistryComponent(null, {
+      kind: 'DATABASE', name: suggestion.name, owner: 'Unassigned', tier: app.tier, description: '', endpoint: suggestion.endpoint,
+    }) : null);
+    if (fromId && provider) {
+      await saveDependencyLink(null, {
+        fromId, toId: provider.id, type: 'HARD', featureId: null, method: 'DATABASE', notes: suggestion.notes,
+      });
+    }
+    setConfirmingSuggestion(null);
   };
 
   return (
@@ -475,18 +625,24 @@ export const DependencyRegisterSection: React.FC = () => {
         <h2 id="dependency-register-title" className="text-sm font-bold font-mono flex items-center gap-2">
           <Network className="w-4 h-4 text-blue-500" /> DEPENDENCY REGISTER ({registry.length})
         </h2>
-        {isAdmin && editing === null && editingLink === null && (
-          <div className="flex gap-2">
-            <button onClick={() => setEditing('new')} className={`${st.btn} ${st.primary}`}><Plus className="w-3.5 h-3.5" /> Add entry</button>
-            <button onClick={() => setEditingLink({})} disabled={registry.length < 2} title={registry.length < 2 ? 'Register at least two entries first' : undefined} className={`${st.btn} ${st.ghost}`}>
-              <Plus className="w-3.5 h-3.5" /> Add dependency
-            </button>
-          </div>
-        )}
+        <div className="flex gap-2">
+          <button type="button" onClick={() => navigate('/dependency-register')} className={`${st.btn} ${st.ghost}`}>Full list</button>
+          <button type="button" onClick={() => navigate('/dependencies#dependency-matrix')} className={`${st.btn} ${st.ghost}`}>Matrix</button>
+          {isAdmin && editing === null && editingLink === null && (
+            <>
+              <button onClick={() => setEditing('new')} className={`${st.btn} ${st.primary}`}><Plus className="w-3.5 h-3.5" /> Add entry</button>
+              <button onClick={() => setEditingLink({})} disabled={registry.length < 2} title={registry.length < 2 ? 'Register at least two entries first' : undefined} className={`${st.btn} ${st.ghost}`}>
+                <Plus className="w-3.5 h-3.5" /> Add dependency
+              </button>
+            </>
+          )}
+        </div>
       </div>
       <p className={`text-xs ${st.muted}`}>
         Each project is an application you already run. Record what that project depends on — another project, a server, a database, storage, a third-party API or a provider.
-        Direction is consumer → provider. <b> Hard</b> means the project stops if that thing fails. <b>Soft</b> means the project still runs, but worse.
+        Direction is consumer → provider. <b> Hard</b> means the project stops if that thing fails. <b>Soft</b> with a feature means only that feature stops. Soft with no feature means the project keeps running, but worse.
+        Record the feature, criticality, health check, what users see, the owner, and the recovery expectation on the dependency.
+        Config on an entry is a host, URL, or bucket, with no password. A database already named on the application is offered below for you to confirm.
         {' '}<b>{registry.length}</b> components, <b>{dependencyLinks.length}</b> saved relationships, <b>{describedProjects.length}</b> applications with a written dependency, <b>{openProjects}</b> with nothing written down.
       </p>
 
@@ -526,9 +682,22 @@ export const DependencyRegisterSection: React.FC = () => {
               const prd = servers.find(s => s.id === app.prdServerId);
               const dr = servers.find(s => s.id === app.drServerId);
               const open = recording?.appId === app.id;
-              const taken = new Set([comp?.id, ...dependsOn.map(l => l.toId)].filter(Boolean) as string[]);
+              const featureChoice = open && recording ? (recording.featureId === 'new' ? 'new' : (recording.featureId || null)) : null;
+              const providerIdOf = (target: string) => {
+                if (!target || target === 'new') return null;
+                if (target.startsWith('app:')) return registry.find(c => c.kind === 'APPLICATION' && c.applicationId === target.slice(4))?.id ?? null;
+                if (target.startsWith('srv:')) return registry.find(c => c.kind === 'SERVER' && c.serverId === target.slice(4))?.id ?? null;
+                return target;
+              };
+              const blockedProvider = (target: string, featureId: string | null | 'new') => {
+                const providerId = providerIdOf(target);
+                return Boolean(providerId && providerBlockedForFeature(dependsOn, providerId, featureId));
+              };
+              const otherProjects = applications.filter(a => a.id !== app.id && !blockedProvider(`app:${a.id}`, featureChoice ?? null));
+              const otherServers = servers.filter(s => !hostingIds(app).has(s.id) && !blockedProvider(`srv:${s.id}`, featureChoice ?? null));
+              const listed = registry.filter(c => c.id !== comp?.id && !(c.kind === 'APPLICATION' && c.applicationId) && !(c.kind === 'SERVER' && c.serverId) && !providerBlockedForFeature(dependsOn, c.id, featureChoice ?? null));
               return (
-                <div key={app.id} className={`rounded border p-3 space-y-2 ${st.row}`}>
+                <div key={app.id} id={`dependency-project-${app.id}`} className={`rounded border p-3 space-y-2 ${st.row}`}>
                   <div className="flex items-start justify-between gap-2 flex-wrap">
                     <div className="min-w-0">
                       <div className="text-sm font-bold font-sans break-words">{app.name}</div>
@@ -540,7 +709,7 @@ export const DependencyRegisterSection: React.FC = () => {
                     {isAdmin && !open && (
                       <button
                         type="button"
-                        onClick={() => setRecording({ appId: app.id, target: '', kind: 'DATABASE', name: '', owner: 'Unassigned', type: 'HARD', method: '', notes: '', busy: false })}
+                        onClick={() => { setAddingFeature(null); setRecordError(null); setRecording(blankRecording(app.id)); }}
                         className={`${st.btn} ${st.primary}`}
                         aria-label={`Record what ${app.name} depends on`}
                       >
@@ -551,6 +720,76 @@ export const DependencyRegisterSection: React.FC = () => {
                   <div className={`text-[11px] font-mono break-all ${st.muted}`}>
                     Runs on: {prd ? prd.hostname : 'no production server'}{dr ? ` · recovery ${dr.hostname}` : ' · no recovery server'}
                   </div>
+                  {(() => {
+                    const suggested = databaseSuggestions({ app, servers, registry, links: dependencyLinks, dismissed: dismissedSuggestions });
+                    if (suggested.length === 0) return null;
+                    return (
+                      <div className="text-xs font-mono space-y-1">
+                        <div className={`text-[10px] font-bold uppercase ${st.faint}`}>Suggested from the saved inventory ({suggested.length})</div>
+                        {suggested.map(suggestion => (
+                          <div key={suggestion.key} className="flex items-start justify-between gap-2 flex-wrap">
+                            <span className="min-w-0 break-words">
+                              <b>{suggestion.name}</b>
+                              {suggestion.endpoint && <span className={st.faint}> · {suggestion.endpoint}</span>}
+                              <div className={st.muted}>Not recorded until you confirm it. Hard. Method DATABASE.</div>
+                            </span>
+                            {isAdmin && (
+                              <span className="flex gap-1.5 shrink-0">
+                                <button type="button" disabled={confirmingSuggestion === suggestion.key} onClick={() => void confirmSuggestion(app, suggestion)} className={`${st.btn} ${st.primary} !px-2`}>Confirm</button>
+                                <button type="button" onClick={() => dismissSuggestion(suggestion.key)} className={`${st.btn} ${st.ghost} !px-2`}>Not this</button>
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                  {(() => {
+                    const features = registry.filter(c => c.kind === 'BUSINESS_FEATURE' && c.applicationId === app.id);
+                    const adding = addingFeature?.appId === app.id ? addingFeature : null;
+                    return (
+                      <div className="text-xs font-mono">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className={`text-[10px] font-bold uppercase ${st.faint}`}>Features ({features.length})</div>
+                          {isAdmin && !adding && (
+                            <button type="button" onClick={() => setAddingFeature({ appId: app.id, name: '', owner: 'Unassigned', busy: false })} className={`${st.btn} ${st.ghost} !px-2`}>
+                              Add a feature
+                            </button>
+                          )}
+                        </div>
+                        {features.length === 0 ? (
+                          <div className={st.muted}>No features recorded. Sign-in, catalogue, and similar parts of this project go here.</div>
+                        ) : (
+                          <ul className="mt-1 space-y-1">
+                            {features.map(feature => {
+                              const uses = dependencyLinks.filter(l => l.featureId === feature.id || l.fromId === feature.id);
+                              return (
+                                <li key={feature.id} className="break-words">
+                                  <b>{feature.name}</b>
+                                  <span className={st.faint}> · {feature.owner}</span>
+                                  {uses.length === 0 ? (
+                                    <div className={st.muted}>Nothing recorded for this feature.</div>
+                                  ) : uses.map(l => (
+                                    <div key={l.id} className={st.muted}>{[name(l.toId), l.type, methodLabel(l.method), criticalityLabel(l.criticality)].filter(Boolean).join(' · ')}</div>
+                                  ))}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        )}
+                        {adding && (
+                          <form onSubmit={e => { e.preventDefault(); void addFeature(app); }} className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                            <Field text="Feature name"><input value={adding.name} onChange={e => setAddingFeature({ ...adding, name: e.target.value })} required maxLength={200} className={st.input} placeholder="e.g. Sign-in" /></Field>
+                            <Field text="Feature owner"><input value={adding.owner} onChange={e => setAddingFeature({ ...adding, owner: e.target.value })} required maxLength={200} className={st.input} /></Field>
+                            <div className="flex gap-2 sm:col-span-2">
+                              <button type="submit" disabled={adding.busy || !adding.name.trim()} className={`${st.btn} ${st.primary}`}>Save feature</button>
+                              <button type="button" onClick={() => setAddingFeature(null)} className={`${st.btn} ${st.ghost}`}>Close</button>
+                            </div>
+                          </form>
+                        )}
+                      </div>
+                    );
+                  })()}
                   <div className="text-xs font-mono">
                     <div className={`text-[10px] font-bold uppercase ${st.faint}`}>Depends on ({dependsOn.length})</div>
                     {dependsOn.length === 0 ? (
@@ -565,7 +804,10 @@ export const DependencyRegisterSection: React.FC = () => {
                               <b>{name(l.toId)}</b>
                               <span className={st.faint}> · {kindLabel(target?.kind ?? 'APPLICATION')}{target?.owner ? ` · ${target.owner}` : ''}</span>{' '}
                               <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${l.type === 'HARD' ? 'bg-rose-500/15 text-rose-500' : 'bg-amber-500/15 text-amber-500'}`}>{l.type === 'HARD' ? 'HARD' : 'SOFT'}</span>
-                              <span className={st.faint}> · {methodLabel(l.method)}</span>
+                              {(l.method || l.criticality) && <span className={st.faint}> · {[methodLabel(l.method), criticalityLabel(l.criticality)].filter(Boolean).join(' · ')}</span>}
+                              {l.featureId && <span className={st.faint}> · feature {name(l.featureId)}</span>}
+                              {target?.endpoint && <span className={st.faint}> · {target.endpoint}</span>}
+                              {l.failureBehaviour && <div className={st.faint}>Users see: {l.failureBehaviour}</div>}
                               {l.notes && <span className={st.faint}> — {l.notes}</span>}
                             </span>
                             {isAdmin && (confirmUnlink === l.id ? (
@@ -575,6 +817,7 @@ export const DependencyRegisterSection: React.FC = () => {
                               </span>
                             ) : (
                               <span className="flex gap-1.5 shrink-0">
+                                <button type="button" onClick={() => setEditingLink(l)} className={`${st.btn} ${st.ghost} !px-2`} aria-label={`Edit dependency ${name(l.fromId)} on ${name(l.toId)}`}>Edit</button>
                                 <button type="button" onClick={() => saveDependencyLink(l.id, { type: l.type === 'HARD' ? 'SOFT' : 'HARD' })} className={`${st.btn} ${st.ghost} !px-2`} aria-label={`Change ${name(l.fromId)} on ${name(l.toId)} to ${l.type === 'HARD' ? 'soft' : 'hard'}`}>
                                   {l.type === 'HARD' ? 'Make soft' : 'Make hard'}
                                 </button>
@@ -598,24 +841,24 @@ export const DependencyRegisterSection: React.FC = () => {
                       className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-1"
                       aria-label={`What ${app.name} depends on`}
                     >
-                      <Field text="Depends on">
+                      <Field text="Depends on" hint="A provider already saved for the feature you picked is left out. Choose another feature to record it again.">
                         <select value={recording.target} onChange={e => setRecording({ ...recording, target: e.target.value })} required className={st.input}>
                           <option value="">— choose —</option>
-                          {applications.some(a => a.id !== app.id) && (
+                          {otherProjects.length > 0 && (
                             <optgroup label="Another project">
-                              {applications.filter(a => a.id !== app.id).map(a => (
+                              {otherProjects.map(a => (
                                 <option key={a.id} value={`app:${a.id}`}>{a.name}</option>
                               ))}
                             </optgroup>
                           )}
-                          {servers.length > 0 && (
-                            <optgroup label="A server">
-                              {servers.map(s => <option key={s.id} value={`srv:${s.id}`}>{s.hostname} ({s.environment})</option>)}
+                          {otherServers.length > 0 && (
+                            <optgroup label="A server (not where this project is hosted)">
+                              {otherServers.map(s => <option key={s.id} value={`srv:${s.id}`}>{s.hostname} ({s.environment})</option>)}
                             </optgroup>
                           )}
-                          {registry.some(c => !taken.has(c.id) && !(c.kind === 'APPLICATION' && c.applicationId) && !(c.kind === 'SERVER' && c.serverId)) && (
+                          {listed.length > 0 && (
                             <optgroup label="Already in the register">
-                              {registry.filter(c => !taken.has(c.id) && !(c.kind === 'APPLICATION' && c.applicationId) && !(c.kind === 'SERVER' && c.serverId)).map(c => (
+                              {listed.map(c => (
                                 <option key={c.id} value={c.id}>{c.name} · {kindLabel(c.kind)} · {c.owner}</option>
                               ))}
                             </optgroup>
@@ -623,17 +866,48 @@ export const DependencyRegisterSection: React.FC = () => {
                           <option value="new">Something not listed yet…</option>
                         </select>
                       </Field>
-                      <Field text="Method" hint="Blank means not recorded">
+                      <Field text="Method" hint="How this application reaches the other one.">
                         <select value={recording.method ?? ''} onChange={e => setRecording({ ...recording, method: e.target.value as DependencyLink['method'] | '' })} className={st.input}>
                           <option value="">Not recorded</option>
                           {METHODS.map(m => <option key={m} value={m}>{m}</option>)}
                         </select>
                       </Field>
-                      <Field text="If it fails" hint={recording.type === 'HARD' ? 'This project stops' : 'This project still runs, but worse'}>
+                      <Field text="If it fails" hint={recording.featureId ? (recording.type === 'HARD' ? 'This project stops, including this feature' : 'Only this feature stops. The rest of the project keeps running.') : (recording.type === 'HARD' ? 'This project stops' : 'This project still runs, but worse')}>
                         <select value={recording.type} onChange={e => setRecording({ ...recording, type: e.target.value as DependencyLink['type'] })} className={st.input}>
                           <option value="HARD">Hard — project stops</option>
-                          <option value="SOFT">Soft — project degraded</option>
+                          <option value="SOFT">Soft</option>
                         </select>
+                      </Field>
+                      <Field text="Feature" hint="Whole project means every part of it needs this">
+                        <select value={recording.featureId} onChange={e => {
+                          const featureId = e.target.value;
+                          const choice = featureId === 'new' ? 'new' : (featureId || null);
+                          setRecording({ ...recording, featureId, target: blockedProvider(recording.target, choice) ? '' : recording.target });
+                        }} className={st.input}>
+                          <option value="">Whole project</option>
+                          {registry.filter(c => c.kind === 'BUSINESS_FEATURE' && c.applicationId === app.id).map(c => (
+                            <option key={c.id} value={c.id}>{c.name}</option>
+                          ))}
+                          <option value="new">New feature…</option>
+                        </select>
+                      </Field>
+                      {recording.featureId === 'new' && (
+                        <Field text="New feature name"><input value={recording.featureName} onChange={e => setRecording({ ...recording, featureName: e.target.value })} required maxLength={200} className={st.input} placeholder="e.g. Sign-in" /></Field>
+                      )}
+                      <Field text="Criticality">
+                        <select value={recording.criticality ?? ''} onChange={e => setRecording({ ...recording, criticality: e.target.value as DependencyLink['criticality'] | '' })} className={st.input}>
+                          <option value="">Not recorded</option>
+                          {CRITICALITY.map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      </Field>
+                      <Field text="Health check" hint="How you know it is up. No password.">
+                        <input value={recording.healthCheck} onChange={e => setRecording({ ...recording, healthCheck: e.target.value })} maxLength={500} className={st.input} placeholder="GET /health" />
+                      </Field>
+                      <Field text="Dependency owner">
+                        <input value={recording.linkOwner} onChange={e => setRecording({ ...recording, linkOwner: e.target.value })} maxLength={200} className={st.input} placeholder="Academic IT" />
+                      </Field>
+                      <Field text="Recovery expectation">
+                        <input value={recording.recoveryExpectation} onChange={e => setRecording({ ...recording, recoveryExpectation: e.target.value })} maxLength={500} className={st.input} placeholder="Restore within 30 minutes" />
                       </Field>
                       {recording.target === 'new' && (
                         <>
@@ -644,13 +918,20 @@ export const DependencyRegisterSection: React.FC = () => {
                           </Field>
                           <Field text="Name"><input value={recording.name} onChange={e => setRecording({ ...recording, name: e.target.value })} required maxLength={200} className={st.input} placeholder="e.g. Student database" /></Field>
                           <Field text="Owner"><input value={recording.owner} onChange={e => setRecording({ ...recording, owner: e.target.value })} required maxLength={200} className={st.input} /></Field>
+                          <Field text="Config" hint={configHint(recording.kind)} className="sm:col-span-2">
+                            <input value={recording.endpoint} onChange={e => setRecording({ ...recording, endpoint: e.target.value })} maxLength={500} className={st.input} placeholder="db.internal or https://api.example" />
+                          </Field>
                         </>
                       )}
+                      <Field text="What users see when it fails" className="sm:col-span-2 lg:col-span-4">
+                        <input value={recording.failureBehaviour} onChange={e => setRecording({ ...recording, failureBehaviour: e.target.value })} maxLength={500} className={st.input} placeholder="Sign-in shows an error and stops" />
+                      </Field>
                       <Field text="Business rationale" className="sm:col-span-2 lg:col-span-4">
                         <input value={recording.notes} onChange={e => setRecording({ ...recording, notes: e.target.value })} maxLength={500} className={st.input} placeholder="e.g. Login reads this database" />
                       </Field>
+                      {recordError && <p className="sm:col-span-2 lg:col-span-4 text-[11px] font-mono text-rose-500">{recordError}</p>}
                       <div className="flex gap-2 sm:col-span-2">
-                        <button type="submit" disabled={recording.busy || !recording.target || (recording.target === 'new' && !recording.name.trim())} className={`${st.btn} ${st.primary}`}>
+                        <button type="submit" disabled={recording.busy || !recording.target || (recording.target === 'new' && !recording.name.trim()) || (recording.featureId === 'new' && !recording.featureName.trim())} className={`${st.btn} ${st.primary}`}>
                           Save this dependency
                         </button>
                         <button type="button" onClick={() => setRecording(null)} className={`${st.btn} ${st.ghost}`}>Close</button>
@@ -702,9 +983,9 @@ export const DependencyRegisterSection: React.FC = () => {
               </tr>
             </thead>
             <tbody>
-              {shown.map(c => (
+              {entryPaging.slice.map(c => (
                 <tr key={c.id} className={`border-b last:border-b-0 ${st.row} align-top`}>
-                  <td className="px-3 py-2 font-semibold break-words max-w-[220px]">{c.name}{c.description && <div className={`font-normal text-[10px] ${st.faint}`}>{c.description}</div>}</td>
+                  <td className="px-3 py-2 font-semibold break-words max-w-[220px]">{c.name}{c.endpoint && <div className={`font-normal text-[10px] ${st.faint}`}>{c.endpoint}</div>}{c.description && <div className={`font-normal text-[10px] ${st.faint}`}>{c.description}</div>}</td>
                   <td className="px-3 py-2 whitespace-nowrap">{kindLabel(c.kind)}</td>
                   <td className="px-3 py-2 break-words max-w-[160px]">{c.owner}</td>
                   <td className="px-3 py-2 whitespace-nowrap">{tierLabel(c.tier)}</td>
@@ -733,6 +1014,7 @@ export const DependencyRegisterSection: React.FC = () => {
               ))}
             </tbody>
           </table>
+          <Pagination page={entryPaging.page} totalPages={entryPaging.totalPages} total={entryPaging.total} pageSize={entryPaging.pageSize} onPage={entryPaging.setPage} />
         </div>
       )}
 
@@ -742,15 +1024,22 @@ export const DependencyRegisterSection: React.FC = () => {
           {dependencyLinks.length === 0 ? (
             <div className={`text-xs ${st.muted}`}>No dependencies recorded. Use “Add dependency” to record that A depends on B.</div>
           ) : (
+            <>
             <ul className="space-y-1.5" aria-label="Dependencies">
-              {dependencyLinks.map(l => (
+              {linkPaging.slice.map(l => (
                 <li key={l.id} className={`flex items-start justify-between gap-2 text-xs font-mono border-b last:border-b-0 pb-1.5 ${st.row}`}>
                   <div className="min-w-0 break-words">
                     <b>{name(l.fromId)}</b> → <b>{name(l.toId)}</b>{' '}
                     <span className={st.faint}>consumer → provider</span>{' '}
                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${l.type === 'HARD' ? 'bg-rose-500/15 text-rose-500' : 'bg-amber-500/15 text-amber-500'}`}>{l.type}</span>
-                    <span className={st.faint}> · {methodLabel(l.method)}</span>
+                    {(l.method || l.criticality) && <span className={st.faint}> · {[methodLabel(l.method), criticalityLabel(l.criticality)].filter(Boolean).join(' · ')}</span>}
                     {l.featureId && <span className={st.muted}> · feature {name(l.featureId)}</span>}
+                    {l.failureBehaviour && <div className={`text-[10px] ${st.faint}`}>Users see: {l.failureBehaviour}</div>}
+                    {(l.owner || l.recoveryExpectation || l.healthCheck) && (
+                      <div className={`text-[10px] ${st.faint}`}>
+                        {[l.owner ? `Owner ${l.owner}` : '', l.healthCheck ? `check ${l.healthCheck}` : '', l.recoveryExpectation ? `recovery ${l.recoveryExpectation}` : ''].filter(Boolean).join(' · ')}
+                      </div>
+                    )}
                     {l.notes && <div className={`text-[10px] ${st.faint}`}>{l.notes}</div>}
                   </div>
                   {isAdmin && (confirmUnlink === l.id ? (
@@ -768,6 +1057,8 @@ export const DependencyRegisterSection: React.FC = () => {
                 </li>
               ))}
             </ul>
+            <Pagination page={linkPaging.page} totalPages={linkPaging.totalPages} total={linkPaging.total} pageSize={linkPaging.pageSize} onPage={linkPaging.setPage} />
+            </>
           )}
         </div>
       )}

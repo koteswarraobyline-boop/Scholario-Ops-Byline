@@ -1000,9 +1000,13 @@ function registrySignals(app: Application): Array<{ id: string; name: string; ha
   const out: Array<{ id: string; name: string; hard: boolean; status: OperationalStatus; type: AppDependency['type']; lastChecked: string; target: string }> = [];
   for (const link of db.dependencyLinks) {
     if (!rootIds.has(link.fromId)) continue;
+    // A soft link that names a feature stops that feature only. It does not change the application status.
+    if (link.type === 'SOFT' && (link.featureId || db.registry.find(c => c.id === link.fromId)?.kind === 'BUSINESS_FEATURE')) continue;
+    const target = db.registry.find(c => c.id === link.toId);
+    // The application's own PRD or DR server is hosting. It must not change application status.
+    if (target?.kind === 'SERVER' && target.serverId && (target.serverId === app.prdServerId || target.serverId === app.drServerId)) continue;
     const found = evidenceFor(link.toId, app.id);
     if (!found) continue;
-    const target = db.registry.find(c => c.id === link.toId);
     const type: AppDependency['type'] = target?.kind === 'DATABASE' ? 'DATABASE' : target?.kind === 'STORAGE' ? 'STORAGE' : 'EXTERNAL_API';
     out.push({
       id: link.id,
@@ -1102,7 +1106,8 @@ export function recomputeDerived() {
   for (const srv of db.servers) if (recomputeServer(srv)) serversChanged = true;
   let appsChanged = false;
   for (const app of db.applications) if (recomputeApplication(app)) appsChanged = true;
-  if (updateMaintenanceStatuses()) persist();
+  const maintenanceChanged = updateMaintenanceStatuses();
+  if (maintenanceChanged || serversChanged || appsChanged) persist();
   if (serversChanged) broadcast('servers_changed', null);
   if (appsChanged) broadcast('applications_changed', null);
 }

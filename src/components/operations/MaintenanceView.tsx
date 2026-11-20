@@ -4,6 +4,7 @@ import { useAuth } from '../../context/AuthContext';
 import { ImpactPreview, MaintenanceWindow } from '../../types';
 import { Calendar, BellOff, Plus, X, CheckCircle2, Trash2, Info } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 import { ImpactPreviewCard } from '../ui/ImpactPreviewCard';
 import { api } from '../../services/api';
 
@@ -204,6 +205,7 @@ export const MaintenanceView: React.FC = () => {
   const [editing, setEditing] = useState<MaintenanceWindow | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const windowPaging = useClientPagination(maintenanceWindows, 10);
 
   const withBusy = async (key: string, fn: () => Promise<unknown>) => {
     setBusy(key);
@@ -220,12 +222,7 @@ export const MaintenanceView: React.FC = () => {
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
       }`}>
         <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">
-            MAINTENANCE WINDOWS &amp; ALERT SILENCING
-          </h1>
-          <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            Planned work during which selected monitors do not open incidents
-          </p>
+          <h1 className="text-lg font-bold tracking-tight">Maintenance</h1>
         </div>
         {isOperator && !showForm && (
           <button
@@ -262,8 +259,9 @@ export const MaintenanceView: React.FC = () => {
           action={isOperator && !showForm && applications.length > 0 ? { label: 'Schedule window', onClick: () => setShowForm(true) } : undefined}
         />
       ) : (
+        <>
         <div className="space-y-3 font-mono text-xs">
-          {maintenanceWindows.map(m => {
+          {windowPaging.slice.map(m => {
             const app = applications.find(a => a.id === m.applicationId);
             const active = m.status === 'SCHEDULED' || m.status === 'IN_PROGRESS';
             const suppressed = m.suppressMonitors ?? [];
@@ -367,6 +365,8 @@ export const MaintenanceView: React.FC = () => {
             );
           })}
         </div>
+        <Pagination page={windowPaging.page} totalPages={windowPaging.totalPages} total={windowPaging.total} pageSize={windowPaging.pageSize} onPage={windowPaging.setPage} />
+        </>
       )}
     </div>
   );

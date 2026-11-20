@@ -6,6 +6,7 @@ import type { ImpactPreview, Incident, QuotaWindow, ResourceKind, ResourceMeasur
 import { useAuth } from '../../context/AuthContext';
 import { useOps } from '../../context/OpsContext';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 import { ImpactPreviewCard } from '../ui/ImpactPreviewCard';
 
 const KINDS: ResourceKind[] = ['CPU', 'MEMORY', 'SERVER_DISK', 'STORAGE', 'SEATS', 'ACTIVE_USERS', 'DATABASE_SIZE', 'DATABASE_CONNECTIONS', 'API_QUOTA', 'LOAD'];
@@ -62,6 +63,7 @@ export const ResourcesView: React.FC = () => {
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState({ kind: 'STORAGE' as ResourceKind, name: '', owner: '', unit: 'GiB' as ResourceUnit, capacity: '', warningValue: '85', criticalValue: '95', quotaWindow: 'hour' as QuotaWindow });
   const [usage, setUsage] = useState('');
+  const resourcePaging = useClientPagination(rows, 10, `${kind}|${status}|${q}|${owner}`);
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -248,9 +250,9 @@ export const ResourcesView: React.FC = () => {
     <div className="p-4 md:p-6 space-y-4 max-w-6xl">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-sm font-mono font-bold tracking-wide">Resource capacity</h1>
-          <p className={`text-[11px] mt-1 max-w-xl ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-            Purchased limits and measured usage are separate. An empty usage is not zero, and a user count is not a seat licence.
+          <h1 className="text-lg font-bold tracking-tight">Capacity</h1>
+          <p className={`text-xs mt-0.5 max-w-xl ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+            A blank usage has not been measured. It is not zero.
           </p>
         </div>
         {canEdit && (
@@ -325,6 +327,7 @@ export const ResourcesView: React.FC = () => {
       )}
 
       {!loading && rows.length > 0 && (
+        <>
         <div className="overflow-x-auto rounded border border-[#1E293B]">
           <table className="w-full text-xs font-mono">
             <thead className={isDark ? 'text-slate-500' : 'text-slate-500'}>
@@ -340,7 +343,7 @@ export const ResourcesView: React.FC = () => {
               </tr>
             </thead>
             <tbody>
-              {rows.map(r => (
+              {resourcePaging.slice.map(r => (
                 <tr key={r.id} className={`border-t cursor-pointer ${isDark ? 'border-[#1E293B] hover:bg-[#151D2E]' : 'border-slate-200 hover:bg-slate-50'}`} onClick={() => { void openRow(r); }}>
                   <td className="px-3 py-2">
                     <button type="button" className="text-left cursor-pointer" onClick={() => { void openRow(r); }}>
@@ -360,6 +363,8 @@ export const ResourcesView: React.FC = () => {
             </tbody>
           </table>
         </div>
+        <Pagination page={resourcePaging.page} totalPages={resourcePaging.totalPages} total={resourcePaging.total} pageSize={resourcePaging.pageSize} onPage={resourcePaging.setPage} />
+        </>
       )}
 
       {selected && (

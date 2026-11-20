@@ -502,6 +502,13 @@ describe('operator checks, SLA buckets, reports, maintenance, runbooks, and back
     const softened = await api('GET', `/api/v1/applications/${upId}`);
     assert.equal(softened.body.data.status, 'WARNING');
     assert.notEqual(softened.body.data.status, 'CRITICAL');
+    const removed = await api('DELETE', `/api/v1/applications/${downId}`);
+    assert.equal(removed.status, 200, removed.raw);
+    const cleared = await api('GET', `/api/v1/applications/${upId}`);
+    assert.equal(cleared.body.data.status, 'HEALTHY', 'deleting the provider application drops the dependency status');
+    assert.equal(cleared.body.data.dependencies.some((d: { name: string }) => /\((HARD|SOFT)\)/.test(d.name)), false);
+    const still = cleared.body.data.serviceDependencies.outgoing as Array<{ type: string; otherApplicationId: string | null }>;
+    assert.equal(still.some(l => l.type === 'SOFT' && l.otherApplicationId === null), true, 'the register link remains; the application reference is cleared');
   });
 
   test('two applications can share one PRD server; each keeps its own status', async () => {

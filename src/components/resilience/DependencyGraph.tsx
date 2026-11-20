@@ -3,6 +3,7 @@ import { api } from '../../services/api';
 import type { DemoVisual } from '../../mocks/dependencyDemoData';
 import { demoVisualLabel } from '../../mocks/dependencyDemoData';
 import type { Application, DependencyLink, OperationalStatus, RegistryComponent, RegistryPaths, VpsServer } from '../../types';
+import { dependencyMethodLabel } from '../../lib/serviceDependencies';
 
 const NODE_W = 168;
 const NODE_H = 46;
@@ -407,7 +408,7 @@ export const DependencyGraph: React.FC<Props> = ({
               const path = sameColumn
                 ? `M ${from.x + NODE_W / 2} ${from.y + NODE_H} C ${from.x + NODE_W / 2} ${from.y + NODE_H + 36}, ${to.x + NODE_W / 2} ${to.y + NODE_H + 36}, ${to.x + NODE_W / 2} ${to.y + NODE_H}`
                 : `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
-              const label = `${link.type} · ${link.method ?? 'method not recorded'}`;
+              const label = [link.type, dependencyMethodLabel(link.method)].join(' · ');
               return (
                 <path
                   key={link.id}
@@ -470,15 +471,20 @@ export const DependencyGraph: React.FC<Props> = ({
       </div>
       {dependencyLinks.length === 0 && (
         <p className={`text-xs ${muted}`}>
-          No service dependency has been recorded. An empty register is not proof that nothing depends on anything else. Hosting stays in the section below.
+          No dependencies recorded yet.
         </p>
       )}
       {selected && (
         <div className={`rounded border p-3 text-xs space-y-2 ${isDark ? 'border-[#1E293B] bg-[#0B0F17]' : 'border-slate-200 bg-slate-50'}`}>
           <div className={`font-semibold ${ink}`}>{selected.name}</div>
           <div className={muted}>
-            {selected.kind.replaceAll('_', ' ')} · {selected.owner || 'Owner not recorded'} · {selected.tier}
-            {selected.userCount != null ? ` · ${selected.userCount.toLocaleString()} users recorded` : ' · user count not recorded'}
+            {[
+              selected.kind.replaceAll('_', ' '),
+              selected.owner,
+              selected.tier,
+              selected.userCount != null ? `${selected.userCount.toLocaleString()} users` : '',
+              selected.endpoint,
+            ].filter(Boolean).join(' · ')}
           </div>
           {(() => {
             const shown = visualStatus?.get(selected.id);
@@ -495,29 +501,29 @@ export const DependencyGraph: React.FC<Props> = ({
             const dr = live ? servers.find(server => server.id === live.drServerId) : undefined;
             return (
               <>
-                <div className={statusInk(shownTone)}>Shown status: {shownLabel}</div>
+                <div className={statusInk(shownTone)}>Status: {shownLabel}</div>
                 {live && (
                   <div className={muted}>
-                    Live application record: {live.tier.replace('_', ' ')} · runs on {prd?.hostname ?? 'no production server'} / {dr?.hostname ?? 'no recovery server'}. Hosting is not a service dependency.
+                    Runs on {prd?.hostname ?? 'no production server'} / {dr?.hostname ?? 'no recovery server'}.
                   </div>
                 )}
               </>
             );
           })()}
           <div>
-            <div className={`font-semibold ${muted}`}>Depends on (this consumer → provider)</div>
+            <div className={`font-semibold ${muted}`}>Depends on</div>
             {dependencyLinks.filter(l => l.fromId === selected.id).length === 0
-              ? <div className={muted}>None recorded.</div>
+              ? <div className={muted}>Nothing recorded. This does not mean there are no dependencies.</div>
               : dependencyLinks.filter(l => l.fromId === selected.id).map(l => (
-                <div key={l.id}>{selected.name} → {nameOf(l.toId)} · {l.type} · {l.method ?? 'method not recorded'}{l.notes ? ` · ${l.notes}` : ''}</div>
+                <div key={l.id}>{selected.name} → {nameOf(l.toId)} · {[l.type, dependencyMethodLabel(l.method), l.featureId ? `feature ${nameOf(l.featureId)}` : '', l.criticality, l.failureBehaviour ? `users see ${l.failureBehaviour}` : '', l.notes || 'rationale not recorded'].filter(Boolean).join(' · ')}</div>
               ))}
           </div>
           <div>
-            <div className={`font-semibold ${muted}`}>Failure leaves this provider toward</div>
+            <div className={`font-semibold ${muted}`}>Used by</div>
             {dependencyLinks.filter(l => l.toId === selected.id).length === 0
-              ? <div className={muted}>None recorded.</div>
+              ? <div className={muted}>Nothing recorded. This does not mean nothing depends on it.</div>
               : dependencyLinks.filter(l => l.toId === selected.id).map(l => (
-                <div key={l.id}>{selected.name} → {nameOf(l.fromId)} · {l.type} · {l.method ?? 'method not recorded'}{l.featureId ? ` · feature ${nameOf(l.featureId)}` : ''}</div>
+                <div key={l.id}>{nameOf(l.fromId)} → {selected.name} · {[l.type, dependencyMethodLabel(l.method), l.criticality, l.featureId ? `feature ${nameOf(l.featureId)}` : '', l.failureBehaviour ? `users see ${l.failureBehaviour}` : '', l.notes || 'rationale not recorded'].filter(Boolean).join(' · ')}</div>
               ))}
           </div>
           <div className={`space-y-1 break-words ${muted}`}>
@@ -525,9 +531,8 @@ export const DependencyGraph: React.FC<Props> = ({
             {pathError && <div className="text-rose-500">{pathError}</div>}
             {paths && (
               <>
-                <div>Upstream: {paths.upstream.length === 0 ? 'none recorded' : paths.upstream.map(n => `${n.name} (${n.status}, ${n.via})`).join(' · ')}</div>
-                <div>Downstream: {paths.downstream.length === 0 ? 'none recorded' : paths.downstream.map(n => `${n.name} (${n.status}, ${n.via})`).join(' · ')}</div>
-                <div>UNKNOWN on a path is not a failure.</div>
+                <div>Upstream: {paths.upstream.length === 0 ? 'none' : paths.upstream.map(n => `${n.name} (${n.status}, ${n.via})`).join(' · ')}</div>
+                <div>Downstream: {paths.downstream.length === 0 ? 'none' : paths.downstream.map(n => `${n.name} (${n.status}, ${n.via})`).join(' · ')}</div>
               </>
             )}
           </div>

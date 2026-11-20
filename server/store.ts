@@ -380,22 +380,26 @@ const TABLES: TableDef<unknown>[] = [
   // Links before components: removed links must be gone before a component delete lets
   // PostgreSQL null their feature_id, which could otherwise collide with a remaining link
   {
-    table: 'dependency_links', key: ['id'], columns: ['id', 'from_id', 'to_id', 'link_type', 'feature_id', 'method', 'notes', 'created_at', 'updated_at'],
-    rows: d => d.dependencyLinks.map(l => ({ k: l.id, values: [l.id, l.fromId, l.toId, l.type, uuidOrNull(l.featureId), l.method, l.notes, l.createdAt, l.updatedAt] })),
+    table: 'dependency_links', key: ['id'], columns: ['id', 'from_id', 'to_id', 'link_type', 'feature_id', 'method', 'criticality', 'health_check', 'failure_behaviour', 'owner', 'recovery_expectation', 'notes', 'created_at', 'updated_at'],
+    rows: d => d.dependencyLinks.map(l => ({ k: l.id, values: [l.id, l.fromId, l.toId, l.type, uuidOrNull(l.featureId), l.method, l.criticality, l.healthCheck, l.failureBehaviour, l.owner, l.recoveryExpectation, l.notes, l.createdAt, l.updatedAt] })),
     load: (rows, d) => {
       d.dependencyLinks = rows.map(r => ({
         id: r.id as string, fromId: r.from_id as string, toId: r.to_id as string, type: r.link_type as DependencyLink['type'],
-        featureId: (r.feature_id as string) ?? null, method: (r.method as DependencyLink['method']) ?? null, notes: r.notes as string,
+        featureId: (r.feature_id as string) ?? null, method: (r.method as DependencyLink['method']) ?? null,
+        criticality: (r.criticality as DependencyLink['criticality']) ?? null,
+        healthCheck: (r.health_check as string) ?? '', failureBehaviour: (r.failure_behaviour as string) ?? '',
+        owner: (r.owner as string) ?? '', recoveryExpectation: (r.recovery_expectation as string) ?? '',
+        notes: r.notes as string,
         createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
       })).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     },
   },
   {
     table: 'registry_components', key: ['id'],
-    columns: ['id', 'kind', 'name', 'name_key', 'owner', 'tier', 'description', 'application_id', 'server_id', 'user_count', 'served', 'created_at', 'updated_at'],
+    columns: ['id', 'kind', 'name', 'name_key', 'owner', 'tier', 'description', 'application_id', 'server_id', 'user_count', 'served', 'endpoint', 'created_at', 'updated_at'],
     rows: d => d.registry.map(c => ({
       k: c.id,
-      values: [c.id, c.kind, c.name, registryNameKey(c.name), c.owner, c.tier, c.description, uuidOrNull(c.applicationId), uuidOrNull(c.serverId), c.userCount, JSON.stringify(c.served), c.createdAt, c.updatedAt],
+      values: [c.id, c.kind, c.name, registryNameKey(c.name), c.owner, c.tier, c.description, uuidOrNull(c.applicationId), uuidOrNull(c.serverId), c.userCount, JSON.stringify(c.served), c.endpoint ?? '', c.createdAt, c.updatedAt],
     })),
     // e.g. keys backfilled by migration 008 with PostgreSQL's lower()
     stale: rows => rows.filter(r => r.name_key !== registryNameKey(r.name as string)).map(r => r.id as string),
@@ -403,7 +407,7 @@ const TABLES: TableDef<unknown>[] = [
       d.registry = rows.map(r => ({
         id: r.id as string, kind: r.kind as RegistryComponent['kind'], name: r.name as string, owner: r.owner as string, tier: r.tier as RegistryComponent['tier'],
         description: r.description as string, applicationId: (r.application_id as string) ?? null, serverId: (r.server_id as string) ?? null,
-        userCount: num(r.user_count), served: (r.served as string[]) ?? [], createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
+        userCount: num(r.user_count), served: (r.served as string[]) ?? [], endpoint: (r.endpoint as string) ?? '', createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
       })).sort((a, b) => a.name.localeCompare(b.name));
     },
   },

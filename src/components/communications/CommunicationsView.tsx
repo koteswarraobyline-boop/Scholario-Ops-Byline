@@ -18,8 +18,8 @@ import {
   Radio,
 } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
+import { Pagination, useClientPagination } from '../ui/Pagination';
 import { DeliveryLog, useDeliveryStats } from './DeliveryLog';
-import { MockIncidentPanel } from './MockIncidentPanel';
 import { NotificationHealthCard } from './NotificationHealthCard';
 import { api } from '../../services/api';
 
@@ -138,6 +138,7 @@ export const CommunicationsView: React.FC = () => {
   const [isProbingHealth, setIsProbingHealth] = useState(false);
   const [editor, setEditor] = useState<{ id: string | null; draft: ChannelDraft } | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const channelPaging = useClientPagination(communicationChannels, 10);
 
   const [policyDraft, setPolicyDraft] = useState(() => policiesToDraft(escalationPolicies));
   const [policyDirty, setPolicyDirty] = useState(false);
@@ -299,12 +300,7 @@ export const CommunicationsView: React.FC = () => {
         isDark ? 'border-[#1E293B]' : 'border-slate-200'
       }`}>
         <div>
-          <h1 className="text-lg font-bold font-mono tracking-tight">
-            NOTIFICATIONS &amp; ESCALATION
-          </h1>
-          <p className={`text-xs font-mono ${muted}`}>
-            Notification channels for incident alerts and which channels each severity pages
-          </p>
+          <h1 className="text-lg font-bold tracking-tight">Notifications</h1>
         </div>
 
         <div className={`flex items-center gap-2 px-2.5 py-1 rounded text-xs font-mono border ${
@@ -453,8 +449,6 @@ export const CommunicationsView: React.FC = () => {
         </div>
       )}
 
-      {isOperator && <MockIncidentPanel isDark={isDark} cardCls={cardCls} muted={muted} />}
-
       {/* Delivery health (operators+): success rate, retries, latency, waiting, failing channels */}
       {isOperator && <NotificationHealthCard />}
 
@@ -549,8 +543,9 @@ export const CommunicationsView: React.FC = () => {
             action={isAdmin && !editor ? { label: 'Add channel', onClick: openCreate } : undefined}
           />
         ) : (
+          <>
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 font-mono text-xs">
-            {communicationChannels.map(ch => {
+            {channelPaging.slice.map(ch => {
               const lastDelivery = fmtDateTime(ch.lastDeliveryAt);
               const statusColor = ch.lastDeliveryStatus === 'DELIVERED' ? 'text-emerald-500' : ch.lastDeliveryStatus === 'FAILED' ? 'text-rose-500' : 'text-slate-400';
               const confirming = confirmDeleteId === ch.id;
@@ -657,6 +652,8 @@ export const CommunicationsView: React.FC = () => {
               );
             })}
           </div>
+          <Pagination page={channelPaging.page} totalPages={channelPaging.totalPages} total={channelPaging.total} pageSize={channelPaging.pageSize} onPage={channelPaging.setPage} />
+          </>
         )}
       </div>
 

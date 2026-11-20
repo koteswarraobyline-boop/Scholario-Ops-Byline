@@ -2,8 +2,6 @@ import React, { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { OpsProvider, useOps } from './context/OpsContext';
-import { DependencyDemoProvider } from './context/DependencyDemoContext';
-
 import { Shell } from './components/layout/Shell';
 import { LoginPage } from './components/auth/LoginPage';
 import { ViewErrorBoundary } from './components/ui/ViewErrorBoundary';
@@ -19,6 +17,7 @@ const IncidentsView = lazy(() => import('./components/incidents/IncidentsView').
 const DrDashboardView = lazy(() => import('./components/resilience/DrDashboardView').then(m => ({ default: m.DrDashboardView })));
 const BackupsView = lazy(() => import('./components/resilience/BackupsView').then(m => ({ default: m.BackupsView })));
 const DependencyMapView = lazy(() => import('./components/resilience/DependencyMapView').then(m => ({ default: m.DependencyMapView })));
+const DependencyRegisterView = lazy(() => import('./components/dependencies/DependencyRegisterView').then(m => ({ default: m.DependencyRegisterView })));
 const HostingerView = lazy(() => import('./components/providers/HostingerView').then(m => ({ default: m.HostingerView })));
 const CloudflareView = lazy(() => import('./components/providers/CloudflareView').then(m => ({ default: m.CloudflareView })));
 const DeploymentsView = lazy(() => import('./components/operations/DeploymentsView').then(m => ({ default: m.DeploymentsView })));
@@ -76,6 +75,7 @@ const DashboardView: React.FC<{ tab: string }> = ({ tab }) => {
     resilience:     <DrDashboardView />,
     backups:        <BackupsView />,
     dependencies:   <DependencyMapView />,
+    'dependency-register': <DependencyRegisterView />,
     hostinger:      <HostingerView />,
     cloudflare:     <CloudflareView />,
     deployments:    <DeploymentsView />,
@@ -114,9 +114,7 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <OpsProvider>
-                  <DependencyDemoProvider>
-                    <DashboardRoutes />
-                  </DependencyDemoProvider>
+                  <DashboardRoutes />
                 </OpsProvider>
               </ProtectedRoute>
             }
@@ -142,6 +140,7 @@ const DashboardRoutes: React.FC = () => (
     <Route path="/resilience"    element={<DashboardView tab="resilience" />} />
     <Route path="/backups"       element={<DashboardView tab="backups" />} />
     <Route path="/dependencies"  element={<DashboardView tab="dependencies" />} />
+    <Route path="/dependency-register" element={<DashboardView tab="dependency-register" />} />
     <Route path="/hostinger"     element={<DashboardView tab="hostinger" />} />
     <Route path="/cloudflare"    element={<DashboardView tab="cloudflare" />} />
     <Route path="/deployments"   element={<DashboardView tab="deployments" />} />

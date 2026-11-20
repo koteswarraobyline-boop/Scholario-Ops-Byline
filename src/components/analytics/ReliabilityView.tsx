@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Gauge, HardDrive, MemoryStick, Activity, RefreshCw, TrendingUp, TrendingDown, Minus } from 'lucide-react';
+import { Gauge, HardDrive, MemoryStick, Activity, TrendingUp, TrendingDown, Minus } from 'lucide-react';
 import { useOps } from '../../context/OpsContext';
 import { api } from '../../services/api';
 import { ErrorState } from '../ui/ErrorState';
@@ -23,18 +23,14 @@ export const ReliabilityView: React.FC = () => {
   const isDark = theme === 'dark';
   const navigate = useNavigate();
   const [data, setData] = useState<ReliabilityInsights | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
 
   const load = useCallback(async () => {
-    setLoading(true);
     try {
       setData(await api.getInsights());
       setError(null);
     } catch (e) {
       setError(e);
-    } finally {
-      setLoading(false);
     }
   }, []);
 
@@ -81,19 +77,11 @@ export const ReliabilityView: React.FC = () => {
     <div className="space-y-5">
       <div className={`flex flex-wrap items-center justify-between gap-3 pb-3 border-b ${isDark ? 'border-[#1E293B]' : 'border-slate-200'}`}>
         <div className="min-w-0">
-          <h1 className="text-lg font-bold font-mono tracking-tight">RELIABILITY &amp; CAPACITY</h1>
-          <p className={`text-xs font-mono mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-            SLO error budgets, capacity forecasts and flapping checks — computed from recorded checks and agent metrics
-            {data ? ` · updated ${new Date(data.generatedAt).toLocaleTimeString()}` : ''}
+          <h1 className="text-lg font-bold tracking-tight">Reliability</h1>
+          <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            Error budgets for the last 30 days{data ? ` · updated ${new Date(data.generatedAt).toLocaleTimeString()}` : ''}
           </p>
         </div>
-        <button
-          onClick={() => void load()}
-          disabled={loading}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded border text-xs font-mono cursor-pointer disabled:opacity-50 ${isDark ? 'bg-[#111726] border-[#1E293B] text-slate-300 hover:text-white' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50 shadow-xs'}`}
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />Refresh
-        </button>
       </div>
 
       {error && !data ? <ErrorState error={error} onRetry={() => void load()} /> : !data ? (
@@ -102,7 +90,7 @@ export const ReliabilityView: React.FC = () => {
         <>
           {/* SLO error budgets */}
           <section className="space-y-2">
-            <h2 className={sectionTitle}>SLO error budget · 30 days · PRD monitors</h2>
+            <h2 className={sectionTitle}>Error budget, last 30 days</h2>
             {data.applications.length === 0 ? (
               <EmptyState icon={Gauge} title="No applications registered" description="Register an application and its monitors in Setup to track its SLO." action={{ label: 'Open Setup', onClick: () => navigate('/setup') }} />
             ) : (

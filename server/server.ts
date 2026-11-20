@@ -33,6 +33,7 @@ import { syncLoadBalancers } from './loadbalancer.ts';
 import { syncWorkers } from './workers.ts';
 import { closeAllSseClients } from './events.ts';
 import { log } from './logger.ts';
+import { apiError } from './validate.ts';
 import { evaluateAlerts } from './alerts.ts';
 import { syncAllServerPlans } from './resources.ts';
 
@@ -93,7 +94,7 @@ function rateLimit(req: express.Request, res: express.Response, next: express.Ne
   if (!e || e.reset < now) { hits.set(key, { n: 1, reset: now + RATE_WINDOW_MS }); return next(); }
   if (++e.n > RATE_MAX) {
     res.setHeader('Retry-After', String(Math.ceil((e.reset - now) / 1000)));
-    res.status(429).json({ success: false, message: 'Too many requests — slow down and try again in a minute' });
+    res.status(429).json(apiError(429, 'Too many requests — slow down and try again in a minute'));
     return;
   }
   next();
@@ -249,7 +250,7 @@ async function main() {
   app.use('/api', (_req, res, next) => {
     if (storeReady) return next();
     res.setHeader('Retry-After', '5');
-    res.status(503).json({ success: false, message: 'Scholario Ops is starting — waiting for the database' });
+    res.status(503).json(apiError(503, 'Scholario Ops is starting — waiting for the database'));
   });
 
   app.use('/api', rateLimit);
@@ -258,8 +259,8 @@ async function main() {
   app.use(express.json({ limit: '1mb' }));
   app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
     const type = (err as { type?: string }).type;
-    if (type === 'entity.parse.failed') { res.status(400).json({ success: false, message: 'Request body is not valid JSON' }); return; }
-    if (type === 'entity.too.large') { res.status(413).json({ success: false, message: 'Request body is too large' }); return; }
+    if (type === 'entity.parse.failed') { res.status(400).json(apiError(400, 'Request body is not valid JSON')); return; }
+    if (type === 'entity.too.large') { res.status(413).json(apiError(413, 'Request body is too large')); return; }
     next(err);
   });
 
@@ -292,7 +293,7 @@ async function main() {
   // Last-resort error handler: never leak stack traces
   app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
     log.error('http', 'unhandled error', { path: req.originalUrl.split('?')[0], error: err as Error });
-    if (!res.headersSent) res.status(500).json({ success: false, message: 'Internal server error' });
+    if (!res.headersSent) res.status(500).json(apiError(500, 'Internal server error'));
   });
 
   const server = http.createServer(app);

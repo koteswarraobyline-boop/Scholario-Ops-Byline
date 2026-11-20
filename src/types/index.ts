@@ -1197,12 +1197,20 @@ export interface RegistryComponent {
   userCount: number | null;
   /** Teams or customers served (APPLICATION and BUSINESS_FEATURE only) */
   served: string[];
+  /**
+   * Host, URL, or bucket for this entry. Empty means not recorded.
+   * A database host, an API URL, a storage bucket, or an external service address. Not a password.
+   */
+  endpoint: string;
   createdAt: string;
   updatedAt: string;
 }
 
 /** How the consumer reaches the provider. Null means the method has not been recorded. */
 export type DependencyMethod = 'HTTP' | 'API' | 'DATABASE' | 'EMBED' | 'LINK' | 'OTHER';
+
+/** How severe this dependency is. Null means criticality has not been recorded. */
+export type DependencyCriticality = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
 
 /** "from depends on to". HARD: from stops working without to. SOFT: from is degraded. */
 export interface DependencyLink {
@@ -1214,9 +1222,68 @@ export interface DependencyLink {
   featureId: string | null;
   /** Null when the operator has not recorded how the consumer reaches the provider. */
   method: DependencyMethod | null;
+  /** Null when criticality has not been recorded. */
+  criticality: DependencyCriticality | null;
+  /** How an owner checks that the provider is up. Empty means not recorded. Not a secret. */
+  healthCheck: string;
+  /** What users see or can no longer do when this dependency fails. Empty means not recorded. */
+  failureBehaviour: string;
+  /** Person or team accountable for this dependency. Empty means not recorded. */
+  owner: string;
+  /** What recovery is expected after this dependency fails. Empty means not recorded. */
+  recoveryExpectation: string;
   notes: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Register links for one application record. Not the derived monitor list on `Application.dependencies`. */
+export interface ApplicationServiceDependency {
+  id: string;
+  direction: 'outgoing' | 'incoming';
+  type: 'HARD' | 'SOFT';
+  method: DependencyMethod | null;
+  notes: string;
+  featureId: string | null;
+  featureName: string | null;
+  otherId: string;
+  otherName: string;
+  otherKind: RegistryKind | null;
+  /** Application record at the other end, when that end is bound to one. */
+  otherApplicationId: string | null;
+  /** Host, URL, or bucket recorded on the other end. Empty means not recorded. */
+  otherEndpoint: string;
+  criticality: DependencyCriticality | null;
+  healthCheck: string;
+  failureBehaviour: string;
+  owner: string;
+  recoveryExpectation: string;
+  status: RegistryLiveStatus;
+}
+
+/** One feature of an application and the dependencies recorded for that feature. */
+export interface ApplicationFeatureUsage {
+  id: string;
+  name: string;
+  owner: string;
+  uses: ApplicationServiceDependency[];
+}
+
+export interface ApplicationServiceDependencies {
+  applicationId: string;
+  /** APPLICATION register entry for this application, or null when it has not been recorded. */
+  componentId: string | null;
+  /**
+   * Links that can change this application.
+   * Hard stops it, including a Hard link that names a feature or starts from a feature.
+   * Soft with no feature only degrades it.
+   * Soft that names a feature, or a Soft link from a feature, is omitted.
+   */
+  applicationLevel: ApplicationServiceDependency[];
+  /** Business features recorded for this application. An empty list is valid. */
+  features: ApplicationFeatureUsage[];
+  outgoing: ApplicationServiceDependency[];
+  incoming: ApplicationServiceDependency[];
 }
 
 export interface RegistryImpact {
